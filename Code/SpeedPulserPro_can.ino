@@ -32,7 +32,7 @@ void onBodyRX(const CAN_message_t& frame) {
       break;
 
     case MOTOR2_ID:
-      vehicleSpeedCAN = (frame.buf[3] * 100 * 128) / 10000;
+      ecuSpeed = (frame.buf[3] * 100 * 128) / 10000;
       break;
 
     case MOTOR5_ID:
@@ -55,7 +55,7 @@ void onBodyRX(const CAN_message_t& frame) {
       break;
 
     case BRAKES3_ID:
-      vehicleSpeedCAN = ((frame.buf[3] << 8) | frame.buf[2]) * 1.28;  // conversion: 0.25*HEX
+      absSpeed = ((frame.buf[3] << 8) | frame.buf[2]) * 1.28;  // conversion: 0.25*HEX
       break;
 
     case mWaehlhebel_1_ID:
@@ -89,7 +89,7 @@ void onBodyRX(const CAN_message_t& frame) {
       break;
 
     case emeraldECU2_ID:
-      vehicleSpeed = ((frame.buf[2] << 8) | frame.buf[3]) * (2.25 / 256);  // conversion: 0.25*HEX // this is RPM
+      ecuSpeed = ((frame.buf[2] << 8) | frame.buf[3]) * (2.25 / 256);  // conversion: 0.25*HEX // this is RPM
       break;
 
     default:

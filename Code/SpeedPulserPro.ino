@@ -24,8 +24,11 @@ TinyGPSPlus gps;
 
 TickTwo tickEEP(writeEEP, eepRefresh);               // refresh EEP
 TickTwo tickWiFiLabels(updateLabels, labelRefresh);  // refresh EEP
-TickTwo tickWiFi(disconnectWifi, wifiDisable);       // timer for disconnecting wifi after (wifiDisable) if no connections - saves power
 Preferences pref;                                    // to record previously saved settings
+
+//create an object from the UpdateServer
+ESPAsyncHTTPUpdateServer updateServer;
+AsyncWebServer server(80);
 
 hw_timer_t* timer0 = NULL;
 bool rpmTrigger = true;
@@ -91,21 +94,21 @@ void setup() {
     needleSweep();  // enable needle sweep (in _io.ino).  Get this done immediately after setup so there isn't a visible 'lag'
   }
 
-  tickEEP.start();   // begin ticker for the EEPROM
-  tickWiFi.start();  // begin ticker for the WiFi (to turn off after 60s)
+  tickEEP.start();  // begin ticker for the EEPROM
   tickWiFiLabels.start();
 
   motorPWM->setPWM(pinMotorOutput, pwmFrequency, dutyCycle);  // set motor to off in first instance (100% duty)
 
-  connectWifi();                       // enable / start WiFi
-  WiFi.setSleep(false);                // for the ESP32: turn off sleeping to increase UI responsivness (at the cost of power use)
-  setupUI();                           // setup wifi user interface
-  WiFi.setTxPower(WIFI_POWER_8_5dBm);  // set a lower power mode (some C3 aerials aren't great and leaving it high causes failures)
+  connectWifi();         // enable / start WiFi
+  WiFi.setSleep(false);  // for the ESP32: turn off sleeping to increase UI responsivness (at the cost of power use)
+  setupUI();             // setup wifi user interface
+  setupOTA();            // setup Over-the-Air updates
+
+  //WiFi.setTxPower(WIFI_POWER_8_5dBm);  // set a lower power mode (some C3 aerials aren't great and leaving it high causes failures)
 }
 
 void loop() {
-  tickEEP.update();   // refresh the EEP ticker
-  tickWiFi.update();  // refresh the WiFi ticker
+  tickEEP.update();  // refresh the EEP ticker
   tickWiFiLabels.update();
 
   parseGPS();  // check for GPS updates - not an issue if not connected
@@ -132,7 +135,7 @@ void loop() {
 #if serialDebugIncoming
       DEBUG_PRINTF("     DutyIncomingHall: %d", dutyCycleIncoming);  // what is the incoming pulse count?
 #endif
-      dutyCycleIncoming = map(dutyCycleIncoming, minFreqHall, maxFreqHall, minSpeed, maxSpeed);  // map incoming range to this codes range.  Max Hz should match Max Speed - i.e., 200Hz = 200kmh, or 500Hz = 200kmh...
+      dutyCycleIncoming = map(dutyCycleIncoming, 0, maxFreqHall, 0, maxSpeed);  // map incoming range to this codes range.  Max Hz should match Max Speed - i.e., 200Hz = 200kmh, or 500Hz = 200kmh...
 #if serialDebugIncoming
       DEBUG_PRINTF("     DutyPostProc1Hall: %d", dutyCycle);  // what is the new 'pulse count' - mapped to min/max hall and min/max speed
 #endif
@@ -143,7 +146,7 @@ void loop() {
       }
 
       if (rawCount >= averageFilter) {
-        vehicleSpeedHall = samples.getAverage(averageFilter / 2);  // get the average
+        hallSpeed = samples.getAverage(averageFilter / 2);  // get the average
 #if serialDebugIncoming
         DEBUG_PRINTF("     getAverageHall: %d", dutyCycle);
 #endif
@@ -182,15 +185,22 @@ void loop() {
   //if NOT testSpeedo, apply the caught variables (Hall, GPS or CAN) and transfer across, applying any maps beforehand
   if (!testSpeedo) {
     vehicleSpeed = 0;
-    if (vehicleSpeedHall > 0) {
-      vehicleSpeed = vehicleSpeedHall;
+    if (useHall) {
+      vehicleSpeed = hallSpeed;
     }
-    if (vehicleSpeedCAN > 0) {
-      //vehicleSpeedCAN = map(vehicleSpeedCAN, minFreqCAN, maxFreqCAN, minSpeed, maxSpeed);  // map incoming range to this codes range.  Max Hz should match Max Speed - i.e., 200Hz = 200kmh, or 500Hz = 200kmh...
-      vehicleSpeed = vehicleSpeedCAN;
+    if (useECU) {
+      //vehicleSpeedECU = map(vehicleSpeedCAN, 0, maxFreqCAN, 0, maxSpeed);  // map incoming range to this codes range.  Max Hz should match Max Speed - i.e., 200Hz = 200kmh, or 500Hz = 200kmh...
+      vehicleSpeed = ecuSpeed;
     }
-    if (vehicleSpeedGPS > 0) {
-      vehicleSpeed = vehicleSpeedGPS;
+    if (useABS) {
+      //vehicleSpeedECU = map(vehicleSpeedCAN, 0, maxFreqCAN, 0, maxSpeed);  // map incoming range to this codes range.  Max Hz should match Max Speed - i.e., 200Hz = 200kmh, or 500Hz = 200kmh...
+      vehicleSpeed = absSpeed;
+    }
+    if (useDSG) {
+      vehicleSpeed = dsgSpeed;
+    }
+    if (useGPS) {
+      vehicleSpeed = gpsSpeed;
     }
 
     // we now have a final speed - so apply any offsets
@@ -308,12 +318,30 @@ void updateLabels() {
     ESPUI.updateLabel(label_hasCAN, "Has CAN: No");
   }
 
-  ESPUI.updateLabel(label_speedHall, String(vehicleSpeedHall)); // should be hall
-  ESPUI.updateLabel(label_speedGPS, String(vehicleSpeedGPS));
-  ESPUI.updateLabel(label_speedCAN, String(vehicleSpeedCAN));
+  ESPUI.updateLabel(label_speedHall, String(hallSpeed));  // should be hall
+  ESPUI.updateLabel(label_speedGPS, String(gpsSpeed));
+  ESPUI.updateLabel(label_speedECU, String(ecuSpeed));
+  ESPUI.updateLabel(label_speedABS, String(absSpeed));
+  ESPUI.updateLabel(label_speedDSG, String(dsgSpeed));
 
   ESPUI.updateLabel(label_RPMHall, String(vehicleRPMHall));
   ESPUI.updateLabel(label_RPMCAN, String(vehicleRPMCAN));
+
+  if (useHall) {
+    ESPUI.updateSelect(int16_speedType, "Hall");
+  }
+  if (useABS) {
+    ESPUI.updateSelect(int16_speedType, "ABS");
+  }
+  if (useDSG) {
+    ESPUI.updateSelect(int16_speedType, "DSG");
+  }
+  if (useGPS) {
+    ESPUI.updateSelect(int16_speedType, "GPS");
+  }
+  if (useECU) {
+    ESPUI.updateSelect(int16_speedType, "ECU");
+  }
 
   switch (motorPerformanceVal) {
     case 1:
@@ -329,19 +357,34 @@ void updateLabels() {
       ESPUI.updateSelect(int16_calNumber, "VW160Forbes");
       break;
     case 5:
-      ESPUI.updateSelect(int16_calNumber, "Ford120Forbes1");
+      ESPUI.updateSelect(int16_calNumber, "VW300Forbes");
       break;
     case 6:
-      ESPUI.updateSelect(int16_calNumber, "Ford120Forbes2");
+      ESPUI.updateSelect(int16_calNumber, "Ford120Forbes1");
       break;
     case 7:
-      ESPUI.updateSelect(int16_calNumber, "FIAT160Forbes1");
+      ESPUI.updateSelect(int16_calNumber, "Ford120Forbes2");
       break;
     case 8:
-      ESPUI.updateSelect(int16_calNumber, "FIAT160Forbes2");
+      ESPUI.updateSelect(int16_calNumber, "FIAT160Forbes1");
       break;
     case 9:
+      ESPUI.updateSelect(int16_calNumber, "FIAT160Forbes2");
+      break;
+    case 10:
       ESPUI.updateSelect(int16_calNumber, "Merc120Forbes");
+      break;
+    case 11:
+      ESPUI.updateSelect(int16_calNumber, "Smiths70Forbes");
+      break;
+    case 12:
+      ESPUI.updateSelect(int16_calNumber, "Smiths70Forbes");
+      break;
+    case 13:
+      ESPUI.updateSelect(int16_calNumber, "Smiths70Forbes");
+      break;
+    case 14:
+      ESPUI.updateSelect(int16_calNumber, "Smiths70Forbes");
       break;
   }
 }

@@ -12,7 +12,7 @@ void parseGPS() {
   }
 
   if (gps.speed.isUpdated()) {
-    vehicleSpeedGPS = int(gps.speed.kmph()); // * 0.621371;  // factor for converting kmh > mph
+    gpsSpeed = int(gps.speed.kmph()); // * 0.621371;  // factor for converting kmh > mph
 #if serialDebugGPS
     Serial.println(gps.satellites.value());
     Serial.println(gps.hdop.hdop());
@@ -21,7 +21,7 @@ void parseGPS() {
     printFloat(gps.location.lng(), gps.location.isValid(), 12, 6);
 
     Serial.print(F("GPS Speed: "));
-    Serial.println(vehicleSpeedGPS);
+    Serial.println(speedGPS);
 #endif
   }
 }

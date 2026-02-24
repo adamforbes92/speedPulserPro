@@ -62,9 +62,9 @@ void needleSweep() {
     DEBUG_PRINTF("Speed: %d", i);
     DEBUG_PRINTLN("");
 
-    dutyCycle = findClosestMatch(i * stepSpeed);
+    dutyCycle = findClosestMatch(i * (stepSpeed / 10));
     motorPWM->setPWM_manual(pinMotorOutput, dutyCycle);
-    setFrequencyRPM(i * stepRPM);
+    setFrequencyRPM(i * (stepRPM / 10));
     delay(sweepSpeed);
   }
 
@@ -76,9 +76,9 @@ void needleSweep() {
     DEBUG_PRINTF("Speed: %d", i);
     DEBUG_PRINTLN("");
 
-    dutyCycle = findClosestMatch(i * stepSpeed);
+    dutyCycle = findClosestMatch(i * (stepSpeed / 10));
     motorPWM->setPWM_manual(pinMotorOutput, dutyCycle);
-    setFrequencyRPM(i * stepRPM);
+    setFrequencyRPM(i * (stepRPM / 10));
     delay(sweepSpeed);
   }
   delay(sweepSpeed);
