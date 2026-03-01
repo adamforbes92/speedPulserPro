@@ -5,6 +5,8 @@ It has multiple input types - like Hall, GPS or CAN, it is designed to take thes
 
 If provided with a CAN interface, it can capture engine RPM and output this as a traditional coil based ignition output.
 
+![Board Overview](/Images/BoardOverview.png)
+
 ## Basic Wiring
 Only three wires are required to operate the SpeedPulser:
 
@@ -27,6 +29,29 @@ Outputs:
 
 > Coil type RPM signal
 
+### Sockets
+| Pin | Signal | Notes | Location
+|-|-|-|-|
+| 1 | MK2RPM | High-voltage RPM Output | Closest to edge of PCB |
+| 2 | Ground | Chassis Ground | Middle of connector |
+| 3 | 12v | 12v Ignition | Closet to 5-pin connector
+
+For reference, the motor pinout is:
+| Pin/ | Signal | Notes |
+|-----|--------|-------|
+| 1 | Motor Power | Black - 5-9v adjustable |
+| 2 | Motor Feedback | Not used |
+| 3 | Motor Direction | Green - ground to reverse |
+| 4 | Motor Ground | White - motor ground |
+| 5 | Motor PWM | 10kHz signal from ESP32 |
+
+| Pin | Signal | Notes | Location
+|-|-|-|-|
+| 1 | RPM | Square Wave RPM Input | Closest to blue potentiometer |
+| 2 | Speed | Square Wave Speed Input | Middle of connector |
+| 3 | CANH | CANBUS High | Middle of connector |
+| 4 | CANL | CANBUS Low | Closest to edge 5 pin connector |
+
 Software Benefits:
 > Fully calibrated motor: Duty Percentage vs. Resulting Speed
 > Needle Sweep available
@@ -42,6 +67,12 @@ As the couplers are 3D printed, each coupler, motor housing and speedometer and 
 Press the small button on the right-hand side (closest to the edge of the PCB) to drive the motor at full speed and calibrate to the maximum speed on the speedometer to suit.  This may need a few iterations are parts wear into each other.  
 
 The coupler will be a tight fit on the motor as will the brass driving shaft.  A few light taps will encourge them on.  Remember that this is budget friendly and while a metal alternative would be neat, it's not within budget.
+
+#### Pull-up or Pull-down?
+Different hall sensors from different manufacturers may require a pull-up or pull-down resistor.  There is a 2-way header on the board to select this.  If you find the SpeedPulserPro is not detecting incoming pulses, move this jumper.  Some hall sensors may have their own internal resistor, so the jumper can be removed entirely.  It is labelled 'SpeedPulser'
+
+### R-Term
+The jumper marked 'r-term' is the terminating resistor for the CANBUS network.  If there are no other CAN devices on the network (this is the only one), the jumper should remain.  If there are other devices on the network, this can be removed.
 
 ### Trimming the Drive Shaft
 Drive shafts are supplied in excess of required length and should be trimmed to suit each individual cluster.  Typically this is ~level with the motor housing but confirmation that it is not bottomed out is key!
