@@ -26,6 +26,7 @@
 
 extern bool testSpeedo = false;  // for testing only, vary final pwmFrequency for speed - disable on release(!) ** CAN CHANGE THIS **
 extern bool testRPM = false;
+extern bool testCal = false;         // for testing only, vary final pwmFrequency for speed ** CAN CHANGE THIS **
 
 extern bool hasNeedleSweep = false;  // for needle sweep ** CAN CHANGE THIS **
 extern uint8_t sweepSpeed = 18;      // for needle sweep rate of change (in ms) ** CAN CHANGE THIS **
@@ -47,6 +48,9 @@ extern float stepRPM = 12;
 extern float stepSpeed = 10;
 extern uint8_t speedOffset = 0;           // for adjusting a GLOBAL FIXED speed offset - so the entire range is offset by X value.  Might be easier to use this than the input max freq.
 extern bool speedOffsetPositive = false;  // set to 1 for the above value to be ADDED, set to zero for the above value to be SUBTRACTED
+#define speedMultiplier 1
+#define convertToMPH 0  // for speedos that ONLY read in mph (and therefore the calibration is in mph), change KMH to find MPH
+#define mphFactor 0.621371
 
 #define pinMotorOutput 21  // pin for motor PWM output - needs stepped up to 5v for the motor (NPN transistor on the board).  Needs to support LED PWM(!)
 #define pinMotorInput 18   // pin for motor speed input.  Assumed 5v, might be bad, should have checked(!)...
@@ -83,6 +87,7 @@ extern uint16_t vehicleSpeedHall = 0;
 extern uint16_t vehicleSpeedCAN = 0;  // current Speed.  If no CAN, this will catch dividing by zero by the map function
 extern uint16_t vehicleSpeedGPS = 0;  // current Speed.  If no CAN, this will catch dividing by zero by the map function
 extern bool tempNeedleSweep = false;
+extern long tempDutyCycle = 0;
 
 uint16_t motorPerformance[385];  // for copying the motorPerformance data on selection of calibration value
 extern bool updateMotorPerformance = false;
@@ -199,14 +204,14 @@ extern void updateLabels();  // in main.ino
 // UI handles for WiFi
 uint16_t bool_NeedleSweep, int16_sweepSpeed, int16_stepSpeed, int16_stepRPM;
 uint16_t bool_testSpeedo, int16_tempSpeed, bool_testRPM;
-uint16_t bool_useDSG, bool_useECU, bool_useGPS, bool_useHall, bool_useABS;
+uint16_t bool_useDSG, bool_useECU, bool_useGPS, bool_useHall, bool_useABS, bool_testCal; 
 
 uint16_t bool_positiveOffset, int16_speedOffset;
 uint16_t int16_maxSpeed, int16_maxHall, int16_maxCAN, int16_calNumber;
 uint16_t int16_maxRPM, int16_tempRPM, int16_clusterRPM, int16_RPMScaling, int16_speedType;
 
 int label_RPMHall, label_RPMCAN, label_hasCAN, label_hasGPS;
-int label_speedHall, label_speedGPS, label_speedDSG, label_speedABS, label_speedECU;
+int label_speedHall, label_speedGPS, label_speedDSG, label_speedABS, label_speedECU, label_currentPWM;
 
 uint16_t graph;
 uint16_t mainTime;

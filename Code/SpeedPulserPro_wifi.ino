@@ -30,9 +30,9 @@ void setupUI() {
   ESPUI.addControl(Option, "FIAT - 20-110mph; Forbes-Automotive", "FIAT160Forbes2", Dark, int16_calNumber);
   ESPUI.addControl(Option, "Merc - 120mph; Forbes-Automotive", "Merc120Forbes", Dark, int16_calNumber);
   ESPUI.addControl(Option, "Smiths - 70mph; Forbes-Automotive", "Smiths70Forbes", Dark, int16_calNumber);
-  ESPUI.addControl(Option, "FutureCal1; Forbes-Automotive", "FutureCal1", Dark, int16_calNumber);  // purely for future cals so WiFi is already pre-defined
-  ESPUI.addControl(Option, "FutureCal2; Forbes-Automotive", "FutureCal2", Dark, int16_calNumber);  // purely for future cals so WiFi is already pre-defined
-  ESPUI.addControl(Option, "FutureCal3; Forbes-Automotive", "FutureCal3", Dark, int16_calNumber);  // purely for future cals so WiFi is already pre-defined
+  ESPUI.addControl(Option, "Smiths - 90mph; Forbes-Automotive", "Smiths90Forbes", Dark, int16_calNumber);  // purely for future cals so WiFi is already pre-defined
+  ESPUI.addControl(Option, "FutureCal2; Forbes-Automotive", "FutureCal2", Dark, int16_calNumber);          // purely for future cals so WiFi is already pre-defined
+  ESPUI.addControl(Option, "FutureCal3; Forbes-Automotive", "FutureCal3", Dark, int16_calNumber);          // purely for future cals so WiFi is already pre-defined
 
   ESPUI.addControl(Separator, "Speed Input:", "", Dark, tabAdvancedSpeed);
   int16_speedType = ESPUI.addControl(Select, "Speed Type", "", Dark, tabAdvancedSpeed, generalCallback);
@@ -105,6 +105,15 @@ void setupUI() {
   label_speedABS = ESPUI.addControl(Label, "ABS Speed:", "0", Dark, tabIO, generalCallback);
   label_speedGPS = ESPUI.addControl(Label, "GPS Speed:", "0", Dark, tabIO, generalCallback);
 
+  // create calibration tab:
+  auto tabCal = ESPUI.addControl(Tab, "", "Calibration");
+  ESPUI.addControl(Separator, "Calibration:", "", Dark, tabCal);
+  bool_testCal = ESPUI.addControl(Switcher, "Enable Calibration", "", Dark, tabCal, generalCallback);
+  ESPUI.addControl(Button, "Previous Duty", "Previous", Dark, tabCal, extendedCallback, (void *)14);
+  ESPUI.addControl(Button, "Next Duty", "Next", Dark, tabCal, extendedCallback, (void *)15);
+  label_currentPWM = ESPUI.addControl(Label, "", "0", Dark, tabCal, generalCallback);
+
+
   //Finally, start up the UI.
   //This should only be called once we are connected to WiFi.
   ESPUI.begin(wifiHostName);
@@ -146,18 +155,10 @@ void generalCallback(Control *sender, int type) {
 
   uint8_t tempID = int(sender->id);
   switch (tempID) {
-    case 3:
-      hasNeedleSweep = sender->value.toInt();
-      break;
-    case 4:
-      sweepSpeed = sender->value.toInt();
-      break;
-    case 6:
-      stepRPM = sender->value.toInt();
-      break;
-    case 8:
-      stepSpeed = sender->value.toInt();
-      break;
+    case 3: hasNeedleSweep = sender->value.toInt(); break;
+    case 4: sweepSpeed = sender->value.toInt(); break;
+    case 6: stepRPM = sender->value.toInt(); break;
+    case 8: stepSpeed = sender->value.toInt(); break;
 
     case 13:
       if (sender->value == "VW120Martin") motorPerformanceVal = 1;
@@ -171,8 +172,8 @@ void generalCallback(Control *sender, int type) {
       if (sender->value == "FIAT160Forbes2") motorPerformanceVal = 9;
       if (sender->value == "Merc120Forbes") motorPerformanceVal = 10;
       if (sender->value == "Smiths70Forbes") motorPerformanceVal = 11;
+      if (sender->value == "Smiths90Forbes") motorPerformanceVal = 12;
 
-      if (sender->value == "FutureCal1") motorPerformanceVal = 12;
       if (sender->value == "FutureCal2") motorPerformanceVal = 13;
       if (sender->value == "FutureCal3") motorPerformanceVal = 14;
 
@@ -216,40 +217,20 @@ void generalCallback(Control *sender, int type) {
         useGPS = true;
       }
 
-    case 36:
-      testSpeedo = sender->value.toInt();
-      break;
-    case 37:
-      tempSpeed = sender->value.toInt();
-      break;
-    case 40:
-      speedOffsetPositive = sender->value.toInt();
-      break;
-    case 41:
-      speedOffset = sender->value.toInt();
-      break;
-    case 44:
-      maxSpeed = sender->value.toInt();
-      break;
-    case 48:
-      maxFreqHall = sender->value.toInt();
-      break;
+    case 36: testSpeedo = sender->value.toInt(); break;
+    case 37: tempSpeed = sender->value.toInt(); break;
+    case 40: speedOffsetPositive = sender->value.toInt(); break;
+    case 41: speedOffset = sender->value.toInt(); break;
+    case 44: maxSpeed = sender->value.toInt(); break;
+    case 48: maxFreqHall = sender->value.toInt(); break;
 
-    case 52:
-      maxFreqCAN = sender->value.toInt();
-      break;
-    case 57:
-      testRPM = sender->value.toInt();
-      break;
-    case 58:
-      tempRPM = sender->value.toInt();
-      break;
-    case 61:
-      clusterRPMLimit = sender->value.toInt();
-      break;
-    case 65:
-      maxRPM = sender->value.toInt();
-      break;
+    case 52: maxFreqCAN = sender->value.toInt(); break;
+    case 57: testRPM = sender->value.toInt(); break;
+    case 58: tempRPM = sender->value.toInt(); break;
+    case 61: clusterRPMLimit = sender->value.toInt(); break;
+    case 65: maxRPM = sender->value.toInt(); break;
+
+    case 86: testCal = sender->value.toInt(); break;
   }
 }
 
@@ -302,6 +283,24 @@ void extendedCallback(Control *sender, int type, void *param) {
       if (type == B_UP) {
         maxRPM = 230;
         ESPUI.updateSlider(int16_RPMScaling, maxRPM);
+      }
+      break;
+
+
+    case 87:
+      if (type == B_UP) {
+        tempDutyCycle = tempDutyCycle - 1;
+        if (tempDutyCycle < 0) {
+          tempDutyCycle = 385;
+        }
+      }
+      break;
+    case 88:
+      if (type == B_UP) {
+        tempDutyCycle = tempDutyCycle + 1;
+        if (tempDutyCycle > 385) {
+          tempDutyCycle = 0;
+        }
       }
       break;
   }

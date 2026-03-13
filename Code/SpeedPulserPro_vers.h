@@ -29,4 +29,5 @@ V1.04 - added 'cannot find' speed to set to zero and low speed issues
 V1.05 - added 'hall type' RPM into WiFi and added 'on-the-fly' calibration changes.  Also added 'read EEP' at the start, oops!
 V1.06 - added new calibrations.  Removed 'setTxPower' - seemed to cause WiFi failure on speed change(!)
 V1.07 - added selections for speed input and tidied up WiFi
+V1.08 - added calibration page
 */

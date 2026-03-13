@@ -45,14 +45,45 @@ void basicInit() {
 
 void testSpeed() {
   // check to see if tempSpeed has a value.  IF it does (>0), set the speed using the 'find closest match' as a duty cycle
-  if (tempSpeed == 0) {
-    for (uint16_t i = 15; i < 385; i++) {  // run through all available speeds and drive the motor
-      DEBUG_PRINTF("Duty: %d", i);
-      DEBUG_PRINTLN("");
+  if (testCal) {
+    motorPWM->setPWM_manual(pinMotorOutput, tempDutyCycle);
+    char buf[32];
+    sprintf(buf, "Duty: %d", tempDutyCycle);
+    ESPUI.updateLabel(label_currentPWM, String(buf));
+#if serialDebug
+    DEBUG_PRINTF("     Duty: %d", tempDutyCycle);
+#endif
+  }
 
-      motorPWM->setPWM_manual(pinMotorOutput, i);  // set the duty of the motor from the calculations
-      delay(sweepSpeed * 300);
+  if (!testCal && tempSpeed > 0) {
+#if serialDebug
+    DEBUG_PRINTF("Chosen Speed: %d", tempSpeed);
+#endif
+    if (speedOffsetPositive) {
+      dutyCycle = tempSpeed + speedOffset;
+      dutyCycle = dutyCycle * speedMultiplier;
+      if (convertToMPH) {
+        dutyCycle = dutyCycle * mphFactor;
+      }
+      dutyCycle = findClosestMatch(dutyCycle);
+      motorPWM->setPWM_manual(pinMotorOutput, dutyCycle);
+    } else {
+      if (tempSpeed - speedOffset > 0) {
+        dutyCycle = tempSpeed - speedOffset;
+        dutyCycle = dutyCycle * speedMultiplier;
+        if (convertToMPH) {
+          dutyCycle = dutyCycle * mphFactor;
+        }
+        dutyCycle = findClosestMatch(dutyCycle);
+        motorPWM->setPWM_manual(pinMotorOutput, dutyCycle);
+      } else {
+        motorPWM->setPWM_manual(pinMotorOutput, 0);
+      }
     }
+#if serialDebug
+    DEBUG_PRINTF("  Final Duty: %d", dutyCycle);
+    DEBUG_PRINTLN("");
+#endif
   }
 }
 

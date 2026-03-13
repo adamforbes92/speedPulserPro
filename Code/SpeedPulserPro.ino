@@ -124,7 +124,7 @@ void loop() {
     ledCounter = 0;                           // reset the counter
   }
 
-  if (!testSpeedo) {
+  if (!testSpeedo && !testCal) {
     if ((millis() + 10 - lastPulse) > durationReset) {  // it's been a while since the last hall input, so update to say 0 speed and reset vars
       dutyCycle = 0;
       dutyCycleIncoming = 0;
@@ -162,28 +162,12 @@ void loop() {
   }
 
   // if testSpeedo, apply offests to to confirm working
-  if (testSpeedo) {
-    if (speedOffsetPositive) {
-      dutyCycle = tempSpeed + speedOffset;
-#if serialDebugIncoming
-      DEBUG_PRINTLN("+");
-      DEBUG_PRINTLN(dutyCycle);
-#endif
-    } else {
-      if (tempSpeed - speedOffset > 0) {
-        dutyCycle = tempSpeed - speedOffset;
-#if serialDebugIncoming
-        DEBUG_PRINTLN("-");
-        DEBUG_PRINTLN(dutyCycle);
-#endif
-      } else {
-        dutyCycle = 0;
-      }
-    }
+  if (testSpeedo || testCal) {
+    testSpeed();
   }
 
   //if NOT testSpeedo, apply the caught variables (Hall, GPS or CAN) and transfer across, applying any maps beforehand
-  if (!testSpeedo) {
+  if (!testSpeedo && !testCal) {
     vehicleSpeed = 0;
     if (useHall) {
       vehicleSpeed = hallSpeed;
@@ -227,7 +211,7 @@ void loop() {
     vehicleRPM = tempRPM;
   } else {
     if ((millis() + 10 - lastPulseRPM) > durationReset) {  // it's been a while since the last hall input, so update to say 0 speed and reset vars
-      vehicleRPMHall = 0;
+      vehicleRPM = 0;
     } else {
       vehicleRPMHall = map(dutyCycleMotor, 0, maxRPM, 0, clusterRPMLimit);
       vehicleRPM = vehicleRPMHall;
@@ -378,7 +362,7 @@ void updateLabels() {
       ESPUI.updateSelect(int16_calNumber, "Smiths70Forbes");
       break;
     case 12:
-      ESPUI.updateSelect(int16_calNumber, "Smiths70Forbes");
+      ESPUI.updateSelect(int16_calNumber, "Smiths90Forbes");
       break;
     case 13:
       ESPUI.updateSelect(int16_calNumber, "Smiths70Forbes");

@@ -4,11 +4,11 @@ void readEEP() {
 #endif
 
   // use ESP32's 'Preferences' to remember settings.  Begin by opening the various types.  Use 'false' for read/write.  True just gives read access
-  pref.begin("useHall", false);
-  pref.begin("useDSG", false);
-  pref.begin("useGPS", false);
-  pref.begin("useABS", false);
-  pref.begin("useECU", false);
+  pref.begin("useHall", false); // use Hall sensor 
+  pref.begin("useDSG", false); // use DSG (from CAN)
+  pref.begin("useGPS", false); // use GPS Module
+  pref.begin("useABS", false); // use ABS (from CAN)
+  pref.begin("useECU", false); // use ECU (from CAN)
 
   pref.begin("testSpeedo", false);
   pref.begin("testRPM", false);
@@ -85,8 +85,8 @@ void readEEP() {
     speedOffsetPositive = pref.getBool("speedOffsetPositive", 0);
     motorPerformanceVal = pref.getUChar("motorPerfVal", 0);
 
-    stepRPM = pref.getUShort("stepRPM", 1.2);
-    stepSpeed = pref.getUShort("stepSpeed", 1);
+    stepRPM = pref.getUShort("stepRPM", 12);
+    stepSpeed = pref.getUShort("stepSpeed", 10);
   }
 #if serialDebugEEP
   DEBUG_PRINTLN("EEPROM initialised with...");
