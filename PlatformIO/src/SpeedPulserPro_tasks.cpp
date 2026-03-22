@@ -109,6 +109,7 @@ void taskParseDSG(void *parameter) {
  */
 void taskProcessSpeed(void *parameter) {
   DEBUG_PRINTLN("[TASK] Speed: Starting speed processing task");
+  unsigned long lastIncomingHallHz = 0;
   
   while(1) {
     // Handle Hall sensor pulse processing and averaging
@@ -118,23 +119,32 @@ void taskProcessSpeed(void *parameter) {
         dutyCycleIncoming = 0;
         vehicleSpeedHall = 0;
         hallSpeed = 0;
+        currentSpeedOffset = 0;
+        lastIncomingHallHz = 0;
+        resetHallMedianFilter();
       }
 
-      if ((dutyCycle != dutyCycleIncoming)) {
-        dutyCycleIncoming = map(dutyCycleIncoming, 0, maxFreqHall, 0, maxSpeed);
+      if (lastIncomingHallHz != dutyCycleIncoming) {
+        uint16_t mappedSpeed = map(dutyCycleIncoming, 0, maxFreqHall, 0, maxSpeed);
 
-        if (rawCount < averageFilter) {
-          samples.add(dutyCycleIncoming);
-          rawCount++;
+        if (averageFilterHall <= 1) {
+          hallSpeed = mappedSpeed;
+          vehicleSpeedHall = hallSpeed;
+          resetHallMedianFilter();
+        } else {
+          if (rawCount < averageFilterHall) {
+            samples.add(mappedSpeed);
+            rawCount++;
+          }
+
+          if (rawCount >= averageFilterHall) {
+            hallSpeed = (uint16_t)samples.getMedian();
+            vehicleSpeedHall = hallSpeed;
+            resetHallMedianFilter();
+          }
         }
 
-        if (rawCount >= averageFilter) {
-          hallSpeed = static_cast<uint16_t>(samples.getAverage(averageFilter / 2) + 0.5f);
-          rawCount = 0;
-          samples.clear();
-        }
-
-        dutyCycle = dutyCycleIncoming;
+        lastIncomingHallHz = dutyCycleIncoming;
       }
     }
 
@@ -149,16 +159,7 @@ void taskProcessSpeed(void *parameter) {
     // Process test mode or select active speed source
     if (testSpeedo) {
       vehicleSpeed = tempSpeed;  // Use test speed value when in test mode
-      // Apply speed offset to test speed
-      if (speedOffsetPositive) {
-        dutyCycle = vehicleSpeed + speedOffset;
-      } else {
-        if (vehicleSpeed - speedOffset > 0) {
-          dutyCycle = vehicleSpeed - speedOffset;
-        } else {
-          dutyCycle = 0;
-        }
-      }
+      dutyCycle = applyConfiguredSpeedOffset(vehicleSpeed);
     } else {
       vehicleSpeed = 0;
       if (useHall) {
@@ -180,16 +181,7 @@ void taskProcessSpeed(void *parameter) {
         vehicleSpeed = udsSpeed;
       }
 
-      // Apply speed offset
-      if (speedOffsetPositive) {
-        dutyCycle = vehicleSpeed + speedOffset;
-      } else {
-        if (vehicleSpeed - speedOffset > 0) {
-          dutyCycle = vehicleSpeed - speedOffset;
-        } else {
-          dutyCycle = 0;
-        }
-      }
+      dutyCycle = applyConfiguredSpeedOffset(vehicleSpeed);
     }
 
     #if serialDebugIncoming
@@ -203,7 +195,7 @@ void taskProcessSpeed(void *parameter) {
     ledcWrite(LEDC_OUTPUT_CHANNEL, calibratedDuty);
 
     // Delay before next processing
-    vTaskDelay(pdMS_TO_TICKS(DELAY_SPEED));
+    vTaskDelay(1);
   }
 }
 
@@ -216,8 +208,13 @@ void taskProcessRPM(void *parameter) {
   DEBUG_PRINTLN("[TASK] RPM: Starting RPM processing task");
   
   while(1) {
-    // Always compute Hall RPM from measured motor frequency for live display
-    vehicleRPMHall = map(dutyCycleMotor, 0, maxRPM, 0, clusterRPMLimit);
+    // Always compute Hall RPM for live display, but clear stale data after timeout
+    if ((millis() + 10 - lastPulseRPM) > durationReset) {
+      dutyCycleMotor = 0;
+      vehicleRPMHall = 0;
+    } else {
+      vehicleRPMHall = map(dutyCycleMotor, 0, maxRPM, 0, clusterRPMLimit);
+    }
 
     // Handle RPM input - test mode or selected live source
     if (testRPM) {
@@ -229,6 +226,7 @@ void taskProcessRPM(void *parameter) {
         if ((millis() + 10 - lastPulseRPM) > durationReset) {
           vehicleRPM = 0;
           vehicleRPMHall = 0;
+          resetRPMMedianFilter();
         } else {
           vehicleRPM = vehicleRPMHall;
         }
@@ -237,6 +235,25 @@ void taskProcessRPM(void *parameter) {
 
     // Clamp RPM so both Hall and CAN use the same configured cluster limit
     vehicleRPM = constrain(vehicleRPM, 0, clusterRPMLimit);
+
+    if (averageFilterRPM <= 1) {
+      filteredRPM = vehicleRPM;
+      rawCountRPM = 0;
+      samplesRPM.clear();
+    } else {
+      if (rawCountRPM < averageFilterRPM) {
+        samplesRPM.add(vehicleRPM);
+        rawCountRPM++;
+      }
+
+      if (rawCountRPM >= averageFilterRPM) {
+        filteredRPM = (uint16_t)samplesRPM.getMedian();
+        rawCountRPM = 0;
+        samplesRPM.clear();
+      }
+    }
+
+    vehicleRPM = filteredRPM;
 
     // Map RPM to PWM frequency and output — only drive coil when coilType is enabled
     if (coilType) {
@@ -254,7 +271,7 @@ void taskProcessRPM(void *parameter) {
     #endif
 
     // Delay before next processing
-    vTaskDelay(pdMS_TO_TICKS(DELAY_RPM));
+    vTaskDelay(1);
   }
 }
 

@@ -23,7 +23,8 @@
 
 // Speed Input Configuration
 #define incomingType 0
-#define averageFilter 6
+#define DEFAULT_AVERAGE_FILTER_HALL 6
+#define DEFAULT_AVERAGE_FILTER_RPM 6
 #define durationReset 1500
 
 // Pin Definitions

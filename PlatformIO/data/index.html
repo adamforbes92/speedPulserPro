@@ -19,6 +19,7 @@
             <div class="status-bar">
                 <span class="status-badge" id="canStatus">CAN: --</span>
                 <span class="status-badge" id="broadcastStatus">Broadcast: --</span>
+                <span class="status-badge" id="calibrationStatus">Cal: --</span>
             </div>
         </header>
 
@@ -26,6 +27,7 @@
             <button class="nav-tab active" data-page="dashboard">Dashboard</button>
             <button class="nav-tab" data-page="configuration">Configuration</button>
             <button class="nav-tab" data-page="advanced">Advanced</button>
+            <button class="nav-tab" data-page="calibration">Calibration</button>
             <button class="nav-tab" data-page="ota">OTA</button>
         </nav>
 
@@ -41,6 +43,16 @@
                     <div class="gauge">
                         <div class="gauge-label">Speed (Final)</div>
                         <div class="gauge-value" id="speed">--</div>
+                        <div class="gauge-unit">km/h</div>
+                    </div>
+                    <div class="gauge">
+                        <div class="gauge-label">Speed Offset Type</div>
+                        <div class="gauge-value" id="speedOffsetType">--</div>
+                        <div class="gauge-unit">mode</div>
+                    </div>
+                    <div class="gauge">
+                        <div class="gauge-label">Current Speed Offset</div>
+                        <div class="gauge-value" id="currentSpeedOffset">--</div>
                         <div class="gauge-unit">km/h</div>
                     </div>
                 </div>
@@ -106,9 +118,49 @@
                     </select>
                 </div>
             </section>
+
+            <section class="card">
+                <h2>Speed Limits and Global Offset</h2>
+                <div class="input-group">
+                    <label>Maximum Speed (km/h): <span id="maxSpeed-display">200</span></label>
+                    <input type="range" id="maxSpeed" min="0" max="400" step="5" value="200" class="slider">
+                </div>
+                <div class="input-group">
+                    <label>Maximum Hall Frequency (Hz): <span id="maxFreqHall-display">200</span></label>
+                    <input type="range" id="maxFreqHall" min="0" max="400" step="5" value="200" class="slider">
+                </div>
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="useGlobalSpeedOffset" checked>
+                        Enable Global Speed Offset
+                    </label>
+                </div>
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="speedOffsetPositive" checked>
+                        Positive Offset
+                    </label>
+                </div>
+                <div class="input-group">
+                    <label>Global Speed Offset: <span id="speedOffset-display">0</span> km/h</label>
+                    <input type="range" id="speedOffset" min="0" max="50" step="1" value="0" class="slider">
+                </div>
+            </section>
         </div>
 
         <div class="page" id="advanced-page">
+            <section class="card">
+                <h2>Signal Filters</h2>
+                <div class="input-group">
+                    <label>Hall Speed Filter Samples (1-10): <span id="averageFilterHall-display">6</span></label>
+                    <input type="range" id="averageFilterHall" min="1" max="10" step="1" value="6" class="slider">
+                </div>
+                <div class="input-group">
+                    <label>RPM Filter Samples (1-10): <span id="averageFilterRPM-display">6</span></label>
+                    <input type="range" id="averageFilterRPM" min="1" max="10" step="1" value="6" class="slider">
+                </div>
+            </section>
+
             <section class="card">
                 <h2>Live Data - All Inputs</h2>
                 <div class="live-data-grid">
@@ -234,6 +286,59 @@
                 <div class="status-item" style="margin-top: 1rem;">
                     <div class="status-label">Current Duty Cycle</div>
                     <div class="status-value" id="tempDutyCycle-display">0</div>
+                </div>
+            </section>
+        </div>
+
+        <div class="page" id="calibration-page">
+            <section class="card">
+                <h2>Speed Offset Curve (5 Points)</h2>
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="useSpeedOffsetCurve">
+                        Enable Speed-Dependent Offset Curve
+                    </label>
+                </div>
+                <p class="hint">When enabled, the curve offsets below are used instead of the global speed offset.</p>
+            </section>
+
+            <section class="card">
+                <h2>Point 1 (0-50 km/h)</h2>
+                <div class="input-group">
+                    <label>Offset: <span id="curveOffset0-display">0</span> km/h</label>
+                    <input type="range" id="curveOffset0" min="-20" max="20" step="1" value="0" class="slider">
+                </div>
+            </section>
+
+            <section class="card">
+                <h2>Point 2 (51-100 km/h)</h2>
+                <div class="input-group">
+                    <label>Offset: <span id="curveOffset1-display">0</span> km/h</label>
+                    <input type="range" id="curveOffset1" min="-20" max="20" step="1" value="0" class="slider">
+                </div>
+            </section>
+
+            <section class="card">
+                <h2>Point 3 (101-150 km/h)</h2>
+                <div class="input-group">
+                    <label>Offset: <span id="curveOffset2-display">0</span> km/h</label>
+                    <input type="range" id="curveOffset2" min="-20" max="20" step="1" value="0" class="slider">
+                </div>
+            </section>
+
+            <section class="card">
+                <h2>Point 4 (151-200 km/h)</h2>
+                <div class="input-group">
+                    <label>Offset: <span id="curveOffset3-display">0</span> km/h</label>
+                    <input type="range" id="curveOffset3" min="-20" max="20" step="1" value="0" class="slider">
+                </div>
+            </section>
+
+            <section class="card">
+                <h2>Point 5 (201+ km/h)</h2>
+                <div class="input-group">
+                    <label>Offset: <span id="curveOffset4-display">0</span> km/h</label>
+                    <input type="range" id="curveOffset4" min="-20" max="20" step="1" value="0" class="slider">
                 </div>
             </section>
         </div>

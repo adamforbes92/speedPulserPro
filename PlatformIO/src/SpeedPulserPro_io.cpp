@@ -1,4 +1,5 @@
 #include "SpeedPulserPro_io.h"
+#include "SpeedPulserPro_control.h"
 
 void basicInit()
 {
@@ -81,35 +82,14 @@ void testSpeed()
 #if serialDebug
     DEBUG_PRINTF("Chosen Speed: %d", tempSpeed);
 #endif
-    if (speedOffsetPositive)
+    dutyCycle = applyConfiguredSpeedOffset((uint16_t)tempSpeed);
+    dutyCycle = dutyCycle * speedMultiplier;
+    if (convertToMPH)
     {
-      dutyCycle = tempSpeed + speedOffset;
-      dutyCycle = dutyCycle * speedMultiplier;
-      if (convertToMPH)
-      {
-        dutyCycle = dutyCycle * mphFactor;
-      }
-      dutyCycle = findClosestMatch(dutyCycle);
-      ledcWrite(LEDC_OUTPUT_CHANNEL, dutyCycle);
+      dutyCycle = dutyCycle * mphFactor;
     }
-    else
-    {
-      if (tempSpeed - speedOffset > 0)
-      {
-        dutyCycle = tempSpeed - speedOffset;
-        dutyCycle = dutyCycle * speedMultiplier;
-        if (convertToMPH)
-        {
-          dutyCycle = dutyCycle * mphFactor;
-        }
-        dutyCycle = findClosestMatch(dutyCycle);
-        ledcWrite(LEDC_OUTPUT_CHANNEL, dutyCycle);
-      }
-      else
-      {
-        ledcWrite(LEDC_OUTPUT_CHANNEL, 0);
-      }
-    }
+    dutyCycle = findClosestMatch(dutyCycle);
+    ledcWrite(LEDC_OUTPUT_CHANNEL, dutyCycle);
 #if serialDebug
     DEBUG_PRINTF("  Final Duty: %d", dutyCycle);
     DEBUG_PRINTLN("");

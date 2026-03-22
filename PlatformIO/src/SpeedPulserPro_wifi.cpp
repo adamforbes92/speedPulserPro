@@ -7,6 +7,7 @@
 #include "SpeedPulserPro_motorCal.h"
 #include "SpeedPulserPro_globals.h"
 #include "SpeedPulserPro_tasks.h"
+#include "SpeedPulserPro_control.h"
 
 void handleGetSettings(AsyncWebServerRequest *request)
 {
@@ -30,6 +31,22 @@ void handleGetSettings(AsyncWebServerRequest *request)
   doc["maxRPM"] = maxRPM;
   doc["clusterRPMLimit"] = clusterRPMLimit;
   doc["motorCalibration"] = motorPerformanceVal;
+  doc["maxSpeed"] = maxSpeed;
+  doc["maxFreqHall"] = maxFreqHall;
+  doc["speedOffset"] = speedOffset;
+  doc["speedOffsetPositive"] = speedOffsetPositive;
+  doc["useGlobalSpeedOffset"] = useGlobalSpeedOffset;
+  doc["useSpeedOffsetCurve"] = useSpeedOffsetCurve;
+  JsonArray speedCurveOffsets = doc["speedOffsetCurveOffsets"].to<JsonArray>();
+  for (uint8_t i = 0; i < SPEED_OFFSET_CURVE_POINTS; i++)
+  {
+    speedCurveOffsets.add(speedOffsetCurveOffsets[i]);
+  }
+  doc["averageFilterHall"] = averageFilterHall;
+  doc["averageFilterRPM"] = averageFilterRPM;
+  doc["averageFilter"] = averageFilterHall;
+  doc["speedOffsetType"] = useSpeedOffsetCurve ? "Curve" : (useGlobalSpeedOffset ? "Global" : "Off");
+  doc["currentSpeedOffset"] = currentSpeedOffset;
 
   // Speed type mapping
   if (useHall)
@@ -69,6 +86,7 @@ void handleGetStatus(AsyncWebServerRequest *request)
   doc["canRPM"] = vehicleRPMCAN;
   doc["vehicleSpeed"] = vehicleSpeed;
   doc["hallSpeed"] = hallSpeed;
+  doc["vehicleSpeedHall"] = vehicleSpeedHall;
   doc["ecuSpeed"] = ecuSpeed;
   doc["absSpeed"] = absSpeed;
   doc["dsgSpeed"] = dsgSpeed;
@@ -82,6 +100,10 @@ void handleGetStatus(AsyncWebServerRequest *request)
   doc["tempRPM"] = tempRPM;
   doc["testCal"] = testCal;
   doc["tempDutyCycle"] = tempDutyCycle;
+  doc["speedOffsetType"] = useSpeedOffsetCurve ? "Curve" : (useGlobalSpeedOffset ? "Global" : "Off");
+  doc["currentSpeedOffset"] = currentSpeedOffset;
+  doc["averageFilterHall"] = averageFilterHall;
+  doc["averageFilterRPM"] = averageFilterRPM;
 
   // System status
   doc["hasCAN"] = hasCAN;
@@ -187,6 +209,81 @@ void handlePostControl(AsyncWebServerRequest *request, uint8_t *data, size_t len
     testCal = (value == "true" || value == "1");
   }
 
+  if (key == "maxSpeed")
+  {
+    maxSpeed = value.toInt();
+  }
+
+  if (key == "maxFreqHall")
+  {
+    maxFreqHall = value.toInt();
+  }
+
+  if (key == "speedOffset")
+  {
+    long newOffset = value.toInt();
+    speedOffset = (uint8_t)constrain(newOffset, 0, 50);
+  }
+
+  if (key == "speedOffsetPositive")
+  {
+    speedOffsetPositive = (value == "true" || value == "1");
+  }
+
+  if (key == "useGlobalSpeedOffset")
+  {
+    useGlobalSpeedOffset = (value == "true" || value == "1");
+  }
+
+  if (key == "useSpeedOffsetCurve")
+  {
+    useSpeedOffsetCurve = (value == "true" || value == "1");
+  }
+
+  if (key == "curveOffset0")
+  {
+    speedOffsetCurveOffsets[0] = (int16_t)value.toInt();
+    normaliseSpeedOffsetCurve();
+  }
+
+  if (key == "curveOffset1")
+  {
+    speedOffsetCurveOffsets[1] = (int16_t)value.toInt();
+    normaliseSpeedOffsetCurve();
+  }
+
+  if (key == "curveOffset2")
+  {
+    speedOffsetCurveOffsets[2] = (int16_t)value.toInt();
+    normaliseSpeedOffsetCurve();
+  }
+
+  if (key == "curveOffset3")
+  {
+    speedOffsetCurveOffsets[3] = (int16_t)value.toInt();
+    normaliseSpeedOffsetCurve();
+  }
+
+  if (key == "curveOffset4")
+  {
+    speedOffsetCurveOffsets[4] = (int16_t)value.toInt();
+    normaliseSpeedOffsetCurve();
+  }
+
+  if (key == "averageFilter" || key == "averageFilterHall")
+  {
+    long requestedSamples = value.toInt();
+    averageFilterHall = (uint8_t)constrain(requestedSamples, 1, 10);
+    resetHallMedianFilter();
+  }
+
+  if (key == "averageFilterRPM")
+  {
+    long requestedSamples = value.toInt();
+    averageFilterRPM = (uint8_t)constrain(requestedSamples, 1, 10);
+    resetRPMMedianFilter();
+  }
+
   if (key == "tempRPM")
   {
     tempRPM = value.toInt();
@@ -217,6 +314,12 @@ void handlePostControl(AsyncWebServerRequest *request, uint8_t *data, size_t len
   }
 
   if (key == "motorCalibration")
+  {
+    motorPerformanceVal = value.toInt();
+    updateMotorArray();
+  }
+
+  if (key == "motorCalSelection")
   {
     motorPerformanceVal = value.toInt();
     updateMotorArray();

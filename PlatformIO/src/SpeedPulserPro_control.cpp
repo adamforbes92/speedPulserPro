@@ -3,6 +3,80 @@
 #include "SpeedPulserPro_motorCal.h"
 #include "Arduino.h"
 
+void normaliseSpeedOffsetCurve()
+{
+  for (uint8_t index = 0; index < SPEED_OFFSET_CURVE_POINTS; index++)
+  {
+    speedOffsetCurveOffsets[index] = constrain(speedOffsetCurveOffsets[index], -20, 20);
+  }
+}
+
+int16_t getCurveOffsetForSpeed(uint16_t speedKph)
+{
+  if (speedKph <= 50)
+  {
+    return speedOffsetCurveOffsets[0];
+  }
+  if (speedKph <= 100)
+  {
+    return speedOffsetCurveOffsets[1];
+  }
+  if (speedKph <= 150)
+  {
+    return speedOffsetCurveOffsets[2];
+  }
+  if (speedKph <= 200)
+  {
+    return speedOffsetCurveOffsets[3];
+  }
+  return speedOffsetCurveOffsets[4];
+}
+
+uint16_t applyConfiguredSpeedOffset(uint16_t speedKph)
+{
+  normaliseSpeedOffsetCurve();
+
+  int32_t correctedSpeed = (int32_t)speedKph;
+  int16_t offsetToApply = 0;
+
+  if (useSpeedOffsetCurve)
+  {
+    offsetToApply = getCurveOffsetForSpeed(speedKph);
+  }
+  else if (useGlobalSpeedOffset)
+  {
+    offsetToApply = speedOffsetPositive ? (int16_t)speedOffset : -(int16_t)speedOffset;
+  }
+
+  currentSpeedOffset = offsetToApply;
+  correctedSpeed += offsetToApply;
+
+  if (correctedSpeed < 0)
+  {
+    correctedSpeed = 0;
+  }
+
+  if (correctedSpeed > 400)
+  {
+    correctedSpeed = 400;
+  }
+
+  return (uint16_t)correctedSpeed;
+}
+
+void resetHallMedianFilter()
+{
+  rawCount = 0;
+  samples.clear();
+}
+
+void resetRPMMedianFilter()
+{
+  rawCountRPM = 0;
+  filteredRPM = 0;
+  samplesRPM.clear();
+}
+
 // Interrupt handler for incoming frequency (RPM) reading
 void incomingHz()
 {

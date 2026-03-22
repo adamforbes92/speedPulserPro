@@ -5,7 +5,8 @@
 // Global Object Definitions
 // ============================================================================
 // LEDC PWM is configured via driver/ledc.h - no object needed
-RunningMedian samples = RunningMedian(averageFilter);
+RunningMedian samples = RunningMedian(10);
+RunningMedian samplesRPM = RunningMedian(10);
 SoftwareSerial ss(pinRX_GPS, pinTX_GPS);
 TinyGPSPlus gps;
 Preferences pref;
@@ -59,8 +60,15 @@ uint16_t clusterRPMLimit = 7000;
 // ============================================================================
 uint8_t speedOffset = 0;
 bool speedOffsetPositive = false;
+bool useGlobalSpeedOffset = true;
+bool useSpeedOffsetCurve = false;
+int16_t speedOffsetCurveOffsets[SPEED_OFFSET_CURVE_POINTS] = {0, 0, 0, 0, 0};
+int16_t currentSpeedOffset = 0;
 float stepRPM = 12;
 float stepSpeed = 10;
+uint8_t averageFilterHall = DEFAULT_AVERAGE_FILTER_HALL;
+uint8_t averageFilterRPM = DEFAULT_AVERAGE_FILTER_RPM;
+uint16_t filteredRPM = 0;
 
 // ============================================================================
 // Test Variables
@@ -129,3 +137,4 @@ bool gpsTaskSuspended = false;
 bool ledOnboard = false;
 int ledCounter = 0;
 int rawCount = 0;
+int rawCountRPM = 0;

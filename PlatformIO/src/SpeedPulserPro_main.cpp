@@ -50,7 +50,7 @@ void loop()
     tempNeedleSweep = false;
   }
 
-  if (ledCounter > averageFilter)
+  if (ledCounter > averageFilterHall)
   {
     ledOnboard = !ledOnboard;
     digitalWrite(pinOnboardLED, ledOnboard);

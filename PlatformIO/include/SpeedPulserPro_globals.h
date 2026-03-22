@@ -28,7 +28,9 @@
 #define LEDC_RPM_TIMER       LEDC_TIMER_1
 #define LEDC_RPM_CHANNEL     LEDC_CHANNEL_1
 #define LEDC_RPM_DUTY_50     (1U << ((uint32_t)LEDC_RESOLUTION - 1U))
+#define SPEED_OFFSET_CURVE_POINTS 5
 extern RunningMedian samples;
+extern RunningMedian samplesRPM;
 extern SoftwareSerial ss;
 extern TinyGPSPlus gps;
 extern Preferences pref;
@@ -82,8 +84,15 @@ extern uint16_t clusterRPMLimit;
 // ============================================================================
 extern uint8_t speedOffset;
 extern bool speedOffsetPositive;
+extern bool useGlobalSpeedOffset;
+extern bool useSpeedOffsetCurve;
+extern int16_t speedOffsetCurveOffsets[SPEED_OFFSET_CURVE_POINTS];
+extern int16_t currentSpeedOffset;
 extern float stepRPM;
 extern float stepSpeed;
+extern uint8_t averageFilterHall;
+extern uint8_t averageFilterRPM;
+extern uint16_t filteredRPM;
 
 // ============================================================================
 // Test Variables
@@ -154,5 +163,6 @@ extern bool gpsTaskSuspended;
 extern bool ledOnboard;
 extern int ledCounter;
 extern int rawCount;
+extern int rawCountRPM;
 
 #endif // GLOBALS_H

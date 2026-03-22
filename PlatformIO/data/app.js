@@ -42,8 +42,31 @@ async function fetchCalibrations() {
 
     currentCalibrationId = parseInt(data.currentCalibrationId || 1, 10) || 1;
     selectEl.value = String(currentCalibrationId);
+    const calibrationStatusEl = document.getElementById('calibrationStatus');
+    if (calibrationStatusEl) {
+      const selectedOption = selectEl.options[selectEl.selectedIndex];
+      calibrationStatusEl.textContent = selectedOption ? `Cal: ${selectedOption.textContent}` : 'Cal: --';
+    }
   } catch (error) {
     console.log('Error fetching calibrations:', error);
+  }
+}
+
+function updateSpeedOffsetStatus(mode, offsetValue) {
+  const offsetTypeEl = document.getElementById('speedOffsetType');
+  const currentOffsetEl = document.getElementById('currentSpeedOffset');
+
+  if (offsetTypeEl) {
+    offsetTypeEl.textContent = mode || '--';
+  }
+
+  if (currentOffsetEl) {
+    if (offsetValue === undefined || offsetValue === null || Number.isNaN(Number(offsetValue))) {
+      currentOffsetEl.textContent = '--';
+    } else {
+      const n = Number(offsetValue);
+      currentOffsetEl.textContent = (n > 0 ? '+' : '') + n;
+    }
   }
 }
 
@@ -121,15 +144,89 @@ function initControls() {
   }
 
   // Configuration controls
-  const configInputs = ['hasNeedleSweep', 'broadcastSpeed', 'sweepSpeed', 'stepRPM', 'stepSpeed', 'coilType', 'motorCalibration'];
+  const configInputs = [
+    'hasNeedleSweep',
+    'broadcastSpeed',
+    'sweepSpeed',
+    'stepRPM',
+    'stepSpeed',
+    'coilType',
+    'motorCalibration',
+    'maxSpeed',
+    'maxFreqHall',
+    'useGlobalSpeedOffset',
+    'speedOffsetPositive',
+    'speedOffset'
+  ];
   configInputs.forEach(id => {
     const el = document.getElementById(id);
     if (el) {
       el.addEventListener('change', () => {
         const value = el.type === 'checkbox' ? el.checked : el.value;
         pushControl(id, value);
+
+        if (id === 'motorCalibration') {
+          const selectedOption = el.options[el.selectedIndex];
+          const calibrationStatusEl = document.getElementById('calibrationStatus');
+          if (selectedOption && calibrationStatusEl) {
+            calibrationStatusEl.textContent = `Cal: ${selectedOption.textContent}`;
+          }
+        }
+      });
+
+      if (el.type === 'range') {
+        el.addEventListener('input', () => {
+          const displayEl = document.getElementById(id + '-display');
+          if (displayEl) {
+            displayEl.textContent = el.value;
+          }
+          pushControl(id, el.value);
+        });
+      }
+    }
+  });
+
+  const calibrationInputs = ['useSpeedOffsetCurve', 'curveOffset0', 'curveOffset1', 'curveOffset2', 'curveOffset3', 'curveOffset4'];
+  calibrationInputs.forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) {
+      return;
+    }
+
+    el.addEventListener('change', () => {
+      const value = el.type === 'checkbox' ? el.checked : el.value;
+      pushControl(id, value);
+    });
+
+    if (el.type === 'range') {
+      el.addEventListener('input', () => {
+        const displayEl = document.getElementById(id + '-display');
+        if (displayEl) {
+          displayEl.textContent = el.value;
+        }
+        pushControl(id, el.value);
       });
     }
+  });
+
+  const filterInputs = ['averageFilterHall', 'averageFilterRPM'];
+  filterInputs.forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) {
+      return;
+    }
+
+    el.addEventListener('change', () => {
+      pushControl(id, el.value);
+    });
+
+    el.addEventListener('input', () => {
+      const displayEl = document.getElementById(id + '-display');
+      if (displayEl) {
+        displayEl.textContent = el.value;
+      }
+      pushControl(id, el.value);
+    });
   });
 
   // Advanced test controls
@@ -251,6 +348,41 @@ async function fetchSettings() {
     document.getElementById('coilType').checked = data.coilType || false;
     currentCalibrationId = parseInt(data.motorCalibration || currentCalibrationId || 1, 10) || 1;
     document.getElementById('motorCalibration').value = String(currentCalibrationId);
+    document.getElementById('maxSpeed').value = data.maxSpeed || 200;
+    document.getElementById('maxSpeed-display').textContent = data.maxSpeed || 200;
+    document.getElementById('maxFreqHall').value = data.maxFreqHall || 200;
+    document.getElementById('maxFreqHall-display').textContent = data.maxFreqHall || 200;
+    document.getElementById('useGlobalSpeedOffset').checked = data.useGlobalSpeedOffset !== false;
+    document.getElementById('speedOffsetPositive').checked = data.speedOffsetPositive !== false;
+    document.getElementById('speedOffset').value = data.speedOffset || 0;
+    document.getElementById('speedOffset-display').textContent = data.speedOffset || 0;
+    document.getElementById('useSpeedOffsetCurve').checked = data.useSpeedOffsetCurve || false;
+
+    const curveOffsets = Array.isArray(data.speedOffsetCurveOffsets) ? data.speedOffsetCurveOffsets : [0, 0, 0, 0, 0];
+    for (let i = 0; i < 5; i++) {
+      const offsetId = 'curveOffset' + i;
+      const offsetVal = curveOffsets[i] ?? 0;
+      const offsetEl = document.getElementById(offsetId);
+      const displayEl = document.getElementById(offsetId + '-display');
+      if (offsetEl) {
+        offsetEl.value = offsetVal;
+      }
+      if (displayEl) {
+        displayEl.textContent = offsetVal;
+      }
+    }
+
+    document.getElementById('averageFilterHall').value = data.averageFilterHall || data.averageFilter || 6;
+    document.getElementById('averageFilterHall-display').textContent = data.averageFilterHall || data.averageFilter || 6;
+    document.getElementById('averageFilterRPM').value = data.averageFilterRPM || data.averageFilter || 6;
+    document.getElementById('averageFilterRPM-display').textContent = data.averageFilterRPM || data.averageFilter || 6;
+    updateSpeedOffsetStatus(data.speedOffsetType, data.currentSpeedOffset);
+
+    const calibrationStatusEl = document.getElementById('calibrationStatus');
+    if (calibrationStatusEl) {
+      const selectedOption = document.getElementById('motorCalibration').selectedOptions[0];
+      calibrationStatusEl.textContent = selectedOption ? `Cal: ${selectedOption.textContent}` : 'Cal: --';
+    }
 
     // Advanced controls
     document.getElementById('testRPM').checked = data.testRPM || false;
@@ -357,6 +489,8 @@ async function fetchStatus() {
         document.getElementById('liveGPSStatus').textContent = 'Not Connected';
       }
     }
+
+    updateSpeedOffsetStatus(data.speedOffsetType, data.currentSpeedOffset);
 
     // System status (read-only, not settings)
     document.getElementById('canStatus').textContent = data.hasCAN ? 'CAN: Healthy' : 'CAN: Not Healthy';
