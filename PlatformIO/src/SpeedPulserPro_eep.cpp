@@ -11,6 +11,7 @@ void readEEP() {
   pref.begin("useGPS", false);
   pref.begin("useABS", false);
   pref.begin("useECU", false);
+  pref.begin("useUDS", false);
   pref.begin("useRPMHall", false);
   pref.begin("useRPMCAN", false);
   pref.begin("broadcastSpeed", false);
@@ -51,7 +52,8 @@ void readEEP() {
     pref.putBool("useDSG", useDSG);
     pref.putBool("useGPS", useGPS);
     pref.putBool("useABS", useABS);
-    pref.putBool("useECU", useABS);
+    pref.putBool("useECU", useECU);
+    pref.putBool("useUDS", useUDS);
     pref.putBool("useRPMHall", useRPMHall);
     pref.putBool("useRPMCAN", useRPMCAN);
     pref.putBool("broadcastSpeed", broadcastSpeed);
@@ -88,6 +90,7 @@ void readEEP() {
     useGPS = pref.getBool("useGPS", false);
     useABS = pref.getBool("useABS", false);
     useECU = pref.getBool("useECU", false);
+    useUDS = pref.getBool("useUDS", false);
     useRPMHall = pref.getBool("useRPMHall", true);
     useRPMCAN = pref.getBool("useRPMCAN", false);
     broadcastSpeed = pref.getBool("broadcastSpeed", false);
@@ -149,6 +152,8 @@ void writeEEP() {
   pref.putBool("useDSG", useDSG);
   pref.putBool("useGPS", useGPS);
   pref.putBool("useABS", useABS);
+  pref.putBool("useECU", useECU);
+  pref.putBool("useUDS", useUDS);
   pref.putBool("useRPMHall", useRPMHall);
   pref.putBool("useRPMCAN", useRPMCAN);
   pref.putBool("broadcastSpeed", broadcastSpeed);
