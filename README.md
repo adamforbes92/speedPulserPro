@@ -5,22 +5,24 @@ It has multiple input types - like Hall, GPS or CAN, it is designed to take thes
 
 If provided with a CAN interface, it can capture engine RPM and output this as a traditional coil based ignition output.
 
+![speedPulserProUI](/Images/speedPulserProUI.png)
+
 ![Board Overview](/Images/BoardOverview.png)
 
 ## Basic Wiring
-Only three wires are required to operate the SpeedPulser:
+Only three wires are required to operate the SpeedPulser Pro:
 
 Inputs:
 > 12v ignition 
 
 > Ground
 
-> 12v square wave pulse from gearbox hall sensor 
-
 Additional Inputs:
 > CAN (High & Low) - for RPM/Speed if available
 
 > RPM trigger (12v square wave)
+
+> Speed trigger (12v square wave)
 
 > GPS
 
