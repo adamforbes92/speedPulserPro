@@ -86,7 +86,16 @@ bool tempNeedleSweep = false;
 // ============================================================================
 bool hasNeedleSweep = false;
 bool coilType = false;
-bool broadcastSpeed = false;
+bool broadcastSpeedEnabled = false;
+uint32_t broadcastSpeedID = HALDEX_ID;
+uint8_t broadcastSpeedDLC = 8;
+uint8_t broadcastSpeedLowByte = 2;
+uint8_t broadcastSpeedHighByte = 3;
+bool broadcastSpeedLittleEndian = true;
+float broadcastSpeedScale = 0.781f; // ~1/1.28 — default Haldex scaling
+int16_t broadcastSpeedOffset = 0;
+uint8_t broadcastSpeedData[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+uint16_t broadcastSpeedValue = 0;
 uint8_t sweepSpeed = 18;
 uint8_t speedType = 0;
 
@@ -133,7 +142,7 @@ unsigned long lastPulseRPM = 0;
 bool hasError = false;
 bool hasCAN = false;
 bool hasGPS = false;
-bool gpsTaskSuspended = false;
+bool gpsUnavailable = false;
 bool ledOnboard = false;
 int ledCounter = 0;
 int rawCount = 0;

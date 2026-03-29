@@ -1,30 +1,55 @@
 #include "SpeedPulserPro_gps.h"
 
 static unsigned long lastGPSData = 0;
-static const unsigned long GPS_TIMEOUT = 10000;  // 10 seconds
+static const unsigned long GPS_TIMEOUT = 10000; // 10 seconds
+static unsigned long charsProcessedPrevious = 0;
 
-void parseGPS() {
-  while (ss.available() > 0) {
+void parseGPS()
+{
+
+
+  // Always try to read serial data
+  while (ss.available() > 0)
+  {
     gps.encode(ss.read());
   }
 
-  if (gps.satellites.value() == 0) {
+  // Check if NEW characters have been processed (not just old cumulative count)
+  unsigned long charsProcessedCurrent = gps.charsProcessed();
+  bool gotNewData = false;
+  if (charsProcessedCurrent > charsProcessedPrevious)
+  {
+    lastGPSData = millis();
+    charsProcessedPrevious = charsProcessedCurrent;
+    gotNewData = true;
+  }
+
+  // 1. If no new GPS characters in 10s, unavailable
+  if (useGPS && (millis() - lastGPSData > GPS_TIMEOUT)) {
+    gpsUnavailable = true;
     hasError = true;
     hasGPS = false;
-  } else {
+    return;
+  }
+
+  // 2. If new chars, but no satellites, not connected
+  if (gotNewData && gps.satellites.value() == 0) {
+    gpsUnavailable = false;
+    hasError = false;
+    hasGPS = false;
+    return;
+  }
+
+  // 3. If satellites > 0, connected
+  if (gps.satellites.value() > 0) {
+    gpsUnavailable = false;
     hasError = false;
     hasGPS = true;
-    lastGPSData = millis();  // Update last GPS data time when data is received
+    return;
   }
 
-  // Check if no GPS data received within 10 seconds
-  if (useGPS && (millis() - lastGPSData > GPS_TIMEOUT)) {
-    gpsTaskSuspended = true;
-  } else if (hasGPS) {
-    gpsTaskSuspended = false;
-  }
-
-  if (gps.speed.isUpdated()) {
+  if (gps.speed.isUpdated())
+  {
     gpsSpeed = int(gps.speed.kmph());
 #if serialDebugGPS
     Serial.println(gps.satellites.value());
@@ -39,17 +64,21 @@ void parseGPS() {
   }
 }
 
-static void printFloat(float val, bool valid, int len, int prec) {
-  if (!valid) {
+static void printFloat(float val, bool valid, int len, int prec)
+{
+  if (!valid)
+  {
     while (len-- > 1)
       Serial.print('*');
     Serial.print(' ');
-  } else {
+  }
+  else
+  {
     Serial.print(val, prec);
     int vi = abs((int)val);
     int flen = prec + (val < 0.0 ? 2 : 1);
     flen += vi >= 1000 ? 4 : vi >= 100 ? 3
-                           : vi >= 10  ? 2
+                         : vi >= 10    ? 2
                                        : 1;
     for (int i = flen; i < len; ++i)
       Serial.print(' ');

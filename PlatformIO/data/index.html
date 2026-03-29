@@ -105,12 +105,6 @@
                         Use Coil Output (RPM)
                     </label>
                 </div>
-                <div class="form-group">
-                    <label>
-                        <input type="checkbox" id="broadcastSpeed">
-                        Broadcast Speed
-                    </label>
-                </div>
                 <div class="input-group">
                     <label>Motor Calibration</label>
                     <select id="motorCalibration">
@@ -149,6 +143,64 @@
         </div>
 
         <div class="page" id="advanced-page">
+            <section class="card">
+                <h2>Broadcast Speed</h2>
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="broadcastSpeedEnabled">
+                        Enable Speed CAN Broadcast
+                    </label>
+                </div>
+                <div class="input-group">
+                    <label>CAN ID (Hex)</label>
+                    <input type="text" id="broadcastSpeedID" value="2C0" maxlength="3" placeholder="2C0">
+                </div>
+                <div class="input-group">
+                    <label>DLC</label>
+                    <input type="number" id="broadcastSpeedDLC" min="0" max="8" value="8">
+                </div>
+                <div class="input-group">
+                    <label>Low Byte Index (0-7)</label>
+                    <input type="number" id="broadcastSpeedLowByte" min="0" max="7" value="2">
+                </div>
+                <div class="input-group">
+                    <label>High Byte Index (0-7)</label>
+                    <input type="number" id="broadcastSpeedHighByte" min="0" max="7" value="3">
+                </div>
+                <div class="input-group">
+                    <label>Byte Order</label>
+                    <select id="broadcastSpeedLittleEndian">
+                        <option value="true">Little Endian</option>
+                        <option value="false">Big Endian</option>
+                    </select>
+                </div>
+                <div class="input-group">
+                    <label>Scale</label>
+                    <input type="number" id="broadcastSpeedScale" step="0.001" value="0.781">
+                </div>
+                <div class="input-group">
+                    <label>Offset</label>
+                    <input type="number" id="broadcastSpeedOffset" value="0">
+                </div>
+                <div class="input-group">
+                    <label>Template Bytes (0-255)</label>
+                    <div class="live-data-grid" style="grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.5rem;">
+                        <input type="number" id="broadcastSpeedData0" min="0" max="255" value="0">
+                        <input type="number" id="broadcastSpeedData1" min="0" max="255" value="0">
+                        <input type="number" id="broadcastSpeedData2" min="0" max="255" value="0">
+                        <input type="number" id="broadcastSpeedData3" min="0" max="255" value="0">
+                        <input type="number" id="broadcastSpeedData4" min="0" max="255" value="0">
+                        <input type="number" id="broadcastSpeedData5" min="0" max="255" value="0">
+                        <input type="number" id="broadcastSpeedData6" min="0" max="255" value="0">
+                        <input type="number" id="broadcastSpeedData7" min="0" max="255" value="0">
+                    </div>
+                </div>
+                <div class="live-data-item" style="margin-top: 1rem;">
+                    <div class="live-data-label">Broadcasted Speed Value</div>
+                    <div class="live-data-value" id="liveBroadcastSpeedValue">--</div>
+                </div>
+            </section>
+
             <section class="card">
                 <h2>Signal Filters</h2>
                 <div class="input-group">

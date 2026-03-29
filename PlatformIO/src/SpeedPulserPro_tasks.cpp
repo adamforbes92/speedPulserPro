@@ -75,7 +75,7 @@ void taskParseGPS(void *parameter) {
     #endif
     
     // Delay before next parse
-    vTaskDelay(pdMS_TO_TICKS(DELAY_GPS));
+    vTaskDelay(pdMS_TO_TICKS(1));
   }
 }
 
@@ -382,23 +382,13 @@ void tasksInit() {
   );
   if (status != pdPASS) {
     DEBUG_PRINTLN("[TASK] ERROR: Failed to create Broadcast Speed task");
-  } else if (!broadcastSpeed) {
-    vTaskSuspend(taskBroadcastSpeedHandle);
   }
   
   DEBUG_PRINTLN("[TASK] All tasks initialized successfully");
 }
 
-void setBroadcastSpeedTaskEnabled(bool enabled) {
-  if (taskBroadcastSpeedHandle == NULL) {
-    return;
-  }
-
-  if (enabled) {
-    vTaskResume(taskBroadcastSpeedHandle);
-  } else {
-    vTaskSuspend(taskBroadcastSpeedHandle);
-  }
+void setBroadcastSpeedTaskEnabled(bool /*enabled*/) {
+  // No-op: the task runs continuously and checks broadcastSpeedEnabled each cycle.
 }
 
 /**
@@ -426,7 +416,7 @@ void tasksResumeAll() {
   if (taskDSGHandle != NULL) vTaskResume(taskDSGHandle);
   if (taskSpeedHandle != NULL) vTaskResume(taskSpeedHandle);
   if (taskRPMHandle != NULL) vTaskResume(taskRPMHandle);
-  if (taskBroadcastSpeedHandle != NULL && broadcastSpeed) vTaskResume(taskBroadcastSpeedHandle);
+  if (taskBroadcastSpeedHandle != NULL) vTaskResume(taskBroadcastSpeedHandle);
   DEBUG_PRINTLN("[TASK] All tasks resumed");
 }
 

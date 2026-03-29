@@ -146,7 +146,6 @@ function initControls() {
   // Configuration controls
   const configInputs = [
     'hasNeedleSweep',
-    'broadcastSpeed',
     'sweepSpeed',
     'stepRPM',
     'stepSpeed',
@@ -230,13 +229,29 @@ function initControls() {
   });
 
   // Advanced test controls
-  const advancedInputs = ['testRPM', 'tempRPM', 'testSpeedo', 'tempSpeed', 'maxRPM', 'clusterRPMLimit', 'testCal'];
+  const advancedInputs = [
+    'testRPM', 'tempRPM', 'testSpeedo', 'tempSpeed', 'maxRPM', 'clusterRPMLimit', 'testCal',
+    'broadcastSpeedEnabled', 'broadcastSpeedID', 'broadcastSpeedDLC',
+    'broadcastSpeedLowByte', 'broadcastSpeedHighByte', 'broadcastSpeedLittleEndian',
+    'broadcastSpeedScale', 'broadcastSpeedOffset',
+    'broadcastSpeedData0', 'broadcastSpeedData1', 'broadcastSpeedData2', 'broadcastSpeedData3',
+    'broadcastSpeedData4', 'broadcastSpeedData5', 'broadcastSpeedData6', 'broadcastSpeedData7'
+  ];
   advancedInputs.forEach(id => {
     const el = document.getElementById(id);
     if (el) {
       el.addEventListener('change', () => {
-        const value = el.type === 'checkbox' ? el.checked : el.value;
-        
+        let value;
+        if (el.type === 'checkbox') {
+          value = el.checked;
+        } else if (id === 'broadcastSpeedID') {
+          value = el.value.trim();
+        } else if (id === 'broadcastSpeedLittleEndian') {
+          value = el.value === 'true';
+        } else {
+          value = el.type === 'number' || el.type === 'range' ? Number(el.value) : el.value;
+        }
+
         // Use separate API endpoints for RPM and Speed tests
         if (id === 'testRPM') {
           pushTestRPM(el.checked, parseInt(document.getElementById('tempRPM').value || 0));
@@ -252,8 +267,8 @@ function initControls() {
           pushControl(id, value);
         }
       });
-      
-      // For sliders, also update live display and send immediately on input (instant feedback)
+
+      // For sliders, also update live display and send immediately on input
       if (el.type === 'range') {
         el.addEventListener('input', () => {
           const displayId = id + '-display';
@@ -261,8 +276,6 @@ function initControls() {
           if (displayEl) {
             displayEl.textContent = el.value;
           }
-          
-          // Send instant updates for test sliders and other controls
           if (id === 'tempRPM') {
             const testRPMCheckbox = document.getElementById('testRPM');
             pushTestRPM(testRPMCheckbox.checked, parseInt(el.value || 0));
@@ -270,7 +283,6 @@ function initControls() {
             const testSpeedCheckbox = document.getElementById('testSpeedo');
             pushTestSpeed(testSpeedCheckbox.checked, parseInt(el.value || 0));
           } else {
-            // For other sliders (maxRPM, clusterRPMLimit, testCal), send via pushControl
             pushControl(id, el.value);
           }
         });
@@ -341,7 +353,18 @@ async function fetchSettings() {
 
     // Load all settings from API once
     document.getElementById('hasNeedleSweep').checked = data.hasNeedleSweep || false;
-    document.getElementById('broadcastSpeed').checked = data.broadcastSpeed || false;
+    document.getElementById('broadcastSpeedEnabled').checked = data.broadcastSpeedEnabled || false;
+    document.getElementById('broadcastSpeedID').value = (data.broadcastSpeedID || 0).toString(16).toUpperCase();
+    document.getElementById('broadcastSpeedDLC').value = data.broadcastSpeedDLC ?? 8;
+    document.getElementById('broadcastSpeedLowByte').value = data.broadcastSpeedLowByte ?? 2;
+    document.getElementById('broadcastSpeedHighByte').value = data.broadcastSpeedHighByte ?? 3;
+    document.getElementById('broadcastSpeedLittleEndian').value = (data.broadcastSpeedLittleEndian !== false) ? 'true' : 'false';
+    document.getElementById('broadcastSpeedScale').value = (data.broadcastSpeedScale ?? 0.781).toFixed(3);
+    document.getElementById('broadcastSpeedOffset').value = data.broadcastSpeedOffset ?? 0;
+    for (let i = 0; i < 8; i++) {
+      const dataEl = document.getElementById(`broadcastSpeedData${i}`);
+      if (dataEl) dataEl.value = data[`broadcastSpeedData${i}`] ?? 0;
+    }
     document.getElementById('sweepSpeed').value = data.sweepSpeed || 0;
     document.getElementById('stepRPM').value = data.stepRPM || 100;
     document.getElementById('stepSpeed').value = data.stepSpeed || 100;
@@ -483,7 +506,7 @@ async function fetchStatus() {
     if (document.getElementById('liveGPSStatus')) {
       if (data.hasGPS) {
         document.getElementById('liveGPSStatus').textContent = `Connected, ${data.gpsSatellites} satellites`;
-      } else if (data.gpsTaskSuspended) {
+      } else if (data.gpsUnavailable) {
         document.getElementById('liveGPSStatus').textContent = 'Unavailable';
       } else {
         document.getElementById('liveGPSStatus').textContent = 'Not Connected';
@@ -494,14 +517,19 @@ async function fetchStatus() {
 
     // System status (read-only, not settings)
     document.getElementById('canStatus').textContent = data.hasCAN ? 'CAN: Healthy' : 'CAN: Not Healthy';
-    document.getElementById('broadcastStatus').textContent = data.broadcastSpeed ? 'Broadcast: Active' : 'Broadcast: Off';
+    document.getElementById('broadcastStatus').textContent = data.broadcastSpeedEnabled ? 'Broadcast: Active' : 'Broadcast: Off';
     document.getElementById('canPresent').textContent = data.hasCAN ? 'Healthy' : 'Not Healthy';
+
+    if (document.getElementById('liveBroadcastSpeedValue')) {
+      const suffix = data.broadcastSpeedEnabled ? '' : ' (disabled)';
+      document.getElementById('liveBroadcastSpeedValue').textContent = `${data.broadcastSpeedValue || 0}${suffix}`;
+    }
     
     // GPS status in dashboard
     if (document.getElementById('gpsPresent')) {
       if (data.hasGPS) {
         document.getElementById('gpsPresent').textContent = `Connected (${data.gpsSatellites} sat)`;
-      } else if (data.gpsTaskSuspended) {
+      } else if (data.gpsUnavailable) {
         document.getElementById('gpsPresent').textContent = 'Unavailable';
       } else {
         document.getElementById('gpsPresent').textContent = 'Not Connected';

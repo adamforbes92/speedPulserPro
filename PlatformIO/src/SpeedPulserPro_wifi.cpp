@@ -9,6 +9,18 @@
 #include "SpeedPulserPro_tasks.h"
 #include "SpeedPulserPro_control.h"
 
+static uint32_t parseHexCanId(const String& text) {
+  String s = text;
+  s.trim();
+  if (s.startsWith("0x") || s.startsWith("0X")) {
+    s = s.substring(2);
+  }
+  if (s.length() == 0) {
+    return broadcastSpeedID;
+  }
+  return (uint32_t)strtoul(s.c_str(), nullptr, 16) & 0x7FF;
+}
+
 void handleGetSettings(AsyncWebServerRequest *request)
 {
 #ifdef serialDebugWifi
@@ -18,7 +30,18 @@ void handleGetSettings(AsyncWebServerRequest *request)
   JsonDocument doc;
   doc["hasNeedleSweep"] = hasNeedleSweep;
   doc["coilType"] = coilType;
-  doc["broadcastSpeed"] = broadcastSpeed;
+  doc["broadcastSpeedEnabled"] = broadcastSpeedEnabled;
+  doc["broadcastSpeedID"] = broadcastSpeedID;
+  doc["broadcastSpeedDLC"] = broadcastSpeedDLC;
+  doc["broadcastSpeedLowByte"] = broadcastSpeedLowByte;
+  doc["broadcastSpeedHighByte"] = broadcastSpeedHighByte;
+  doc["broadcastSpeedLittleEndian"] = broadcastSpeedLittleEndian;
+  doc["broadcastSpeedScale"] = broadcastSpeedScale;
+  doc["broadcastSpeedOffset"] = broadcastSpeedOffset;
+  for (uint8_t i = 0; i < 8; i++) {
+    String dk = "broadcastSpeedData" + String(i);
+    doc[dk] = broadcastSpeedData[i];
+  }
   doc["sweepSpeed"] = sweepSpeed;
   doc["stepRPM"] = stepRPM;
   doc["stepSpeed"] = stepSpeed;
@@ -108,8 +131,9 @@ void handleGetStatus(AsyncWebServerRequest *request)
   // System status
   doc["hasCAN"] = hasCAN;
   doc["hasGPS"] = hasGPS;
-  doc["broadcastSpeed"] = broadcastSpeed;
-  doc["gpsTaskSuspended"] = gpsTaskSuspended;
+  doc["broadcastSpeedEnabled"] = broadcastSpeedEnabled;
+  doc["broadcastSpeedValue"] = broadcastSpeedValue;
+  doc["gpsUnavailable"] = gpsUnavailable;
   doc["gpsSatellites"] = gps.satellites.value();
 
   String response;
@@ -168,10 +192,51 @@ void handlePostControl(AsyncWebServerRequest *request, uint8_t *data, size_t len
     coilType = (value == "true" || value == "1");
   }
 
-  if (key == "broadcastSpeed")
+  if (key == "broadcastSpeedEnabled")
   {
-    broadcastSpeed = (value == "true" || value == "1");
-    setBroadcastSpeedTaskEnabled(broadcastSpeed);
+    broadcastSpeedEnabled = (value == "true" || value == "1");
+  }
+
+  if (key == "broadcastSpeedID")
+  {
+    broadcastSpeedID = parseHexCanId(value);
+  }
+
+  if (key == "broadcastSpeedDLC")
+  {
+    broadcastSpeedDLC = (uint8_t)constrain(value.toInt(), 0, 8);
+  }
+
+  if (key == "broadcastSpeedLowByte")
+  {
+    broadcastSpeedLowByte = (uint8_t)constrain(value.toInt(), 0, 7);
+  }
+
+  if (key == "broadcastSpeedHighByte")
+  {
+    broadcastSpeedHighByte = (uint8_t)constrain(value.toInt(), 0, 7);
+  }
+
+  if (key == "broadcastSpeedLittleEndian")
+  {
+    broadcastSpeedLittleEndian = (value == "true" || value == "1");
+  }
+
+  if (key == "broadcastSpeedScale")
+  {
+    broadcastSpeedScale = value.toFloat();
+  }
+
+  if (key == "broadcastSpeedOffset")
+  {
+    broadcastSpeedOffset = (int16_t)constrain(value.toInt(), -32768, 32767);
+  }
+
+  for (uint8_t i = 0; i < 8; i++) {
+    String dk = "broadcastSpeedData" + String(i);
+    if (key == dk) {
+      broadcastSpeedData[i] = (uint8_t)constrain(value.toInt(), 0, 255);
+    }
   }
 
   if (key == "sweepSpeed")
@@ -509,10 +574,16 @@ void setupUI()
       bool success = !Update.hasError();
       request->send(success ? 200 : 500, "application/json", success ? "{\"success\":true}" : "{\"success\":false}");
 
-      // Reboot only after a successful flash write
+      // Reboot only after a successful flash write.
+      // Use a FreeRTOS task so the async TCP stack can flush the HTTP response
+      // before the restart — delay() would block the Arduino task and prevent
+      // ESPAsyncWebServer from transmitting the response.
       if (success) {
-        delay(500); // Short delay to ensure response is sent before rebooting
-        ESP.restart();
+        xTaskCreate([](void*) {
+          vTaskDelay(pdMS_TO_TICKS(1500));
+          ESP.restart();
+          vTaskDelete(nullptr);
+        }, "ota_restart", 2048, nullptr, 1, nullptr);
       } }, [](AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final)
             {
       if (index == 0) {

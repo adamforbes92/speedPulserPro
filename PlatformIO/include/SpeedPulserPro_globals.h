@@ -110,7 +110,16 @@ extern bool tempNeedleSweep;
 // ============================================================================
 extern bool hasNeedleSweep;
 extern bool coilType;
-extern bool broadcastSpeed;
+extern bool broadcastSpeedEnabled;
+extern uint32_t broadcastSpeedID;
+extern uint8_t broadcastSpeedDLC;
+extern uint8_t broadcastSpeedLowByte;
+extern uint8_t broadcastSpeedHighByte;
+extern bool broadcastSpeedLittleEndian;
+extern float broadcastSpeedScale;
+extern int16_t broadcastSpeedOffset;
+extern uint8_t broadcastSpeedData[8];
+extern uint16_t broadcastSpeedValue;
 extern uint8_t sweepSpeed;
 extern uint8_t speedType;
 
@@ -159,7 +168,7 @@ extern unsigned long lastPulseRPM;
 extern bool hasError;
 extern bool hasCAN;
 extern bool hasGPS;
-extern bool gpsTaskSuspended;
+extern bool gpsUnavailable;
 extern bool ledOnboard;
 extern int ledCounter;
 extern int rawCount;

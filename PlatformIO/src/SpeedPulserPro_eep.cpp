@@ -14,7 +14,22 @@ void readEEP() {
   pref.begin("useUDS", false);
   pref.begin("useRPMHall", false);
   pref.begin("useRPMCAN", false);
-  pref.begin("broadcastSpeed", false);
+  pref.begin("brdSpeedEn", false);
+  pref.begin("brdSpeedID", false);
+  pref.begin("brdSpeedDLC", false);
+  pref.begin("brdSpeedLoByte", false);
+  pref.begin("brdSpeedHiByte", false);
+  pref.begin("brdSpeedLE", false);
+  pref.begin("brdSpeedScale", false);
+  pref.begin("brdSpeedOffset", false);
+  pref.begin("brdSD0", false);
+  pref.begin("brdSD1", false);
+  pref.begin("brdSD2", false);
+  pref.begin("brdSD3", false);
+  pref.begin("brdSD4", false);
+  pref.begin("brdSD5", false);
+  pref.begin("brdSD6", false);
+  pref.begin("brdSD7", false);
   pref.begin("coilType", false);
 
   pref.begin("hasNeedleSweep", false);
@@ -56,7 +71,18 @@ void readEEP() {
     pref.putBool("useUDS", useUDS);
     pref.putBool("useRPMHall", useRPMHall);
     pref.putBool("useRPMCAN", useRPMCAN);
-    pref.putBool("broadcastSpeed", broadcastSpeed);
+    pref.putBool("brdSpeedEn", broadcastSpeedEnabled);
+    pref.putUInt("brdSpeedID", broadcastSpeedID);
+    pref.putUChar("brdSpeedDLC", broadcastSpeedDLC);
+    pref.putUChar("brdSpeedLoByte", broadcastSpeedLowByte);
+    pref.putUChar("brdSpeedHiByte", broadcastSpeedHighByte);
+    pref.putBool("brdSpeedLE", broadcastSpeedLittleEndian);
+    pref.putFloat("brdSpeedScale", broadcastSpeedScale);
+    pref.putShort("brdSpeedOffset", broadcastSpeedOffset);
+    for (uint8_t i = 0; i < 8; i++) {
+      String dk = "brdSD" + String(i);
+      pref.putUChar(dk.c_str(), broadcastSpeedData[i]);
+    }
     pref.putBool("coilType", coilType);
 
     pref.putBool("hasNeedleSweep", hasNeedleSweep);
@@ -93,7 +119,18 @@ void readEEP() {
     useUDS = pref.getBool("useUDS", false);
     useRPMHall = pref.getBool("useRPMHall", true);
     useRPMCAN = pref.getBool("useRPMCAN", false);
-    broadcastSpeed = pref.getBool("broadcastSpeed", false);
+    broadcastSpeedEnabled = pref.getBool("brdSpeedEn", false);
+    broadcastSpeedID = pref.getUInt("brdSpeedID", HALDEX_ID) & 0x7FF;
+    broadcastSpeedDLC = pref.getUChar("brdSpeedDLC", 8);
+    broadcastSpeedLowByte = pref.getUChar("brdSpeedLoByte", 2);
+    broadcastSpeedHighByte = pref.getUChar("brdSpeedHiByte", 3);
+    broadcastSpeedLittleEndian = pref.getBool("brdSpeedLE", true);
+    broadcastSpeedScale = pref.getFloat("brdSpeedScale", 0.781f);
+    broadcastSpeedOffset = pref.getShort("brdSpeedOffset", 0);
+    for (uint8_t i = 0; i < 8; i++) {
+      String dk = "brdSD" + String(i);
+      broadcastSpeedData[i] = pref.getUChar(dk.c_str(), 0);
+    }
     coilType = pref.getBool("coilType", false);
 
     hasNeedleSweep = pref.getBool("hasNeedleSweep", false);
@@ -126,6 +163,9 @@ void readEEP() {
 
   averageFilterHall = constrain(averageFilterHall, 1, 10);
   averageFilterRPM = constrain(averageFilterRPM, 1, 10);
+  broadcastSpeedLowByte  = constrain(broadcastSpeedLowByte,  0, 7);
+  broadcastSpeedHighByte = constrain(broadcastSpeedHighByte, 0, 7);
+  broadcastSpeedDLC      = constrain(broadcastSpeedDLC, 0, 8);
   normaliseSpeedOffsetCurve();
 #if serialDebugEEP
   DEBUG_PRINTLN("EEPROM initialised with...");
@@ -156,7 +196,18 @@ void writeEEP() {
   pref.putBool("useUDS", useUDS);
   pref.putBool("useRPMHall", useRPMHall);
   pref.putBool("useRPMCAN", useRPMCAN);
-  pref.putBool("broadcastSpeed", broadcastSpeed);
+  pref.putBool("brdSpeedEn", broadcastSpeedEnabled);
+  pref.putUInt("brdSpeedID", broadcastSpeedID);
+  pref.putUChar("brdSpeedDLC", broadcastSpeedDLC);
+  pref.putUChar("brdSpeedLoByte", broadcastSpeedLowByte);
+  pref.putUChar("brdSpeedHiByte", broadcastSpeedHighByte);
+  pref.putBool("brdSpeedLE", broadcastSpeedLittleEndian);
+  pref.putFloat("brdSpeedScale", broadcastSpeedScale);
+  pref.putShort("brdSpeedOffset", broadcastSpeedOffset);
+  for (uint8_t i = 0; i < 8; i++) {
+    String dk = "brdSD" + String(i);
+    pref.putUChar(dk.c_str(), broadcastSpeedData[i]);
+  }
   pref.putBool("coilType", coilType);
 
   pref.putBool("hasNeedleSweep", hasNeedleSweep);
