@@ -88,6 +88,40 @@ function initNavigation() {
 }
 
 function initControls() {
+    // GPS Rate controls
+    const gpsRateSelect = document.getElementById('gpsRateSelect');
+    const setGpsRateBtn = document.getElementById('setGpsRateBtn');
+    const gpsRateResponse = document.getElementById('gpsRateResponse');
+    // Always populate dropdown for robustness
+    if (gpsRateSelect) {
+      const validRates = [1, 5, 10, 16];
+      gpsRateSelect.innerHTML = '';
+      validRates.forEach(rate => {
+        const opt = document.createElement('option');
+        opt.value = rate;
+        opt.textContent = rate + ' Hz';
+        gpsRateSelect.appendChild(opt);
+      });
+    }
+    if (setGpsRateBtn && gpsRateSelect) {
+      setGpsRateBtn.addEventListener('click', async () => {
+        const rate = parseInt(gpsRateSelect.value, 10);
+        gpsRateResponse.textContent = 'Sending...';
+        try {
+          const resp = await fetch('/api/gpsRate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ rate })
+          });
+          const data = await resp.json();
+          gpsRateResponse.textContent = data.message || (data.success ? 'Success' : 'Failed');
+          gpsRateResponse.style.color = data.success ? '#007a3d' : '#b00020';
+        } catch (e) {
+          gpsRateResponse.textContent = 'Error sending command.';
+          gpsRateResponse.style.color = '#b00020';
+        }
+      });
+    }
   // Dashboard controls
   const testBtn = document.getElementById('testNeedleSweep');
   if (testBtn) {
@@ -399,6 +433,13 @@ async function fetchSettings() {
     document.getElementById('averageFilterHall-display').textContent = data.averageFilterHall || data.averageFilter || 6;
     document.getElementById('averageFilterRPM').value = data.averageFilterRPM || data.averageFilter || 6;
     document.getElementById('averageFilterRPM-display').textContent = data.averageFilterRPM || data.averageFilter || 6;
+    const gpsRateSelect = document.getElementById('gpsRateSelect');
+    if (gpsRateSelect) {
+      const savedGpsRate = String(data.gpsUpdateRateHz ?? 1);
+      gpsRateSelect.value = Array.from(gpsRateSelect.options).some(option => option.value === savedGpsRate)
+        ? savedGpsRate
+        : '1';
+    }
     updateSpeedOffsetStatus(data.speedOffsetType, data.currentSpeedOffset);
 
     const calibrationStatusEl = document.getElementById('calibrationStatus');
@@ -503,6 +544,7 @@ async function fetchStatus() {
     if (document.getElementById('tempDutyCycle-display')) {
       document.getElementById('tempDutyCycle-display').textContent = data.tempDutyCycle || 0;
     }
+
     if (document.getElementById('liveGPSStatus')) {
       if (data.hasGPS) {
         document.getElementById('liveGPSStatus').textContent = `Connected, ${data.gpsSatellites} satellites`;
@@ -511,6 +553,12 @@ async function fetchStatus() {
       } else {
         document.getElementById('liveGPSStatus').textContent = 'Not Connected';
       }
+    }
+
+    // GPS Frequency card
+    if (document.getElementById('liveGPSFrequency')) {
+      const freq = typeof data.gpsFrequency === 'number' ? data.gpsFrequency : null;
+      document.getElementById('liveGPSFrequency').textContent = (freq && freq > 0) ? freq.toFixed(2) : '--';
     }
 
     updateSpeedOffsetStatus(data.speedOffsetType, data.currentSpeedOffset);

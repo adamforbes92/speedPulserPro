@@ -41,6 +41,7 @@ V1.07 - added selections for speed input and tidied up WiFi
 V1.08 - added calibration page
 
 V2.00 - added UDS support for DSG speed reading.  PlatformIO port
+V2.01 - added GPS support for speed reading. Added CAN speed broadcasting. Added GPS update rate configuration and persistence.
 */
 
 #endif // VERSION_H

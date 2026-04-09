@@ -143,6 +143,51 @@
         </div>
 
         <div class="page" id="advanced-page">
+                        <section class="card">
+                            <h2>Live Data - All Inputs</h2>
+                            <div class="live-data-grid">
+                                <div class="live-data-item">
+                                    <div class="live-data-label">RPM</div>
+                                    <div class="live-data-value" id="liveRPM">--</div>
+                                </div>
+                                <div class="live-data-item">
+                                    <div class="live-data-label">Hall RPM</div>
+                                    <div class="live-data-value" id="liveHallRPM">--</div>
+                                </div>
+                                <div class="live-data-item">
+                                    <div class="live-data-label">CAN RPM</div>
+                                    <div class="live-data-value" id="liveCANRPM">--</div>
+                                </div>
+                                <div class="live-data-item">
+                                    <div class="live-data-label">Hall Speed</div>
+                                    <div class="live-data-value" id="liveHallSpeed">--</div>
+                                </div>
+                                <div class="live-data-item">
+                                    <div class="live-data-label">ECU Speed</div>
+                                    <div class="live-data-value" id="liveECUSpeed">--</div>
+                                </div>
+                                <div class="live-data-item">
+                                    <div class="live-data-label">ABS Speed</div>
+                                    <div class="live-data-value" id="liveABSSpeed">--</div>
+                                </div>
+                                <div class="live-data-item">
+                                    <div class="live-data-label">DSG Speed</div>
+                                    <div class="live-data-value" id="liveDSGSpeed">--</div>
+                                </div>
+                                <div class="live-data-item">
+                                    <div class="live-data-label">TP2.0/UDS Speed</div>
+                                    <div class="live-data-value" id="liveUDSSpeed">--</div>
+                                </div>
+                                <div class="live-data-item">
+                                    <div class="live-data-label">GPS Speed</div>
+                                    <div class="live-data-value" id="liveGPSSpeed">--</div>
+                                </div>
+                                <div class="live-data-item">
+                                    <div class="live-data-label">GPS Status</div>
+                                    <div class="live-data-value" id="liveGPSStatus">--</div>
+                                </div>
+                            </div>
+                        </section>
             <section class="card">
                 <h2>Broadcast Speed</h2>
                 <div class="form-group">
@@ -202,62 +247,39 @@
             </section>
 
             <section class="card">
-                <h2>Signal Filters</h2>
+                <h2>GPS Update Rate</h2>
                 <div class="input-group">
-                    <label>Hall Speed Filter Samples (1-10): <span id="averageFilterHall-display">6</span></label>
-                    <input type="range" id="averageFilterHall" min="1" max="10" step="1" value="6" class="slider">
+                    <label>GPS Update Rate</label>
+                    <select id="gpsRateSelect" style="margin-bottom: 0.5rem;">
+                        <option value="1">1 Hz</option>
+                        <option value="5">5 Hz</option>
+                        <option value="10">10 Hz</option>
+                        <option value="16">16 Hz</option>
+                    </select>
+                    <br>
+                    <button class="btn-secondary" id="setGpsRateBtn" style="margin-top: 0.5rem;">Set GPS Rate</button>
                 </div>
                 <div class="input-group">
-                    <label>RPM Filter Samples (1-10): <span id="averageFilterRPM-display">6</span></label>
-                    <input type="range" id="averageFilterRPM" min="1" max="10" step="1" value="6" class="slider">
+                    <span id="gpsRateResponse" style="color: #007a3d;"></span>
+                </div>
+                <div class="live-data-item" style="margin-top: 1rem;">
+                    <div class="live-data-label">GPS Updates/sec</div>
+                    <div class="live-data-value" id="liveGPSFrequency">--</div>
                 </div>
             </section>
 
             <section class="card">
-                <h2>Live Data - All Inputs</h2>
-                <div class="live-data-grid">
-                    <div class="live-data-item">
-                        <div class="live-data-label">RPM</div>
-                        <div class="live-data-value" id="liveRPM">--</div>
-                    </div>
-                    <div class="live-data-item">
-                        <div class="live-data-label">Hall RPM</div>
-                        <div class="live-data-value" id="liveHallRPM">--</div>
-                    </div>
-                    <div class="live-data-item">
-                        <div class="live-data-label">CAN RPM</div>
-                        <div class="live-data-value" id="liveCANRPM">--</div>
-                    </div>
-                    <div class="live-data-item">
-                        <div class="live-data-label">Hall Speed</div>
-                        <div class="live-data-value" id="liveHallSpeed">--</div>
-                    </div>
-                    <div class="live-data-item">
-                        <div class="live-data-label">ECU Speed</div>
-                        <div class="live-data-value" id="liveECUSpeed">--</div>
-                    </div>
-                    <div class="live-data-item">
-                        <div class="live-data-label">ABS Speed</div>
-                        <div class="live-data-value" id="liveABSSpeed">--</div>
-                    </div>
-                    <div class="live-data-item">
-                        <div class="live-data-label">DSG Speed</div>
-                        <div class="live-data-value" id="liveDSGSpeed">--</div>
-                    </div>
-                    <div class="live-data-item">
-                        <div class="live-data-label">TP2.0/UDS Speed</div>
-                        <div class="live-data-value" id="liveUDSSpeed">--</div>
-                    </div>
-                    <div class="live-data-item">
-                        <div class="live-data-label">GPS Speed</div>
-                        <div class="live-data-value" id="liveGPSSpeed">--</div>
-                    </div>
-                    <div class="live-data-item">
-                        <div class="live-data-label">GPS Status</div>
-                        <div class="live-data-value" id="liveGPSStatus">--</div>
-                    </div>
+                <h2>Signal Filters</h2>
+                <div class="input-group">
+                    <label>Hall Speed Filter Samples (1-10): <span id="averageFilterHall-display">6</span></label>
+                    <input type="range" id="averageFilterHall" min="1" max="10" value="6" class="slider">
+                </div>
+                <div class="input-group">
+                    <label>RPM Filter Samples (1-10): <span id="averageFilterRPM-display">6</span></label>
+                    <input type="range" id="averageFilterRPM" min="1" max="10" value="6" class="slider">
                 </div>
             </section>
+
 
             <section class="card">
                 <h2>RPM Output Test</h2>
