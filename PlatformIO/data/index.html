@@ -9,7 +9,7 @@
     <meta http-equiv="Expires" content="0">
 
     <title>SpeedPulserPro</title>
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="style.css?v=2.01">
 </head>
 
 <body>
@@ -82,6 +82,12 @@
                         Enable Needle Sweep
                     </label>
                 </div>
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="linearSpeedSweep">
+                        Linearise Speed Array
+                    </label>
+                </div>
                 <div class="input-group">
                     <label>Sweep Speed (ms)</label>
                     <input type="number" id="sweepSpeed" min="0" max="100" value="0">
@@ -121,8 +127,9 @@
                 </div>
                 <div class="input-group">
                     <label>Maximum Hall Frequency (Hz): <span id="maxFreqHall-display">200</span></label>
-                    <input type="range" id="maxFreqHall" min="0" max="400" step="5" value="200" class="slider">
+                    <input type="range" id="maxFreqHall" min="10" max="500" step="5" value="200" class="slider">
                 </div>
+                <button class="btn-secondary" id="resetMaxFreqHall">Reset Hall Frequency</button>
                 <div class="form-group">
                     <label>
                         <input type="checkbox" id="useGlobalSpeedOffset" checked>
@@ -175,12 +182,20 @@
                                     <div class="live-data-value" id="liveDSGSpeed">--</div>
                                 </div>
                                 <div class="live-data-item">
-                                    <div class="live-data-label">TP2.0/UDS Speed</div>
+                                    <div class="live-data-label">TP2.0 Speed</div>
+                                    <div class="live-data-value" id="liveTP20Speed">--</div>
+                                </div>
+                                <div class="live-data-item">
+                                    <div class="live-data-label">UDS Speed</div>
                                     <div class="live-data-value" id="liveUDSSpeed">--</div>
                                 </div>
                                 <div class="live-data-item">
                                     <div class="live-data-label">GPS Speed</div>
                                     <div class="live-data-value" id="liveGPSSpeed">--</div>
+                                </div>
+                                <div class="live-data-item">
+                                    <div class="live-data-label">Custom CAN Speed</div>
+                                    <div class="live-data-value" id="liveAftermarketSpeed">--</div>
                                 </div>
                                 <div class="live-data-item">
                                     <div class="live-data-label">GPS Status</div>
@@ -318,9 +333,46 @@
                         <option value="ECU">ECU</option>
                         <option value="ABS">ABS</option>
                         <option value="DSG">DSG</option>
-                        <option value="TP2.0-DSG">TP/UDS DSG</option>
+                        <option value="TP2.0">TP2.0 (DSG)</option>
+                        <option value="UDS">UDS</option>
                         <option value="GPS">GPS</option>
+                        <option value="Custom CAN">Custom CAN Input</option>
                     </select>
+                </div>
+            </section>
+
+            <section class="card" id="customCANInputCard" style="display:none;">
+                <h2>Custom CAN Input</h2>
+                <div class="input-group">
+                    <label>CAN ID (Hex)</label>
+                    <input type="text" id="aftermarketSpeedID" value="200" maxlength="3" placeholder="200">
+                </div>
+                <div class="input-group">
+                    <label>Low Byte Index (0-7)</label>
+                    <input type="number" id="aftermarketSpeedLowByte" min="0" max="7" value="0">
+                </div>
+                <div class="input-group">
+                    <label>High Byte Index (0-7)</label>
+                    <input type="number" id="aftermarketSpeedHighByte" min="0" max="7" value="1">
+                </div>
+                <div class="input-group">
+                    <label>Byte Order</label>
+                    <select id="aftermarketSpeedLittleEndian">
+                        <option value="true">Little Endian</option>
+                        <option value="false">Big Endian</option>
+                    </select>
+                </div>
+                <div class="input-group">
+                    <label>Scale</label>
+                    <input type="number" id="aftermarketSpeedScale" step="0.001" value="1.000">
+                </div>
+                <div class="input-group">
+                    <label>Offset</label>
+                    <input type="number" id="aftermarketSpeedOffset" value="0">
+                </div>
+                <div class="live-data-item" style="margin-top: 1rem;">
+                    <div class="live-data-label">Parsed Custom CAN Speed</div>
+                    <div class="live-data-value" id="liveAftermarketSpeedCard">--</div>
                 </div>
             </section>
 
@@ -424,15 +476,31 @@
                     <div class="status-label">Firmware Version</div>
                     <div class="status-value" id="fwVersion">FW: --</div>
                 </div>
-                <p>Select a compiled firmware .bin file and upload it over WiFi.</p>
+                <p>Select a compiled firmware <code>.bin</code> file and upload it over WiFi. The device will reboot automatically.</p>
                 <div class="input-group">
                     <label>Firmware Binary (.bin)</label>
                     <input type="file" id="otaBinFile" accept=".bin,application/octet-stream">
                 </div>
                 <button class="btn-secondary" id="otaUploadBtn">Upload Firmware</button>
+                <progress id="otaProgress" max="100" value="0" class="ota-progress"></progress>
                 <div class="status-item" style="margin-top: 1rem;">
-                    <div class="status-label">OTA Status</div>
+                    <div class="status-label">Status</div>
                     <div class="status-value" id="otaStatus">Idle</div>
+                </div>
+            </section>
+
+            <section class="card">
+                <h2>OTA Filesystem Update</h2>
+                <p>Select a compiled LittleFS <code>.bin</code> to update the web UI and configuration files. The device will reboot automatically.</p>
+                <div class="input-group">
+                    <label>Filesystem Binary (.bin)</label>
+                    <input type="file" id="otaFsBinFile" accept=".bin,application/octet-stream">
+                </div>
+                <button class="btn-secondary" id="otaFsUploadBtn">Upload Filesystem</button>
+                <progress id="otaFsProgress" max="100" value="0" class="ota-progress"></progress>
+                <div class="status-item" style="margin-top: 1rem;">
+                    <div class="status-label">Status</div>
+                    <div class="status-value" id="otaFsStatus">Idle</div>
                 </div>
             </section>
         </div>
@@ -440,8 +508,7 @@
 
     </div>
 
-    <link rel="stylesheet" href="style.css">
-    <script src="app.js"></script>
+    <script src="app.js?v=2.10"></script>
 </body>
 
 </html>

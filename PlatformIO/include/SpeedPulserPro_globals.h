@@ -66,6 +66,7 @@ extern uint16_t dsgSpeed;
 extern uint16_t gpsSpeed;
 extern uint16_t absSpeed;
 extern uint16_t udsSpeed;
+extern uint16_t tp20Speed;
 
 // ============================================================================
 // Motor Performance and Limits
@@ -109,6 +110,7 @@ extern bool tempNeedleSweep;
 // Configuration Variables
 // ============================================================================
 extern bool hasNeedleSweep;
+extern bool linearSpeedSweep;
 extern bool coilType;
 extern bool broadcastSpeedEnabled;
 extern uint32_t broadcastSpeedID;
@@ -132,6 +134,15 @@ extern bool useGPS;
 extern bool useABS;
 extern bool useECU;
 extern bool useUDS;
+extern bool useTP20;
+extern bool useAftermarket;           // speed input: custom CAN (aftermarket)
+extern uint32_t aftermarketSpeedID;      // CAN ID to listen on
+extern uint8_t aftermarketSpeedLowByte;  // byte index holding speed LSB
+extern uint8_t aftermarketSpeedHighByte; // byte index holding speed MSB
+extern bool aftermarketSpeedLittleEndian; // true = LSB at lowByte index
+extern float aftermarketSpeedScale;      // scale applied to raw value
+extern int16_t aftermarketSpeedOffset;   // offset applied after scale
+extern uint16_t aftermarketSpeed;        // parsed speed from aftermarket CAN frame
 
 // RPM Input Selection
 extern bool useRPMHall;
@@ -161,6 +172,13 @@ extern uint32_t lastMillis2;
 extern uint32_t lastCAN;
 extern unsigned long lastPulse;
 extern unsigned long lastPulseRPM;
+
+// ============================================================================
+// SavvyCAN / Analyzer Variables
+// ============================================================================
+extern bool    analyzerMode;      // WiFi GVRET/SLCAN (TCP port 23)
+extern bool    analyzerSerial;    // Serial GVRET (SavvyCAN over USB, 1 Mbaud)
+extern uint8_t analyzerProtocol; // ANALYZER_PROTOCOL_GVRET or ANALYZER_PROTOCOL_LAWICEL
 
 // ============================================================================
 // System Status Variables

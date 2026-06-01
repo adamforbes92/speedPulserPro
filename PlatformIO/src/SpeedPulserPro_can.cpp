@@ -1,5 +1,6 @@
 #include "SpeedPulserPro_can.h"
 #include "SpeedPulserPro_uds.h"
+#include "SpeedPulserPro_savvycan.h"
 #include <driver/twai.h>
 
 // TWAI configuration constants
@@ -82,17 +83,18 @@ void taskCANRx(void *parameter)
       // Message received - process it
       processTWAIMessage(frame);
 
-      // Check if this is a UDS response and process it
-      if (useUDS)
-      {
-        processUDSMessage(frame);
-      }
-    }
+      // Forward to SavvyCAN analyzer if active (single bus = 0)
+      analyzerQueueFrame(frame, 0);
 
-    // Send UDS requests periodically if UDS is enabled
-    if (useUDS)
-    {
-      udsRequestWheelSpeed();
+      // Route frames to protocol task queues
+      if (tp20RxQueue &&
+          (frame.identifier == TP20_DSG_SETUP_RX ||
+           frame.identifier == TP20_RX_ID)) {
+        xQueueSendToBack(tp20RxQueue, &frame, 0);
+      }
+      if (udsRxQueue && frame.identifier == UDS_RX_ID) {
+        xQueueSendToBack(udsRxQueue, &frame, 0);
+      }
     }
 
     // Give other tasks a chance to run
@@ -145,11 +147,11 @@ void processTWAIMessage(const twai_message_t &frame)
   case MOTOR6_ID:
     if (buf[0] == 0x73 || buf[0] == 0x72)
     {
-      vehicleReverse = true;
+      // vehicleReverse = true;  // managed by mWaehlhebel_1_ID / gearLever_ID
     }
     else
     {
-      vehicleReverse = false;
+      // vehicleReverse = false; // managed by mWaehlhebel_1_ID / gearLever_ID
     }
     if (buf[0] == 0x83 || buf[0] == 0x82)
     {
@@ -162,7 +164,10 @@ void processTWAIMessage(const twai_message_t &frame)
     break;
 
   case BRAKES3_ID:
-    absSpeed = (uint16_t)(((buf[3] << 8) | buf[2]) * 1.28f + 0.5f);
+  {
+    const uint16_t br3_speed_raw = (((uint16_t)buf[1] << 8) | buf[0]) >> 1;
+    absSpeed = (uint16_t)(br3_speed_raw * 0.01f + 0.5f);
+  }
     break;
 
   case mWaehlhebel_1_ID:
@@ -204,6 +209,20 @@ void processTWAIMessage(const twai_message_t &frame)
 
   default:
     break;
+  }
+
+  // Aftermarket / Custom CAN speed input
+  if (useAftermarket && id == (aftermarketSpeedID & 0x7FF)) {
+    uint8_t lowIdx  = constrain(aftermarketSpeedLowByte,  0, 7);
+    uint8_t highIdx = constrain(aftermarketSpeedHighByte, 0, 7);
+    uint16_t rawValue;
+    if (aftermarketSpeedLittleEndian) {
+      rawValue = (uint16_t)buf[lowIdx] | ((uint16_t)buf[highIdx] << 8);
+    } else {
+      rawValue = (uint16_t)buf[highIdx] | ((uint16_t)buf[lowIdx] << 8);
+    }
+    float scaled = (rawValue * aftermarketSpeedScale) + aftermarketSpeedOffset;
+    aftermarketSpeed = (uint16_t)constrain((int32_t)(scaled + 0.5f), 0, 65535);
   }
 }
 

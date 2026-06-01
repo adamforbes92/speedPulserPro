@@ -42,6 +42,8 @@ V1.08 - added calibration page
 
 V2.00 - added UDS support for DSG speed reading.  PlatformIO port
 V2.01 - added GPS support for speed reading. Added CAN speed broadcasting. Added GPS update rate configuration and persistence.
+
+V2.10 - added Linearise Speed for Needle Sweep & Tara 120mph calibration
 */
 
 #endif // VERSION_H

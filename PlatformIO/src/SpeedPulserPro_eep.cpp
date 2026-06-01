@@ -1,7 +1,24 @@
 #include "SpeedPulserPro_eep.h"
 #include "SpeedPulserPro_control.h"
+#include "SpeedPulserPro_gps.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
-void readEEP() {
+static SemaphoreHandle_t eepWriteMutex = nullptr;
+
+static SemaphoreHandle_t getEEPWriteMutex()
+{
+  if (eepWriteMutex == nullptr)
+  {
+    eepWriteMutex = xSemaphoreCreateMutex();
+  }
+
+  return eepWriteMutex;
+}
+
+void readEEP()
+{
+  // Read GPS update rate (Hz), default 1
 #if serialDebugEEP
   DEBUG_PRINTLN("EEPROM initialising!");
 #endif
@@ -12,6 +29,7 @@ void readEEP() {
   pref.begin("useABS", false);
   pref.begin("useECU", false);
   pref.begin("useUDS", false);
+  pref.begin("useTP20", false);
   pref.begin("useRPMHall", false);
   pref.begin("useRPMCAN", false);
   pref.begin("brdSpeedEn", false);
@@ -33,6 +51,7 @@ void readEEP() {
   pref.begin("coilType", false);
 
   pref.begin("hasNeedleSweep", false);
+  pref.begin("linSpeedSweep", false);
   pref.begin("sweepSpeed", false);
 
   pref.begin("maxFreqHall", false);
@@ -58,7 +77,17 @@ void readEEP() {
   pref.begin("avgFilterHall", false);
   pref.begin("avgFilterRPM", false);
 
-  if (pref.getUChar("motorPerfVal", 255) == 255) {
+  pref.begin("gpsUpdateRateHz", false);
+  pref.begin("useAftermarket", false);
+  pref.begin("amSpeedID", false);
+  pref.begin("amSpeedLow", false);
+  pref.begin("amSpeedHigh", false);
+  pref.begin("amSpeedLE", false);
+  pref.begin("amSpeedScale", false);
+  pref.begin("amSpeedOffset", false);
+
+  if (pref.getUChar("motorPerfVal", 255) == 255)
+  {
 #if serialDebugEEP
     DEBUG_PRINTLN("First run, set Bluetooth module, write Software Version etc");
     DEBUG_PRINTLN(pref.getUChar("motorPerfVal", 255));
@@ -69,6 +98,7 @@ void readEEP() {
     pref.putBool("useABS", useABS);
     pref.putBool("useECU", useECU);
     pref.putBool("useUDS", useUDS);
+    pref.putBool("useTP20", useTP20);
     pref.putBool("useRPMHall", useRPMHall);
     pref.putBool("useRPMCAN", useRPMCAN);
     pref.putBool("brdSpeedEn", broadcastSpeedEnabled);
@@ -79,13 +109,15 @@ void readEEP() {
     pref.putBool("brdSpeedLE", broadcastSpeedLittleEndian);
     pref.putFloat("brdSpeedScale", broadcastSpeedScale);
     pref.putShort("brdSpeedOffset", broadcastSpeedOffset);
-    for (uint8_t i = 0; i < 8; i++) {
+    for (uint8_t i = 0; i < 8; i++)
+    {
       String dk = "brdSD" + String(i);
       pref.putUChar(dk.c_str(), broadcastSpeedData[i]);
     }
     pref.putBool("coilType", coilType);
 
     pref.putBool("hasNeedleSweep", hasNeedleSweep);
+    pref.putBool("linSpeedSweep", linearSpeedSweep);
     pref.putUChar("sweepSpeed", sweepSpeed);
 
     pref.putUShort("maxFreqHall", maxFreqHall);
@@ -110,13 +142,24 @@ void readEEP() {
     pref.putUChar("averageFilter", averageFilterHall);
     pref.putUChar("avgFilterHall", averageFilterHall);
     pref.putUChar("avgFilterRPM", averageFilterRPM);
-  } else {
+    pref.putUChar("gpsUpdateRateHz", gpsUpdateRateHz);
+    pref.putBool("useAftermarket", useAftermarket);
+    pref.putUInt("amSpeedID", aftermarketSpeedID);
+    pref.putUChar("amSpeedLow", aftermarketSpeedLowByte);
+    pref.putUChar("amSpeedHigh", aftermarketSpeedHighByte);
+    pref.putBool("amSpeedLE", aftermarketSpeedLittleEndian);
+    pref.putFloat("amSpeedScale", aftermarketSpeedScale);
+    pref.putShort("amSpeedOffset", aftermarketSpeedOffset);
+  }
+  else
+  {
     useHall = pref.getBool("useHall", true);
     useDSG = pref.getBool("useDSG", false);
     useGPS = pref.getBool("useGPS", false);
     useABS = pref.getBool("useABS", false);
     useECU = pref.getBool("useECU", false);
     useUDS = pref.getBool("useUDS", false);
+    useTP20 = pref.getBool("useTP20", false);
     useRPMHall = pref.getBool("useRPMHall", true);
     useRPMCAN = pref.getBool("useRPMCAN", false);
     broadcastSpeedEnabled = pref.getBool("brdSpeedEn", false);
@@ -127,13 +170,15 @@ void readEEP() {
     broadcastSpeedLittleEndian = pref.getBool("brdSpeedLE", true);
     broadcastSpeedScale = pref.getFloat("brdSpeedScale", 0.781f);
     broadcastSpeedOffset = pref.getShort("brdSpeedOffset", 0);
-    for (uint8_t i = 0; i < 8; i++) {
+    for (uint8_t i = 0; i < 8; i++)
+    {
       String dk = "brdSD" + String(i);
       broadcastSpeedData[i] = pref.getUChar(dk.c_str(), 0);
     }
     coilType = pref.getBool("coilType", false);
 
     hasNeedleSweep = pref.getBool("hasNeedleSweep", false);
+    linearSpeedSweep = pref.getBool("linSpeedSweep", true);
     sweepSpeed = pref.getUChar("sweepSpeed", 18);
 
     maxFreqHall = pref.getUShort("maxFreqHall", 200);
@@ -153,19 +198,27 @@ void readEEP() {
     speedOffsetCurveOffsets[4] = pref.getShort("curveO4", 0);
     motorPerformanceVal = pref.getUChar("motorPerfVal", 0);
 
-    stepRPM = pref.getUShort("stepRPM", 12);
-    stepSpeed = pref.getUShort("stepSpeed", 10);
+    stepRPM = pref.getUShort("stepRPM", 14);
+    stepSpeed = pref.getUShort("stepSpeed", 17);
 
     uint8_t legacyAverage = pref.getUChar("averageFilter", 6);
     averageFilterHall = pref.getUChar("avgFilterHall", legacyAverage);
     averageFilterRPM = pref.getUChar("avgFilterRPM", legacyAverage);
+    gpsUpdateRateHz = pref.getUChar("gpsUpdateRateHz", 1);
+    useAftermarket = pref.getBool("useAftermarket", false);
+    aftermarketSpeedID = pref.getUInt("amSpeedID", 0x200) & 0x7FF;
+    aftermarketSpeedLowByte = pref.getUChar("amSpeedLow", 0);
+    aftermarketSpeedHighByte = pref.getUChar("amSpeedHigh", 1);
+    aftermarketSpeedLittleEndian = pref.getBool("amSpeedLE", true);
+    aftermarketSpeedScale = pref.getFloat("amSpeedScale", 1.0f);
+    aftermarketSpeedOffset = pref.getShort("amSpeedOffset", 0);
   }
 
   averageFilterHall = constrain(averageFilterHall, 1, 10);
   averageFilterRPM = constrain(averageFilterRPM, 1, 10);
-  broadcastSpeedLowByte  = constrain(broadcastSpeedLowByte,  0, 7);
+  broadcastSpeedLowByte = constrain(broadcastSpeedLowByte, 0, 7);
   broadcastSpeedHighByte = constrain(broadcastSpeedHighByte, 0, 7);
-  broadcastSpeedDLC      = constrain(broadcastSpeedDLC, 0, 8);
+  broadcastSpeedDLC = constrain(broadcastSpeedDLC, 0, 8);
   normaliseSpeedOffsetCurve();
 #if serialDebugEEP
   DEBUG_PRINTLN("EEPROM initialised with...");
@@ -183,7 +236,16 @@ void readEEP() {
 #endif
 }
 
-void writeEEP() {
+void writeEEP()
+{
+  SemaphoreHandle_t writeMutex = getEEPWriteMutex();
+  if ((writeMutex == nullptr) || (xSemaphoreTake(writeMutex, pdMS_TO_TICKS(1000)) != pdTRUE))
+  {
+    return;
+  }
+
+  // Write GPS update rate
+  pref.putUChar("gpsUpdateRateHz", gpsUpdateRateHz);
 #if serialDebugEEP
   DEBUG_PRINTLN("Writing EEPROM...");
 #endif
@@ -194,6 +256,7 @@ void writeEEP() {
   pref.putBool("useABS", useABS);
   pref.putBool("useECU", useECU);
   pref.putBool("useUDS", useUDS);
+  pref.putBool("useTP20", useTP20);
   pref.putBool("useRPMHall", useRPMHall);
   pref.putBool("useRPMCAN", useRPMCAN);
   pref.putBool("brdSpeedEn", broadcastSpeedEnabled);
@@ -204,13 +267,15 @@ void writeEEP() {
   pref.putBool("brdSpeedLE", broadcastSpeedLittleEndian);
   pref.putFloat("brdSpeedScale", broadcastSpeedScale);
   pref.putShort("brdSpeedOffset", broadcastSpeedOffset);
-  for (uint8_t i = 0; i < 8; i++) {
+  for (uint8_t i = 0; i < 8; i++)
+  {
     String dk = "brdSD" + String(i);
     pref.putUChar(dk.c_str(), broadcastSpeedData[i]);
   }
   pref.putBool("coilType", coilType);
 
   pref.putBool("hasNeedleSweep", hasNeedleSweep);
+  pref.putBool("linSpeedSweep", linearSpeedSweep);
   pref.putUChar("sweepSpeed", sweepSpeed);
 
   pref.putUShort("maxFreqHall", maxFreqHall);
@@ -236,6 +301,15 @@ void writeEEP() {
   pref.putUChar("avgFilterHall", averageFilterHall);
   pref.putUChar("avgFilterRPM", averageFilterRPM);
 
+  pref.putUChar("gpsUpdateRateHz", gpsUpdateRateHz);
+  pref.putBool("useAftermarket", useAftermarket);
+  pref.putUInt("amSpeedID", aftermarketSpeedID);
+  pref.putUChar("amSpeedLow", aftermarketSpeedLowByte);
+  pref.putUChar("amSpeedHigh", aftermarketSpeedHighByte);
+  pref.putBool("amSpeedLE", aftermarketSpeedLittleEndian);
+  pref.putFloat("amSpeedScale", aftermarketSpeedScale);
+  pref.putShort("amSpeedOffset", aftermarketSpeedOffset);
+
 #if serialDebugEEP
   DEBUG_PRINTLN("Written EEPROM with data:...");
   DEBUG_PRINTLN(testSpeedo);
@@ -249,4 +323,6 @@ void writeEEP() {
   DEBUG_PRINTLN(speedOffsetPositive);
   DEBUG_PRINTLN(motorPerformanceVal);
 #endif
+
+  xSemaphoreGive(writeMutex);
 }

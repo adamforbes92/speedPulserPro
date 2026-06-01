@@ -20,6 +20,7 @@
 #define labelRefresh 200
 #define wifiDisable 60000
 #define wifiHostName "SpeedPulserPro"
+#define FW_VERSION "2.10"
 
 // Speed Input Configuration
 #define incomingType 0

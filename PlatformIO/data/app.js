@@ -107,6 +107,7 @@ function initControls() {
       setGpsRateBtn.addEventListener('click', async () => {
         const rate = parseInt(gpsRateSelect.value, 10);
         gpsRateResponse.textContent = 'Sending...';
+        window.gpsRateUserMessageUntil = Date.now() + 4000;
         try {
           const resp = await fetch('/api/gpsRate', {
             method: 'POST',
@@ -116,9 +117,11 @@ function initControls() {
           const data = await resp.json();
           gpsRateResponse.textContent = data.message || (data.success ? 'Success' : 'Failed');
           gpsRateResponse.style.color = data.success ? '#007a3d' : '#b00020';
+          window.gpsRateUserMessageUntil = Date.now() + 4000;
         } catch (e) {
           gpsRateResponse.textContent = 'Error sending command.';
           gpsRateResponse.style.color = '#b00020';
+          window.gpsRateUserMessageUntil = Date.now() + 4000;
         }
       });
     }
@@ -131,6 +134,11 @@ function initControls() {
   const otaUploadBtn = document.getElementById('otaUploadBtn');
   if (otaUploadBtn) {
     otaUploadBtn.addEventListener('click', uploadFirmware);
+  }
+
+  const otaFsUploadBtn = document.getElementById('otaFsUploadBtn');
+  if (otaFsUploadBtn) {
+    otaFsUploadBtn.addEventListener('click', uploadFilesystem);
   }
 
   const resetMaxRPMBtn = document.getElementById('resetMaxRPM');
@@ -180,6 +188,7 @@ function initControls() {
   // Configuration controls
   const configInputs = [
     'hasNeedleSweep',
+    'linearSpeedSweep',
     'sweepSpeed',
     'stepRPM',
     'stepSpeed',
@@ -218,6 +227,17 @@ function initControls() {
       }
     }
   });
+
+  const resetMaxFreqHallBtn = document.getElementById('resetMaxFreqHall');
+  const maxFreqHallEl = document.getElementById('maxFreqHall');
+  if (resetMaxFreqHallBtn && maxFreqHallEl) {
+    resetMaxFreqHallBtn.addEventListener('click', () => {
+      maxFreqHallEl.value = 200;
+      const displayEl = document.getElementById('maxFreqHall-display');
+      if (displayEl) displayEl.textContent = '200';
+      pushControl('maxFreqHall', 200);
+    });
+  }
 
   const calibrationInputs = ['useSpeedOffsetCurve', 'curveOffset0', 'curveOffset1', 'curveOffset2', 'curveOffset3', 'curveOffset4'];
   calibrationInputs.forEach(id => {
@@ -269,7 +289,9 @@ function initControls() {
     'broadcastSpeedLowByte', 'broadcastSpeedHighByte', 'broadcastSpeedLittleEndian',
     'broadcastSpeedScale', 'broadcastSpeedOffset',
     'broadcastSpeedData0', 'broadcastSpeedData1', 'broadcastSpeedData2', 'broadcastSpeedData3',
-    'broadcastSpeedData4', 'broadcastSpeedData5', 'broadcastSpeedData6', 'broadcastSpeedData7'
+    'broadcastSpeedData4', 'broadcastSpeedData5', 'broadcastSpeedData6', 'broadcastSpeedData7',
+    'aftermarketSpeedID', 'aftermarketSpeedLowByte', 'aftermarketSpeedHighByte',
+    'aftermarketSpeedLittleEndian', 'aftermarketSpeedScale', 'aftermarketSpeedOffset'
   ];
   advancedInputs.forEach(id => {
     const el = document.getElementById(id);
@@ -278,9 +300,9 @@ function initControls() {
         let value;
         if (el.type === 'checkbox') {
           value = el.checked;
-        } else if (id === 'broadcastSpeedID') {
+        } else if (id === 'broadcastSpeedID' || id === 'aftermarketSpeedID') {
           value = el.value.trim();
-        } else if (id === 'broadcastSpeedLittleEndian') {
+        } else if (id === 'broadcastSpeedLittleEndian' || id === 'aftermarketSpeedLittleEndian') {
           value = el.value === 'true';
         } else {
           value = el.type === 'number' || el.type === 'range' ? Number(el.value) : el.value;
@@ -326,9 +348,16 @@ function initControls() {
 
   // Speed source dropdown
   const speedSourceEl = document.getElementById('speedSource');
+  function updateCustomCANVisibility() {
+    const card = document.getElementById('customCANInputCard');
+    if (card && speedSourceEl) {
+      card.style.display = speedSourceEl.value === 'Custom CAN' ? '' : 'none';
+    }
+  }
   if (speedSourceEl) {
     speedSourceEl.addEventListener('change', () => {
       pushControl('speedType', speedSourceEl.value);
+      updateCustomCANVisibility();
     });
   }
 
@@ -343,6 +372,7 @@ function initControls() {
 async function uploadFirmware() {
   const fileInput = document.getElementById('otaBinFile');
   const statusEl = document.getElementById('otaStatus');
+  const progressEl = document.getElementById('otaProgress');
   const uploadBtn = document.getElementById('otaUploadBtn');
 
   if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
@@ -351,33 +381,98 @@ async function uploadFirmware() {
   }
 
   const file = fileInput.files[0];
-  if (!file.name.toLowerCase().endsWith('.bin')) {
-    if (statusEl) statusEl.textContent = 'Invalid file type. Please choose a .bin firmware';
-    return;
-  }
-
   const formData = new FormData();
   formData.append('firmware', file, file.name);
 
-  try {
-    if (statusEl) statusEl.textContent = 'Uploading... do not power off';
-    if (uploadBtn) uploadBtn.disabled = true;
+  return new Promise((resolve) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/ota');
 
-    const response = await fetch('/api/ota', {
-      method: 'POST',
-      body: formData
+    if (uploadBtn) uploadBtn.disabled = true;
+    if (progressEl) { progressEl.style.display = 'block'; progressEl.value = 0; }
+
+    xhr.upload.addEventListener('progress', (e) => {
+      if (e.lengthComputable) {
+        const pct = Math.round((e.loaded / e.total) * 100);
+        if (statusEl) statusEl.textContent = `Uploading... ${pct}%`;
+        if (progressEl) progressEl.value = pct;
+      }
     });
 
-    if (response.ok) {
-      if (statusEl) statusEl.textContent = 'Upload complete. Device rebooting...';
-    } else {
-      if (statusEl) statusEl.textContent = 'Upload failed. Please try again';
-    }
-  } catch (error) {
-    if (statusEl) statusEl.textContent = 'Upload failed. Check connection and retry';
-  } finally {
-    if (uploadBtn) uploadBtn.disabled = false;
+    xhr.addEventListener('load', () => {
+      if (xhr.status === 200) {
+        if (statusEl) statusEl.textContent = 'Upload complete. Device rebooting...';
+        if (progressEl) progressEl.value = 100;
+      } else {
+        if (statusEl) statusEl.textContent = 'Upload failed. Please try again.';
+        if (progressEl) progressEl.style.display = 'none';
+        if (uploadBtn) uploadBtn.disabled = false;
+      }
+      resolve();
+    });
+
+    xhr.addEventListener('error', () => {
+      if (statusEl) statusEl.textContent = 'Upload failed. Check connection and retry.';
+      if (progressEl) progressEl.style.display = 'none';
+      if (uploadBtn) uploadBtn.disabled = false;
+      resolve();
+    });
+
+    xhr.send(formData);
+  });
+}
+
+async function uploadFilesystem() {
+  const fileInput = document.getElementById('otaFsBinFile');
+  const statusEl = document.getElementById('otaFsStatus');
+  const progressEl = document.getElementById('otaFsProgress');
+  const uploadBtn = document.getElementById('otaFsUploadBtn');
+
+  if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
+    if (statusEl) statusEl.textContent = 'Please select a .bin file first';
+    return;
   }
+
+  const file = fileInput.files[0];
+  const formData = new FormData();
+  formData.append('filesystem', file, file.name);
+
+  return new Promise((resolve) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/ota/fs');
+
+    if (uploadBtn) uploadBtn.disabled = true;
+    if (progressEl) { progressEl.style.display = 'block'; progressEl.value = 0; }
+
+    xhr.upload.addEventListener('progress', (e) => {
+      if (e.lengthComputable) {
+        const pct = Math.round((e.loaded / e.total) * 100);
+        if (statusEl) statusEl.textContent = `Uploading... ${pct}%`;
+        if (progressEl) progressEl.value = pct;
+      }
+    });
+
+    xhr.addEventListener('load', () => {
+      if (xhr.status === 200) {
+        if (statusEl) statusEl.textContent = 'Upload complete. Device rebooting...';
+        if (progressEl) progressEl.value = 100;
+      } else {
+        if (statusEl) statusEl.textContent = 'Upload failed. Please try again.';
+        if (progressEl) progressEl.style.display = 'none';
+        if (uploadBtn) uploadBtn.disabled = false;
+      }
+      resolve();
+    });
+
+    xhr.addEventListener('error', () => {
+      if (statusEl) statusEl.textContent = 'Upload failed. Check connection and retry.';
+      if (progressEl) progressEl.style.display = 'none';
+      if (uploadBtn) uploadBtn.disabled = false;
+      resolve();
+    });
+
+    xhr.send(formData);
+  });
 }
 
 async function fetchSettings() {
@@ -387,6 +482,8 @@ async function fetchSettings() {
 
     // Load all settings from API once
     document.getElementById('hasNeedleSweep').checked = data.hasNeedleSweep || false;
+    const linearSweepEl = document.getElementById('linearSpeedSweep');
+    if (linearSweepEl) linearSweepEl.checked = data.linearSpeedSweep !== false;
     document.getElementById('broadcastSpeedEnabled').checked = data.broadcastSpeedEnabled || false;
     document.getElementById('broadcastSpeedID').value = (data.broadcastSpeedID || 0).toString(16).toUpperCase();
     document.getElementById('broadcastSpeedDLC').value = data.broadcastSpeedDLC ?? 8;
@@ -467,9 +564,21 @@ async function fetchSettings() {
     if (data.speedType === 'ECU') speedTypeValue = 'ECU';
     else if (data.speedType === 'ABS') speedTypeValue = 'ABS';
     else if (data.speedType === 'DSG') speedTypeValue = 'DSG';
-    else if (data.speedType === 'TP2.0-DSG' || data.speedType === 'TP/UDS DSG') speedTypeValue = 'TP2.0-DSG';
+    else if (data.speedType === 'TP2.0') speedTypeValue = 'TP2.0';
+    else if (data.speedType === 'UDS') speedTypeValue = 'UDS';
     else if (data.speedType === 'GPS') speedTypeValue = 'GPS';
+    else if (data.speedType === 'Custom CAN') speedTypeValue = 'Custom CAN';
     document.getElementById('speedSource').value = speedTypeValue;
+    const customCANCard = document.getElementById('customCANInputCard');
+    if (customCANCard) customCANCard.style.display = speedTypeValue === 'Custom CAN' ? '' : 'none';
+
+    // Aftermarket / Custom CAN input settings
+    document.getElementById('aftermarketSpeedID').value = (data.aftermarketSpeedID || 0).toString(16).toUpperCase();
+    document.getElementById('aftermarketSpeedLowByte').value = data.aftermarketSpeedLowByte ?? 0;
+    document.getElementById('aftermarketSpeedHighByte').value = data.aftermarketSpeedHighByte ?? 1;
+    document.getElementById('aftermarketSpeedLittleEndian').value = (data.aftermarketSpeedLittleEndian !== false) ? 'true' : 'false';
+    document.getElementById('aftermarketSpeedScale').value = (data.aftermarketSpeedScale ?? 1.0).toFixed(3);
+    document.getElementById('aftermarketSpeedOffset').value = data.aftermarketSpeedOffset ?? 0;
 
     // RPM source dropdown
     document.getElementById('rpmSource').value = (data.rpmType === 'CAN') ? 'CAN' : 'Hall';
@@ -535,11 +644,20 @@ async function fetchStatus() {
     if (document.getElementById('liveDSGSpeed')) {
       document.getElementById('liveDSGSpeed').textContent = data.dsgSpeed || '--';
     }
+    if (document.getElementById('liveTP20Speed')) {
+      document.getElementById('liveTP20Speed').textContent = data.tp20Speed !== undefined ? data.tp20Speed : '--';
+    }
     if (document.getElementById('liveUDSSpeed')) {
-      document.getElementById('liveUDSSpeed').textContent = data.udsSpeed || '--';
+      document.getElementById('liveUDSSpeed').textContent = data.udsSpeed !== undefined ? data.udsSpeed : '--';
     }
     if (document.getElementById('liveGPSSpeed')) {
       document.getElementById('liveGPSSpeed').textContent = data.gpsSpeed || '--';
+    }
+    if (document.getElementById('liveAftermarketSpeed')) {
+      document.getElementById('liveAftermarketSpeed').textContent = data.aftermarketSpeed !== undefined ? data.aftermarketSpeed : '--';
+    }
+    if (document.getElementById('liveAftermarketSpeedCard')) {
+      document.getElementById('liveAftermarketSpeedCard').textContent = data.aftermarketSpeed !== undefined ? data.aftermarketSpeed : '--';
     }
     if (document.getElementById('tempDutyCycle-display')) {
       document.getElementById('tempDutyCycle-display').textContent = data.tempDutyCycle || 0;
@@ -557,8 +675,27 @@ async function fetchStatus() {
 
     // GPS Frequency card
     if (document.getElementById('liveGPSFrequency')) {
-      const freq = typeof data.gpsFrequency === 'number' ? data.gpsFrequency : null;
-      document.getElementById('liveGPSFrequency').textContent = (freq && freq > 0) ? freq.toFixed(2) : '--';
+      const rawFreq = data.gpsFrequency;
+      const freq = (typeof rawFreq === 'number') ? rawFreq : Number(rawFreq);
+      document.getElementById('liveGPSFrequency').textContent = Number.isFinite(freq) ? freq.toFixed(2) : '--';
+    }
+
+    // GPS auto rate countdown - show in the same green response area used by
+    // the Set button, but only when the user isn't actively reading their
+    // own click feedback.
+    const gpsRateResponseEl = document.getElementById('gpsRateResponse');
+    if (gpsRateResponseEl && (!window.gpsRateUserMessageUntil || Date.now() > window.gpsRateUserMessageUntil)) {
+      const secs = data.gpsAutoApplySecs;
+      if (typeof secs === 'number' && secs >= 0) {
+        gpsRateResponseEl.style.color = '#007a3d';
+        if (secs === 0) {
+          gpsRateResponseEl.textContent = 'Auto-applying saved rate...';
+        } else {
+          gpsRateResponseEl.textContent = `Auto-apply in ${secs}s (waiting for satellite lock + 20s).`;
+        }
+      } else if (gpsRateResponseEl.textContent.startsWith('Auto-apply') || gpsRateResponseEl.textContent.startsWith('Auto-applying')) {
+        gpsRateResponseEl.textContent = '';
+      }
     }
 
     updateSpeedOffsetStatus(data.speedOffsetType, data.currentSpeedOffset);
