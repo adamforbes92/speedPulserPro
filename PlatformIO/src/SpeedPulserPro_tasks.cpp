@@ -197,6 +197,10 @@ void taskProcessSpeed(void *parameter)
         vehicleSpeed = constrain(lastValidVehicleSpeed, 0, maxSpeed);
       }
       dutyCycle = applyConfiguredSpeedOffset(vehicleSpeed);
+      if (convertToMPH)
+      {
+        dutyCycle = dutyCycle * mphFactor;
+      }
     }
     else
     {
@@ -245,6 +249,10 @@ void taskProcessSpeed(void *parameter)
       }
 
       dutyCycle = applyConfiguredSpeedOffset(vehicleSpeed);
+      if (convertToMPH)
+      {
+        dutyCycle = dutyCycle * mphFactor;
+      }
     }
 
 #if serialDebugIncoming

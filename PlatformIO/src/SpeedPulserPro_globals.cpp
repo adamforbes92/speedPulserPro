@@ -96,6 +96,7 @@ bool tempNeedleSweep = false;
 bool hasNeedleSweep = false;
 bool linearSpeedSweep = true;
 bool coilType = false;
+bool convertToMPH = false;
 bool broadcastSpeedEnabled = false;
 uint32_t broadcastSpeedID = HALDEX_ID;
 uint8_t broadcastSpeedDLC = 8;

@@ -44,6 +44,7 @@ V2.00 - added UDS support for DSG speed reading.  PlatformIO port
 V2.01 - added GPS support for speed reading. Added CAN speed broadcasting. Added GPS update rate configuration and persistence.
 
 V2.10 - added Linearise Speed for Needle Sweep & Tara 120mph calibration
+V2.20 - added SavvyCAN and Cluster in MPH
 */
 
 #endif // VERSION_H

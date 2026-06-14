@@ -112,6 +112,7 @@ extern bool tempNeedleSweep;
 extern bool hasNeedleSweep;
 extern bool linearSpeedSweep;
 extern bool coilType;
+extern bool convertToMPH;
 extern bool broadcastSpeedEnabled;
 extern uint32_t broadcastSpeedID;
 extern uint8_t broadcastSpeedDLC;

@@ -20,7 +20,7 @@
 #define labelRefresh 200
 #define wifiDisable 60000
 #define wifiHostName "SpeedPulserPro"
-#define FW_VERSION "2.10"
+#define FW_VERSION "2.20"
 
 // Speed Input Configuration
 #define incomingType 0
@@ -45,7 +45,6 @@
 
 // Motor Configuration
 #define speedMultiplier 1
-#define convertToMPH 0
 #define mphFactor 0.621371
 
 // DSG Configuration

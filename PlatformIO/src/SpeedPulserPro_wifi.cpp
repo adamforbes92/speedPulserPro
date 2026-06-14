@@ -32,6 +32,7 @@ void handleGetSettings(AsyncWebServerRequest *request)
   doc["hasNeedleSweep"] = hasNeedleSweep;
   doc["linearSpeedSweep"] = linearSpeedSweep;
   doc["coilType"] = coilType;
+  doc["convertToMPH"] = convertToMPH;
   doc["broadcastSpeedEnabled"] = broadcastSpeedEnabled;
   doc["broadcastSpeedID"] = broadcastSpeedID;
   doc["broadcastSpeedDLC"] = broadcastSpeedDLC;
@@ -146,6 +147,7 @@ void handleGetStatus(AsyncWebServerRequest *request)
   // System status
   doc["hasCAN"] = hasCAN;
   doc["hasGPS"] = hasGPS;
+  doc["convertToMPH"] = convertToMPH;
   doc["broadcastSpeedEnabled"] = broadcastSpeedEnabled;
   doc["broadcastSpeedValue"] = broadcastSpeedValue;
   doc["aftermarketSpeed"] = aftermarketSpeed;
@@ -214,6 +216,11 @@ void handlePostControl(AsyncWebServerRequest *request, uint8_t *data, size_t len
   if (key == "coilType")
   {
     coilType = (value == "true" || value == "1");
+  }
+
+  if (key == "convertToMPH")
+  {
+    convertToMPH = (value == "true" || value == "1");
   }
 
   if (key == "broadcastSpeedEnabled")

@@ -193,6 +193,7 @@ function initControls() {
     'stepRPM',
     'stepSpeed',
     'coilType',
+    'convertToMPH',
     'motorCalibration',
     'maxSpeed',
     'maxFreqHall',
@@ -213,6 +214,10 @@ function initControls() {
           if (selectedOption && calibrationStatusEl) {
             calibrationStatusEl.textContent = `Cal: ${selectedOption.textContent}`;
           }
+        }
+
+        if (id === 'convertToMPH') {
+          applySpeedUnitLabels(el.checked);
         }
       });
 
@@ -475,6 +480,14 @@ async function uploadFilesystem() {
   });
 }
 
+function applySpeedUnitLabels(useMPH) {
+  const label = useMPH ? 'MPH' : 'KMH';
+  ['speedUnit', 'speedOffsetUnit'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = label;
+  });
+}
+
 async function fetchSettings() {
   try {
     const response = await fetch('/api/settings');
@@ -500,6 +513,8 @@ async function fetchSettings() {
     document.getElementById('stepRPM').value = data.stepRPM || 100;
     document.getElementById('stepSpeed').value = data.stepSpeed || 100;
     document.getElementById('coilType').checked = data.coilType || false;
+    document.getElementById('convertToMPH').checked = data.convertToMPH || false;
+    applySpeedUnitLabels(!!data.convertToMPH);
     currentCalibrationId = parseInt(data.motorCalibration || currentCalibrationId || 1, 10) || 1;
     document.getElementById('motorCalibration').value = String(currentCalibrationId);
     document.getElementById('maxSpeed').value = data.maxSpeed || 200;
@@ -602,6 +617,9 @@ async function fetchStatus() {
     // Update dashboard live data
     document.getElementById('speed').textContent = data.vehicleSpeed || '--';
     document.getElementById('rpm').textContent = data.vehicleRPM || '--';
+    if (data.convertToMPH !== undefined) {
+      applySpeedUnitLabels(!!data.convertToMPH);
+    }
     
     // Add test mode indicators
     const speedElement = document.getElementById('speed');

@@ -49,6 +49,7 @@ void readEEP()
   pref.begin("brdSD6", false);
   pref.begin("brdSD7", false);
   pref.begin("coilType", false);
+  pref.begin("convertToMPH", false);
 
   pref.begin("hasNeedleSweep", false);
   pref.begin("linSpeedSweep", false);
@@ -115,6 +116,7 @@ void readEEP()
       pref.putUChar(dk.c_str(), broadcastSpeedData[i]);
     }
     pref.putBool("coilType", coilType);
+    pref.putBool("convertToMPH", convertToMPH);
 
     pref.putBool("hasNeedleSweep", hasNeedleSweep);
     pref.putBool("linSpeedSweep", linearSpeedSweep);
@@ -176,6 +178,7 @@ void readEEP()
       broadcastSpeedData[i] = pref.getUChar(dk.c_str(), 0);
     }
     coilType = pref.getBool("coilType", false);
+    convertToMPH = pref.getBool("convertToMPH", false);
 
     hasNeedleSweep = pref.getBool("hasNeedleSweep", false);
     linearSpeedSweep = pref.getBool("linSpeedSweep", true);
@@ -273,6 +276,7 @@ void writeEEP()
     pref.putUChar(dk.c_str(), broadcastSpeedData[i]);
   }
   pref.putBool("coilType", coilType);
+  pref.putBool("convertToMPH", convertToMPH);
 
   pref.putBool("hasNeedleSweep", hasNeedleSweep);
   pref.putBool("linSpeedSweep", linearSpeedSweep);
