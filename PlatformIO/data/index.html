@@ -301,6 +301,26 @@
                 </div>
             </section>
 
+            <section class="card">
+                <h2>CAN Analyzer</h2>
+                <p style="margin-top: 0;">
+                    Forward all received CAN frames to SavvyCAN. WiFi and Serial modes are mutually exclusive.
+                    <br>WiFi (GVRET): connect SavvyCAN to <strong>192.168.4.1:23</strong>.
+                    <br>Serial (GVRET): select the COM port in SavvyCAN &mdash; baud is set automatically.
+                </p>
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="analyzerMode">
+                        SavvyCAN via WiFi
+                    </label>
+                </div>
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="analyzerSerial">
+                        SavvyCAN via Serial
+                    </label>
+                </div>
+            </section>
 
             <section class="card">
                 <h2>RPM Output Test</h2>

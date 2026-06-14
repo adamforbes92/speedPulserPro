@@ -244,6 +244,26 @@ function initControls() {
     });
   }
 
+  // CAN Analyzer - SavvyCAN: WiFi and Serial are mutually exclusive
+  const analyzerModeEl = document.getElementById('analyzerMode');
+  const analyzerSerialEl = document.getElementById('analyzerSerial');
+  if (analyzerModeEl && analyzerSerialEl) {
+    analyzerModeEl.addEventListener('change', () => {
+      if (analyzerModeEl.checked) {
+        analyzerSerialEl.checked = false;
+        pushControl('analyzerSerial', false);
+      }
+      pushControl('analyzerMode', analyzerModeEl.checked);
+    });
+    analyzerSerialEl.addEventListener('change', () => {
+      if (analyzerSerialEl.checked) {
+        analyzerModeEl.checked = false;
+        pushControl('analyzerMode', false);
+      }
+      pushControl('analyzerSerial', analyzerSerialEl.checked);
+    });
+  }
+
   const calibrationInputs = ['useSpeedOffsetCurve', 'curveOffset0', 'curveOffset1', 'curveOffset2', 'curveOffset3', 'curveOffset4'];
   calibrationInputs.forEach(id => {
     const el = document.getElementById(id);
@@ -573,6 +593,10 @@ async function fetchSettings() {
     document.getElementById('maxRPM-display').textContent = data.maxRPM || 230;
     document.getElementById('clusterRPMLimit').value = data.clusterRPMLimit || 7000;
     document.getElementById('clusterRPMLimit-display').textContent = data.clusterRPMLimit || 7000;
+    const analyzerModeEl = document.getElementById('analyzerMode');
+    if (analyzerModeEl) analyzerModeEl.checked = data.analyzerMode || false;
+    const analyzerSerialEl = document.getElementById('analyzerSerial');
+    if (analyzerSerialEl) analyzerSerialEl.checked = data.analyzerSerial || false;
 
     // Speed type dropdown - map speedType to dropdown options
     let speedTypeValue = 'Hall';  // default

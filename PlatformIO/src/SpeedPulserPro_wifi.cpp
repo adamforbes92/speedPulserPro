@@ -9,6 +9,7 @@
 #include "SpeedPulserPro_tasks.h"
 #include "SpeedPulserPro_control.h"
 #include "SpeedPulserPro_gps.h"
+#include "SpeedPulserPro_savvycan.h"
 
 static uint32_t parseHexCanId(const String& text, uint32_t defaultVal) {
   String s = text;
@@ -106,6 +107,9 @@ void handleGetSettings(AsyncWebServerRequest *request)
     doc["rpmType"] = "CAN";
   else
     doc["rpmType"] = "Hall";
+
+  doc["analyzerMode"] = analyzerMode;
+  doc["analyzerSerial"] = analyzerSerial;
 
   doc["FW_VERSION"] = FW_VERSION;
 
@@ -566,6 +570,18 @@ void handlePostControl(AsyncWebServerRequest *request, uint8_t *data, size_t len
       useRPMHall = true;
       useRPMCAN = false;
     }
+  }
+
+  if (key == "analyzerMode") {
+    analyzerMode = (value == "true" || value == "1");
+    if (analyzerMode) analyzerSerial = false;  // mutually exclusive
+    setAnalyzerMode(analyzerMode);
+  }
+
+  if (key == "analyzerSerial") {
+    analyzerSerial = (value == "true" || value == "1");
+    if (analyzerSerial) analyzerMode = false;  // mutually exclusive
+    setAnalyzerSerialMode(analyzerSerial);
   }
 
   request->send(200);
