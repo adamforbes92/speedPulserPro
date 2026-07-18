@@ -20,6 +20,7 @@
 #define labelRefresh 200
 #define wifiDisable 60000
 #define wifiHostName "SpeedPulserPro"
+#define FW_VERSION "2.40"
 
 // Speed Input Configuration
 #define incomingType 0
@@ -44,7 +45,6 @@
 
 // Motor Configuration
 #define speedMultiplier 1
-#define convertToMPH 0
 #define mphFactor 0.621371
 
 // DSG Configuration
@@ -81,7 +81,10 @@
 #define emeraldECU2_ID 0x1001
 
 // Debug Macros
-#ifdef serialDebug
+// NOTE: use #if (not #ifdef) — the flags are #define'd to 0/1, so #ifdef would
+// always be true (0 still counts as "defined") and the macros would print even
+// when serialDebug is 0.
+#if serialDebug
 #define DEBUG_PRINT(x) Serial.print(x)
 #define DEBUG_PRINTLN(x) Serial.println(x)
 #define DEBUG_PRINTF(x...) Serial.printf(x)

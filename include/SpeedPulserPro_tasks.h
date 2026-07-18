@@ -13,6 +13,8 @@ extern TaskHandle_t taskDSGHandle;
 extern TaskHandle_t taskSpeedHandle;
 extern TaskHandle_t taskRPMHandle;
 extern TaskHandle_t taskBroadcastSpeedHandle;
+extern TaskHandle_t taskTP20Handle;
+extern TaskHandle_t taskUDSHandle;
 
 // Task function prototypes
 void taskWriteEEP(void *parameter);
@@ -42,7 +44,7 @@ void setBroadcastSpeedTaskEnabled(bool enabled);
 // Stack sizes (in 32-bit words, not bytes)
 #define STACK_SIZE_EEPROM 2048
 #define STACK_SIZE_UI 3072
-#define STACK_SIZE_GPS 2048
+#define STACK_SIZE_GPS 8192
 #define STACK_SIZE_DSG 2048
 #define STACK_SIZE_SPEED 3072
 #define STACK_SIZE_RPM 2048

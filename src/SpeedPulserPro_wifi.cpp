@@ -4,21 +4,49 @@
 #include <ESPAsyncWebServer.h>
 #include <Update.h>
 #include "SpeedPulserPro_wifi.h"
+#include "power_manager.h"
 #include "SpeedPulserPro_motorCal.h"
 #include "SpeedPulserPro_globals.h"
 #include "SpeedPulserPro_tasks.h"
 #include "SpeedPulserPro_control.h"
+#include "SpeedPulserPro_gps.h"
+#include "SpeedPulserPro_savvycan.h"
+
+static uint32_t parseHexCanId(const String& text, uint32_t defaultVal) {
+  String s = text;
+  s.trim();
+  if (s.startsWith("0x") || s.startsWith("0X")) {
+    s = s.substring(2);
+  }
+  if (s.length() == 0) {
+    return defaultVal;
+  }
+  return (uint32_t)strtoul(s.c_str(), nullptr, 16) & 0x7FF;
+}
 
 void handleGetSettings(AsyncWebServerRequest *request)
 {
-#ifdef serialDebugWifi
-  Serial.println("GET /api/settings");
+#if serialDebugWifi
+  Serial.println("[WiFi] GET /api/settings");
 #endif
 
   JsonDocument doc;
   doc["hasNeedleSweep"] = hasNeedleSweep;
+  doc["linearSpeedSweep"] = linearSpeedSweep;
   doc["coilType"] = coilType;
-  doc["broadcastSpeed"] = broadcastSpeed;
+  doc["convertToMPH"] = convertToMPH;
+  doc["broadcastSpeedEnabled"] = broadcastSpeedEnabled;
+  doc["broadcastSpeedID"] = broadcastSpeedID;
+  doc["broadcastSpeedDLC"] = broadcastSpeedDLC;
+  doc["broadcastSpeedLowByte"] = broadcastSpeedLowByte;
+  doc["broadcastSpeedHighByte"] = broadcastSpeedHighByte;
+  doc["broadcastSpeedLittleEndian"] = broadcastSpeedLittleEndian;
+  doc["broadcastSpeedScale"] = broadcastSpeedScale;
+  doc["broadcastSpeedOffset"] = broadcastSpeedOffset;
+  for (uint8_t i = 0; i < 8; i++) {
+    String dk = "broadcastSpeedData" + String(i);
+    doc[dk] = broadcastSpeedData[i];
+  }
   doc["sweepSpeed"] = sweepSpeed;
   doc["stepRPM"] = stepRPM;
   doc["stepSpeed"] = stepSpeed;
@@ -45,6 +73,7 @@ void handleGetSettings(AsyncWebServerRequest *request)
   doc["averageFilterHall"] = averageFilterHall;
   doc["averageFilterRPM"] = averageFilterRPM;
   doc["averageFilter"] = averageFilterHall;
+  doc["gpsUpdateRateHz"] = gpsUpdateRateHz;
   doc["speedOffsetType"] = useSpeedOffsetCurve ? "Curve" : (useGlobalSpeedOffset ? "Global" : "Off");
   doc["currentSpeedOffset"] = currentSpeedOffset;
 
@@ -59,17 +88,31 @@ void handleGetSettings(AsyncWebServerRequest *request)
     doc["speedType"] = "DSG";
   else if (useGPS)
     doc["speedType"] = "GPS";
+  else if (useTP20)
+    doc["speedType"] = "TP2.0";
   else if (useUDS)
-    doc["speedType"] = "TP2.0-DSG";
+    doc["speedType"] = "UDS";
+  else if (useAftermarket)
+    doc["speedType"] = "Custom CAN";
   else
     doc["speedType"] = "Hall";
+
+  doc["aftermarketSpeedID"] = aftermarketSpeedID;
+  doc["aftermarketSpeedLowByte"] = aftermarketSpeedLowByte;
+  doc["aftermarketSpeedHighByte"] = aftermarketSpeedHighByte;
+  doc["aftermarketSpeedLittleEndian"] = aftermarketSpeedLittleEndian;
+  doc["aftermarketSpeedScale"] = aftermarketSpeedScale;
+  doc["aftermarketSpeedOffset"] = aftermarketSpeedOffset;
 
   if (useRPMCAN)
     doc["rpmType"] = "CAN";
   else
     doc["rpmType"] = "Hall";
 
-  doc["FW_VERSION"] = "2.00";
+  doc["analyzerMode"] = analyzerMode;
+  doc["analyzerSerial"] = analyzerSerial;
+
+  doc["FW_VERSION"] = FW_VERSION;
 
   String response;
   serializeJson(doc, response);
@@ -92,6 +135,7 @@ void handleGetStatus(AsyncWebServerRequest *request)
   doc["dsgSpeed"] = dsgSpeed;
   doc["gpsSpeed"] = gpsSpeed;
   doc["udsSpeed"] = udsSpeed;
+  doc["tp20Speed"] = tp20Speed;
 
   // Test mode status
   doc["testSpeedo"] = testSpeedo;
@@ -108,9 +152,15 @@ void handleGetStatus(AsyncWebServerRequest *request)
   // System status
   doc["hasCAN"] = hasCAN;
   doc["hasGPS"] = hasGPS;
-  doc["broadcastSpeed"] = broadcastSpeed;
-  doc["gpsTaskSuspended"] = gpsTaskSuspended;
+  doc["convertToMPH"] = convertToMPH;
+  doc["broadcastSpeedEnabled"] = broadcastSpeedEnabled;
+  doc["broadcastSpeedValue"] = broadcastSpeedValue;
+  doc["aftermarketSpeed"] = aftermarketSpeed;
+  doc["gpsUnavailable"] = gpsUnavailable;
   doc["gpsSatellites"] = gps.satellites.value();
+  // GPS update frequency
+  doc["gpsFrequency"] = getGPSUpdateFrequency();
+  doc["gpsAutoApplySecs"] = gpsAutoApplySecondsRemaining();
 
   String response;
   serializeJson(doc, response);
@@ -119,8 +169,8 @@ void handleGetStatus(AsyncWebServerRequest *request)
 
 void handleGetCalibrations(AsyncWebServerRequest *request)
 {
-#ifdef serialDebugWifi
-  Serial.println("GET /api/calibrations");
+#if serialDebugWifi
+  Serial.println("[WiFi] GET /api/calibrations");
 #endif
 
   JsonDocument doc;
@@ -150,8 +200,8 @@ void handlePostControl(AsyncWebServerRequest *request, uint8_t *data, size_t len
   String key = doc["key"];
   String value = doc["value"].as<String>();
 
-#ifdef serialDebugWifi
-  Serial.print("POST /api/control - ");
+#if serialDebugWifi
+  Serial.print("[WiFi] POST /api/control - ");
   Serial.print(key);
   Serial.print(" = ");
   Serial.println(value);
@@ -163,15 +213,96 @@ void handlePostControl(AsyncWebServerRequest *request, uint8_t *data, size_t len
     hasNeedleSweep = (value == "true" || value == "1");
   }
 
+  if (key == "linearSpeedSweep")
+  {
+    linearSpeedSweep = (value == "true" || value == "1");
+  }
+
   if (key == "coilType")
   {
     coilType = (value == "true" || value == "1");
   }
 
-  if (key == "broadcastSpeed")
+  if (key == "convertToMPH")
   {
-    broadcastSpeed = (value == "true" || value == "1");
-    setBroadcastSpeedTaskEnabled(broadcastSpeed);
+    convertToMPH = (value == "true" || value == "1");
+  }
+
+  if (key == "broadcastSpeedEnabled")
+  {
+    broadcastSpeedEnabled = (value == "true" || value == "1");
+  }
+
+  if (key == "broadcastSpeedID")
+  {
+    broadcastSpeedID = parseHexCanId(value, broadcastSpeedID);
+  }
+
+  if (key == "broadcastSpeedDLC")
+  {
+    broadcastSpeedDLC = (uint8_t)constrain(value.toInt(), 0, 8);
+  }
+
+  if (key == "broadcastSpeedLowByte")
+  {
+    broadcastSpeedLowByte = (uint8_t)constrain(value.toInt(), 0, 7);
+  }
+
+  if (key == "broadcastSpeedHighByte")
+  {
+    broadcastSpeedHighByte = (uint8_t)constrain(value.toInt(), 0, 7);
+  }
+
+  if (key == "broadcastSpeedLittleEndian")
+  {
+    broadcastSpeedLittleEndian = (value == "true" || value == "1");
+  }
+
+  if (key == "broadcastSpeedScale")
+  {
+    broadcastSpeedScale = value.toFloat();
+  }
+
+  if (key == "broadcastSpeedOffset")
+  {
+    broadcastSpeedOffset = (int16_t)constrain(value.toInt(), -32768, 32767);
+  }
+
+  for (uint8_t i = 0; i < 8; i++) {
+    String dk = "broadcastSpeedData" + String(i);
+    if (key == dk) {
+      broadcastSpeedData[i] = (uint8_t)constrain(value.toInt(), 0, 255);
+    }
+  }
+
+  if (key == "aftermarketSpeedID")
+  {
+    aftermarketSpeedID = parseHexCanId(value, aftermarketSpeedID);
+  }
+
+  if (key == "aftermarketSpeedLowByte")
+  {
+    aftermarketSpeedLowByte = (uint8_t)constrain(value.toInt(), 0, 7);
+  }
+
+  if (key == "aftermarketSpeedHighByte")
+  {
+    aftermarketSpeedHighByte = (uint8_t)constrain(value.toInt(), 0, 7);
+  }
+
+  if (key == "aftermarketSpeedLittleEndian")
+  {
+    aftermarketSpeedLittleEndian = (value == "true" || value == "1");
+  }
+
+  if (key == "aftermarketSpeedScale")
+  {
+    aftermarketSpeedScale = value.toFloat();
+  }
+
+  if (key == "aftermarketSpeedOffset")
+  {
+    aftermarketSpeedOffset = (int16_t)constrain(value.toInt(), -32768, 32767);
   }
 
   if (key == "sweepSpeed")
@@ -196,7 +327,11 @@ void handlePostControl(AsyncWebServerRequest *request, uint8_t *data, size_t len
 
   if (key == "tempSpeed")
   {
-    tempSpeed = value.toInt();
+    long requestedSpeed = value.toInt();
+    if (requestedSpeed >= 0 && requestedSpeed <= maxSpeed)
+    {
+      tempSpeed = requestedSpeed;
+    }
   }
 
   if (key == "testRPM")
@@ -336,6 +471,8 @@ void handlePostControl(AsyncWebServerRequest *request, uint8_t *data, size_t len
       useABS = false;
       useGPS = false;
       useUDS = false;
+      useTP20 = false;
+      useAftermarket = false;
     }
 
     if (value == "ECU")
@@ -346,6 +483,8 @@ void handlePostControl(AsyncWebServerRequest *request, uint8_t *data, size_t len
       useABS = false;
       useGPS = false;
       useUDS = false;
+      useTP20 = false;
+      useAftermarket = false;
     }
 
     if (value == "DSG")
@@ -356,6 +495,8 @@ void handlePostControl(AsyncWebServerRequest *request, uint8_t *data, size_t len
       useABS = false;
       useGPS = false;
       useUDS = false;
+      useTP20 = false;
+      useAftermarket = false;
     }
 
     if (value == "ABS")
@@ -366,6 +507,8 @@ void handlePostControl(AsyncWebServerRequest *request, uint8_t *data, size_t len
       useABS = true;
       useGPS = false;
       useUDS = false;
+      useTP20 = false;
+      useAftermarket = false;
     }
 
     if (value == "GPS")
@@ -376,9 +519,23 @@ void handlePostControl(AsyncWebServerRequest *request, uint8_t *data, size_t len
       useABS = false;
       useGPS = true;
       useUDS = false;
+      useTP20 = false;
+      useAftermarket = false;
     }
 
-    if (value == "TP2.0-DSG" || value == "TP/UDS DSG" || value == "UDS")
+    if (value == "TP2.0")
+    {
+      useHall = false;
+      useDSG = false;
+      useECU = false;
+      useABS = false;
+      useGPS = false;
+      useUDS = false;
+      useTP20 = true;
+      useAftermarket = false;
+    }
+
+    if (value == "UDS")
     {
       useHall = false;
       useDSG = false;
@@ -386,6 +543,19 @@ void handlePostControl(AsyncWebServerRequest *request, uint8_t *data, size_t len
       useABS = false;
       useGPS = false;
       useUDS = true;
+      useTP20 = false;
+      useAftermarket = false;
+    }
+
+    if (value == "Custom CAN")
+    {
+      useHall = false;
+      useDSG = false;
+      useECU = false;
+      useABS = false;
+      useGPS = false;
+      useUDS = false;
+      useAftermarket = true;
     }
   }
 
@@ -401,6 +571,18 @@ void handlePostControl(AsyncWebServerRequest *request, uint8_t *data, size_t len
       useRPMHall = true;
       useRPMCAN = false;
     }
+  }
+
+  if (key == "analyzerMode") {
+    analyzerMode = (value == "true" || value == "1");
+    if (analyzerMode) analyzerSerial = false;  // mutually exclusive
+    setAnalyzerMode(analyzerMode);
+  }
+
+  if (key == "analyzerSerial") {
+    analyzerSerial = (value == "true" || value == "1");
+    if (analyzerSerial) analyzerMode = false;  // mutually exclusive
+    setAnalyzerSerialMode(analyzerSerial);
   }
 
   request->send(200);
@@ -453,7 +635,11 @@ void handlePostTestSpeed(AsyncWebServerRequest *request, uint8_t *data, size_t l
 
   if (doc["value"].is<int>())
   {
-    tempSpeed = doc["value"];
+    long requestedSpeed = doc["value"];
+    if (requestedSpeed >= 0 && requestedSpeed <= maxSpeed)
+    {
+      tempSpeed = requestedSpeed;
+    }
   }
 
   request->send(200);
@@ -461,20 +647,20 @@ void handlePostTestSpeed(AsyncWebServerRequest *request, uint8_t *data, size_t l
 
 void setupUI()
 {
-#ifdef serialDebugWifi
+#if serialDebugWifi
   Serial.println("[WiFi] Setting up web server...");
 #endif
 
   // Initialize LittleFS filesystem
   if (!LittleFS.begin(false))
   { // true = format if mount failed
-#ifdef serialDebugWifi
+#if serialDebugWifi
     Serial.println("[LittleFS] Mount failed");
 #endif
   }
   else
   {
-#ifdef serialDebugWifi
+#if serialDebugWifi
     Serial.println("[LittleFS] Successfully mounted");
 #endif
   }
@@ -522,11 +708,11 @@ void setupUI()
       } }, [](AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final)
             {
       if (index == 0) {
-#ifdef serialDebugWifi
+#if serialDebugWifi
         Serial.printf("[OTA] Upload start: %s\n", filename.c_str());
 #endif
         if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
-#ifdef serialDebugWifi
+#if serialDebugWifi
           Update.printError(Serial);
 #endif
         }
@@ -534,7 +720,7 @@ void setupUI()
 
       if (!Update.hasError()) {
         if (Update.write(data, len) != len) {
-#ifdef serialDebugWifi
+#if serialDebugWifi
           Update.printError(Serial);
 #endif
         }
@@ -542,14 +728,74 @@ void setupUI()
 
       if (final) {
         if (!Update.end(true)) {
-#ifdef serialDebugWifi
+#if serialDebugWifi
           Update.printError(Serial);
 #endif
         }
-#ifdef serialDebugWifi
+#if serialDebugWifi
         Serial.printf("[OTA] Upload complete: %u bytes\n", index + len);
 #endif
       } });
+
+  // OTA filesystem (LittleFS) upload route
+  server.on("/api/ota/fs", HTTP_POST,
+    [](AsyncWebServerRequest *request) {
+      bool success = !Update.hasError();
+      request->send(success ? 200 : 500, "application/json", success ? "{\"success\":true}" : "{\"success\":false}");
+      if (success) {
+        xTaskCreate([](void*) {
+          vTaskDelay(pdMS_TO_TICKS(1500));
+          ESP.restart();
+          vTaskDelete(nullptr);
+        }, "ota_fs_restart", 2048, nullptr, 1, nullptr);
+      }
+    },
+    [](AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final) {
+      if (index == 0) {
+#if serialDebugWifi
+        Serial.printf("[OTA-FS] Upload start: %s\n", filename.c_str());
+#endif
+        if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_SPIFFS)) {
+#if serialDebugWifi
+          Update.printError(Serial);
+#endif
+        }
+      }
+      if (!Update.hasError()) {
+        if (Update.write(data, len) != len) {
+#if serialDebugWifi
+          Update.printError(Serial);
+#endif
+        }
+      }
+      if (final) {
+        if (!Update.end(true)) {
+#if serialDebugWifi
+          Update.printError(Serial);
+#endif
+        }
+#if serialDebugWifi
+        Serial.printf("[OTA-FS] Upload complete: %u bytes\n", index + len);
+#endif
+      }
+    }
+  );
+
+    // New endpoint: Set GPS update rate
+    server.on("/api/gpsRate", HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr, [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      if (index + len != total) return;
+      JsonDocument doc;
+      deserializeJson(doc, data, len);
+      uint8_t rate = doc["rate"];
+      String resp;
+      bool ok = setGPSUpdateRate(rate, resp);
+      JsonDocument out;
+      out["success"] = ok;
+      out["message"] = resp;
+      String response;
+      serializeJson(out, response);
+      request->send(ok ? 200 : 400, "application/json", response);
+    });
 
   // Catch-all for 404
   server.onNotFound([](AsyncWebServerRequest *request)
@@ -557,7 +803,7 @@ void setupUI()
 
   server.begin();
 
-#ifdef serialDebugWifi
+#if serialDebugWifi
   Serial.println("[WiFi] Web server started");
   Serial.print("[WiFi] IP: ");
   Serial.println(WiFi.softAPIP());
@@ -567,9 +813,9 @@ void setupUI()
 void connectWifi()
 {
   WiFi.setHostname(wifiHostName);
-#ifdef serialDebugWifi
-  DEBUG_PRINTLN("[WiFi] Beginning WiFi...");
-  DEBUG_PRINTLN("[WiFi] Creating Access Point...");
+#if serialDebugWifi
+  Serial.println("[WiFi] Beginning WiFi...");
+  Serial.println("[WiFi] Creating Access Point...");
 #endif
 
   WiFi.mode(WIFI_AP);
@@ -577,22 +823,26 @@ void connectWifi()
   WiFi.softAPConfig(IPAddress(192, 168, 1, 1), IPAddress(192, 168, 1, 1), IPAddress(255, 255, 255, 0));
   WiFi.softAP(wifiHostName);
 
-#ifdef serialDebugWifi
-  DEBUG_PRINT("[WiFi] AP SSID: ");
-  DEBUG_PRINTLN(wifiHostName);
-  DEBUG_PRINT("[WiFi] AP IP: ");
-  DEBUG_PRINTLN(WiFi.softAPIP());
+#if serialDebugWifi
+  Serial.print("[WiFi] AP SSID: ");
+  Serial.println(wifiHostName);
+  Serial.print("[WiFi] AP IP: ");
+  Serial.println(WiFi.softAPIP());
 #endif
 }
 
 void disconnectWifi()
 {
-  DEBUG_PRINTF("[WiFi] Number of connections: ");
-  DEBUG_PRINTLN(WiFi.softAPgetStationNum());
+#if serialDebugWifi
+  Serial.print("[WiFi] Number of connections: ");
+  Serial.println(WiFi.softAPgetStationNum());
+#endif
 
   if (WiFi.softAPgetStationNum() == 0)
   {
-    DEBUG_PRINTLN("[WiFi] No connections, turning off");
+#if serialDebugWifi
+    Serial.println("[WiFi] No connections, turning off");
+#endif
     WiFi.disconnect(true, false);
     WiFi.mode(WIFI_OFF);
   }
@@ -616,4 +866,32 @@ void updateLabels()
     updateMotorArray();
     updateMotorPerformance = false; // Reset flag
   }
+}
+
+// ----------------------------------------------------------------------------
+// power_manager integration (universal reduced-power module)
+// ----------------------------------------------------------------------------
+// These override the weak hooks in power_manager.cpp. The device stays fully
+// awake while ANY client is associated to the AP. Once the last client leaves,
+// the manager's idle timer runs, then turns the radio off and drops the CPU
+// clock. A power-cycle (ignition off/on) brings WiFi back automatically.
+
+bool powerIsBusy()
+{
+  return WiFi.softAPgetStationNum() > 0;
+}
+
+// ACTIVE -> REDUCED: close the web server cleanly before the radio drops.
+void powerOnEnterReduced()
+{
+  server.end();
+}
+
+// REDUCED -> ACTIVE: bring the AP and web server back. Routes are already
+// registered (no need to re-run setupUI()), so we only restart the radio
+// and the listener.
+void powerOnExitReduced()
+{
+  connectWifi();
+  server.begin();
 }

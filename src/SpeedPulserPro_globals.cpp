@@ -1,13 +1,21 @@
 #include "SpeedPulserPro_globals.h"
 #include "SpeedPulserPro_config.h"
+#include "SpeedPulserPro_savvycan.h"  // for ANALYZER_PROTOCOL_GVRET
+
+// ============================================================================
+// SavvyCAN / Analyzer
+// ============================================================================
+bool    analyzerMode     = false;
+bool    analyzerSerial   = false;
+uint8_t analyzerProtocol = ANALYZER_PROTOCOL_GVRET;
 
 // ============================================================================
 // Global Object Definitions
 // ============================================================================
 // LEDC PWM is configured via driver/ledc.h - no object needed
-RunningMedian samples = RunningMedian(10);
-RunningMedian samplesRPM = RunningMedian(10);
-SoftwareSerial ss(pinRX_GPS, pinTX_GPS);
+RunningMedian samples = RunningMedian(10); // for median filtering of speed input (Hall)
+RunningMedian samplesRPM = RunningMedian(10); // for median filtering of RPM input
+HardwareSerial ss(2);
 TinyGPSPlus gps;
 Preferences pref;
 AsyncWebServer server(80);
@@ -42,6 +50,7 @@ uint16_t dsgSpeed = 0;
 uint16_t gpsSpeed = 0;
 uint16_t absSpeed = 0;
 uint16_t udsSpeed = 0;
+uint16_t tp20Speed = 0;
 
 // ============================================================================
 // Motor Performance and Limits
@@ -64,8 +73,8 @@ bool useGlobalSpeedOffset = true;
 bool useSpeedOffsetCurve = false;
 int16_t speedOffsetCurveOffsets[SPEED_OFFSET_CURVE_POINTS] = {0, 0, 0, 0, 0};
 int16_t currentSpeedOffset = 0;
-float stepRPM = 12;
-float stepSpeed = 10;
+float stepRPM = 14;
+float stepSpeed = 17;
 uint8_t averageFilterHall = DEFAULT_AVERAGE_FILTER_HALL;
 uint8_t averageFilterRPM = DEFAULT_AVERAGE_FILTER_RPM;
 uint16_t filteredRPM = 0;
@@ -85,8 +94,19 @@ bool tempNeedleSweep = false;
 // Configuration Variables
 // ============================================================================
 bool hasNeedleSweep = false;
+bool linearSpeedSweep = true;
 bool coilType = false;
-bool broadcastSpeed = false;
+bool convertToMPH = false;
+bool broadcastSpeedEnabled = false;
+uint32_t broadcastSpeedID = HALDEX_ID;
+uint8_t broadcastSpeedDLC = 8;
+uint8_t broadcastSpeedLowByte = 2;
+uint8_t broadcastSpeedHighByte = 3;
+bool broadcastSpeedLittleEndian = true;
+float broadcastSpeedScale = 0.781f; // ~1/1.28 — default Haldex scaling
+int16_t broadcastSpeedOffset = 0;
+uint8_t broadcastSpeedData[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+uint16_t broadcastSpeedValue = 0;
 uint8_t sweepSpeed = 18;
 uint8_t speedType = 0;
 
@@ -99,6 +119,15 @@ bool useGPS = false;
 bool useABS = false;
 bool useECU = false;
 bool useUDS = false;
+bool useTP20 = false;
+bool useAftermarket = false;
+uint32_t aftermarketSpeedID = 0x200;
+uint8_t aftermarketSpeedLowByte = 0;
+uint8_t aftermarketSpeedHighByte = 1;
+bool aftermarketSpeedLittleEndian = true;
+float aftermarketSpeedScale = 1.0f;
+int16_t aftermarketSpeedOffset = 0;
+uint16_t aftermarketSpeed = 0;
 bool useRPMHall = true;
 bool useRPMCAN = false;
 
@@ -133,7 +162,7 @@ unsigned long lastPulseRPM = 0;
 bool hasError = false;
 bool hasCAN = false;
 bool hasGPS = false;
-bool gpsTaskSuspended = false;
+bool gpsUnavailable = false;
 bool ledOnboard = false;
 int ledCounter = 0;
 int rawCount = 0;

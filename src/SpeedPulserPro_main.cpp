@@ -11,6 +11,8 @@
 #include "SpeedPulserPro_motorCal.h"
 #include "SpeedPulserPro_tasks.h"
 #include "SpeedPulserPro_control.h"
+#include "SpeedPulserPro_savvycan.h"
+#include "power_manager.h"
 
 // Forward declarations for main.cpp functions
 void setup();
@@ -18,10 +20,12 @@ void loop();
 
 void setup()
 {
-#if serialDebug || serialDebugIncoming || serialDebugWifi || serialDebugEEP || serialDebugGPS || ChassisCANDebug
+  // Always begin Serial - many GPS/rate diagnostic prints are unconditional
+  // and parts of the framework misbehave writing to a never-begun UART.
   Serial.begin(115200);
-  Serial.setTimeout(10); // non-blocking TX: don't stall if no USB host is connected
-  DEBUG_PRINTLN("Initialising SpeedPulser Pro...");
+  Serial.setTimeout(10);
+#if serialDebug || serialDebugIncoming || serialDebugWifi || serialDebugEEP || serialDebugGPS || ChassisCANDebug
+  Serial.println("[Main] Initialising SpeedPulser Pro...");
 #endif
 
   basicInit();        // Initialize hardware, interrupts, CAN, GPS, etc.
@@ -34,14 +38,41 @@ void setup()
   }
 
   tasksInit();                               // Initialize FreeRTOS tasks for background operations
-  ledcWrite(LEDC_OUTPUT_CHANNEL, dutyCycle); // Ensure initial duty cycle is set to zero to turn off motor
+  setMotorDuty(dutyCycle);                   // Ensure initial duty cycle is set to zero to turn off motor
 
-  connectWifi(); // Start WiFi
-  setupUI();     // Set up web server and API
+  connectWifi();    // Start WiFi
+  setupUI();        // Set up web server and API
+  setupAnalyzer();  // Start SavvyCAN analyzer task (idle until mode is enabled)
+
+  // Universal reduced-power module: turns WiFi off 1 min after the last client
+  // disconnects, scales CPU 240->80 MHz, releases Bluetooth and kills the
+  // onboard LED to cut current draw (and therefore linear-regulator heat).
+  power_config_t pcfg = powerDefaultConfig();
+  pcfg.verbose = serialDebugWifi;
+  powerInit(&pcfg);
 }
 
 void loop()
 {
+  // Apply GPS rate from EEP after satellite lock (flagged by parseGPS).
+  // Suspend all background tasks for the duration so the outgoing PUBX bytes
+  // on SoftwareSerial aren't disrupted by other core-1 tasks or the speed-input
+  // pin ISR during the blocking delay() calls inside setGPSUpdateRate. The
+  // API path doesn't need this because AsyncTCP callbacks run isolated on core 0.
+  if (gpsAutoRateApplyPending())
+  {
+    tasksSuspendAll();
+    String resp;
+    bool ok = setGPSUpdateRate(gpsUpdateRateHz, resp);
+    tasksResumeAll();
+    (void)ok; // only referenced by the serialDebugGPS log below
+#if serialDebugGPS
+    Serial.print(F("[GPS Auto] Rate apply "));
+    Serial.print(ok ? F("OK: ") : F("FAILED: "));
+    Serial.println(resp);
+#endif
+  }
+
   if (tempNeedleSweep)
   {
     tasksSuspendAll(); // Suspend all tasks to prevent interference with needle sweep
