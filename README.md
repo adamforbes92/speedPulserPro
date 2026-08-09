@@ -19,13 +19,16 @@ It is based on an **ESP32 DevKit V1 (WROOM-32)** and uses a **TY3816B** BLDC mot
 | CAN | 500 kbit/s TWAI, full RX/TX, broadcast & SavvyCAN forwarding |
 | GPS | u-blox NMEA, 1 / 5 / 10 / 16 Hz user-selectable update rate |
 | Calibration profiles | 18 built-in (VW, Ford, Fiat, Merc, Smiths, Opel, VW Bay) |
+| Calibration Builder | Custom calibration builder - no coding knowledge required |
+| Calibration Curve | Live duty-vs-speed curve with the current operating point on the Dashboard |
+| PID Control | Uses the Feedback pin on the motor to ensure speed is maintained, regardless of 'stickyness' |
 | WiFi UI | Web app type interface |
-| Needle sweep | Configurable on power-up (speed + RPM, linear or array-following) |
+| Needle sweep | Full-scale exercise of both needles on power-up (speed + RPM), live-adjustable sweep speed |
 | Speed offset | Global fixed offset **or** 5-point speed-dependent curve |
 | OTA updates | Firmware **and** filesystem upload from the browser |
 | CAN analyzer | Forward live frames to SavvyCAN via WiFi (GVRET) or Serial |
 | Power management | Auto WiFi-off + CPU scaling after 1 min idle |
-| Remembers settings | All settings stored to ESP32 Preferences (NVS/EEPROM) |
+| Remembers settings | All settings stored to ESP32 Preferences (EEPROM) |
 
 ---
 
@@ -102,10 +105,10 @@ The five-pin **`MOTOR`** connector on the PCB:
 | Pin | Signal | Notes |
 |-----|--------|-------|
 | 1 | Motor Power | Black — 5–9 V (set via on-board trimmer) |
-| 2 | Motor Feedback | Not used in current firmware |
+| 2 | Motor Feedback | For PID Control |
 | 3 | Motor Direction | Green — pull to GND to reverse needle direction |
-| 4 | Motor Ground | White — motor ground return |
-| 5 | Motor PWM | 10 kHz PWM from ESP32 (via NPN level-shifter to 5 V) |
+| 4 | Motor Ground | White — motor ground |
+| 5 | Motor PWM | 10 kHz PWM from ESP32 (via NPN level-shifter to 4V) |
 
 ---
 
@@ -115,8 +118,8 @@ The four-pin **`RPM Speed CANH CANL`** connector carries both square-wave inputs
 
 | Pin | Signal | Notes |
 |-----|--------|-------|
-| 1 | RPM In | 12 V square-wave RPM input (closest to the blue trimmer) |
-| 2 | Speed In | 5 V or 12 V square-wave speed input (hall sensor or Can2Cluster) |
+| 1 | RPM In | 12V square-wave RPM input (closest to the blue trimmer) |
+| 2 | Speed In | 5V or 12V square-wave speed input (hall sensor or Can2Cluster) |
 | 3 | CAN H | CAN bus high |
 | 4 | CAN L | CAN bus low (closest to the 5-pin motor connector) |
 
@@ -168,6 +171,8 @@ Once the motor is assembled, slide it over the OEM cluster shaft. Check:
 
 Take time here — good fitment minimises noise and extends coupler life.
 
+> Couplers are 3D printed and every motor / housing / cluster pairing wears in slightly differently. Expect to revisit the on-board potentiometer once after a few hours of running so the top-end reading still hits full-scale cleanly.
+
 ---
 
 ## WiFi & Web Interface
@@ -178,70 +183,127 @@ The interface is a single-page app served from the ESP32's LittleFS flash partit
 
 ### Dashboard Tab
 
+![Dashboard tab — live gauges, calibration curve and system status](Images/ui-dashboard.png)
+
 Live read-outs updated automatically:
 
 | Field | Description |
 |---|---|
 | RPM (Final) | Engine RPM from the active RPM source |
 | Speed (Final) | Vehicle speed from the active speed source |
+| Motor Duty | PWM duty currently applied to the motor |
 | Speed Offset Type | Whether a *Global* or *Curve* offset is active |
 | Current Speed Offset | The offset value applied at the current speed |
-| CAN Bus | Live CAN healthy / not healthy indicator |
-| GPS Status | GPS connected / no fix / not connected |
+| Measured Speed | Speed derived from the motor feedback when feedback is enabled |
+| PID Trim | Duty correction the feedback loop is currently applying |
+| CAN Bus | Live CAN healthy / Not Healthy indicator |
+| GPS Status | **Connected (n sats)**, **Not Connected** (module fitted, no serial/fix) or **Not Available** (no GPS module fitted) |
+
+Below the gauges is a **Calibration Curve** graph: a duty-vs-speed trace of the
+active calibration with a marker showing the point currently being achieved —
+from the active speed source, Speed Test Mode or Calibration Mode.
 
 Header status badges also show **CAN**, **Broadcast** and the active **Calibration** profile.
 
 ### Configuration Tab
 
-| Setting | Description |
-|---|---|
-| Enable Needle Sweep | Triggers a full-scale needle sweep on power-up (speed + RPM) |
-| Linearise Speed Array | Sweep visits each speed linearly instead of following the calibration array |
-| Sweep Speed (ms) | Step delay in milliseconds: lower = faster sweep |
-| RPM Step / Speed Step | Sweep step size for RPM and speed |
-| Test Needle Sweep | Trigger a sweep immediately from the browser |
-| Use Coil Output (RPM) | Enable the coil-style RPM output on the `MK2RPM` pin |
-| Cluster in MPH | Convert the km/h source value to mph before looking up the motor duty |
-| Motor Calibration | Choose from 18 built-in cluster calibration profiles |
-| Maximum Speed (km/h) | Upper end of the cluster's speed scale |
-| Maximum Hall Frequency (Hz) | The input frequency that corresponds to Maximum Speed |
-| Enable Global Speed Offset | Apply a single fixed offset across the whole range |
-| Positive Offset | Direction of the fixed offset (add or subtract) |
-| Global Speed Offset | Magnitude of the fixed offset |
+![Configuration tab — Needle Sweep, Cluster Output, Speed Limits and Speed Offset](Images/ui-configuration.png)
+
+| Card | Setting | Description |
+|---|---|---|
+| **Needle Sweep** | Enable Needle Sweep | Run a full-scale sweep of both needles on power-up |
+| | Sweep Speed (ms) | Live slider (0–50) setting the base sweep duration — lower = faster |
+| | Speed Ramp Rate | How fast the speedo needle ramps (higher = faster) |
+| | RPM Ramp Rate | How fast the tacho needle ramps (higher = faster) |
+| | Test Needle Sweep | Trigger a sweep immediately from the browser |
+| **Cluster Output** | Use Coil Output (RPM) | Enable the coil-style RPM output on the `MK2RPM` pin |
+| **Speed Limits** | Cluster in MPH | Convert the km/h source value to mph before the motor-duty lookup |
+| | Motor Calibration | Choose from the built-in cluster calibration profiles |
+| | Maximum Speed (km/h) | Upper end of the cluster's speed scale |
+| | Maximum Hall Frequency (Hz) | Input frequency that corresponds to Maximum Speed |
+| **Speed Offset** | Enable Global Speed Offset | Apply a single fixed offset across the whole range |
+| | Positive Offset | Direction of the fixed offset (add or subtract) |
+| | Global Speed Offset | Magnitude of the fixed offset |
+| | Speed-Dependent Offset Curve | Switch to the 5-point curve (see the Calibration tab) instead of the global offset |
 
 ### Advanced Tab
 
-Combines live diagnostics, source selection and the CAN analyzer:
+Source selection, tuning and diagnostics:
 
-| Section | Purpose |
+![Advanced tab — feedback, broadcast, GPS rate, filters, analyser and source selection](Images/ui-advanced.png)
+
+| Card | Purpose |
 |---|---|
-| Live Data – All Inputs | Independent read-out for every speed/RPM source (Hall, ECU, ABS, DSG, TP2.0, UDS, GPS, Custom CAN, plus filtered RPM) |
-| Broadcast Speed | Re-emit the final speed onto CAN with user-defined ID, DLC, byte layout, scale & offset, and template bytes |
-| GPS Update Rate | Select **1 / 5 / 10 / 16 Hz** (see below) and view the live updates-per-second figure |
+| Closed-Loop Feedback (PID) | Enable motor feedback and tune Kp / Ki / Kd |
+| Broadcast Speed | Send the final speed onto CAN with user-defined ID, DLC, byte layout, scale & offset bytes |
+| GPS Update Rate | Select **1 / 5 / 10 / 16 Hz** and view the live updates-per-second figure |
 | Signal Filters | Hall speed and RPM running-median sample counts (1–10) |
-| CAN Analyzer | Forward all received CAN frames to **SavvyCAN** via WiFi (GVRET on `192.168.4.1:23`) or Serial (GVRET) |
-| RPM / Speed Output Test | Drive the cluster directly at a chosen RPM or speed |
+| CAN Analyser | Forward all received CAN frames to **SavvyCAN** via WiFi (GVRET on `192.168.4.1:23`) or Serial (GVRET) |
 | Speed Selection | Primary speed source: Hall / ECU / ABS / DSG / TP2.0 / UDS / GPS / Custom CAN |
 | Custom CAN Input | When *Custom CAN* is selected, define ID, byte indices, endianness, scale & offset |
 | RPM Selection | Primary RPM source (Hall or CAN), cluster frequency limit and RPM ceiling |
-| Calibration | Direct duty stepping (±1) for on-the-fly motor calibration |
+
+#### Closed-Loop Feedback (PID) & Reverse Direction
+
+<img src="Images/ui-feedback-pid.png" alt="Closed-Loop Feedback (PID) card" width="360">
+
+The TY3816B motor is normally driven **open-loop** — a calibration table maps speed to a
+PWM duty. Closed-loop feedback adds a correction on top of that table: the motor's own
+feedback pulse is measured, converted to an equivalent speed, and compared to the requested
+speed. A PID controller then trims the duty so the needle tracks the target even as supply
+voltage, temperature or coupler friction drift.
+
+- **Enable Closed-Loop Feedback** — turns the loop on. With it off the motor runs purely
+  from the calibration table (feed-forward only).
+- **Reverse Motor Direction** — flips the commanded rotation for clusters (or coupler
+  builds) whose needle sweeps the opposite way. Toggle it if the needle drives backwards
+  off the stop.
+- **Min Feedback Speed (km/h)** — below this target the loop runs open-loop (feed-forward
+  only) to stop low-speed hunting around the motor's dead band. Set to `0` to always run
+  closed-loop. 
+- **PID Kp / Ki / Kd** — proportional, integral and derivative gains. The defaults
+  (`Kp 0.15`, `Ki 1.3`, `Kd 0`) suit the stock motor; *Reset PID Defaults* restores them.
+- **Live read-outs** — *Measured Speed*, *PID Trim* (the duty correction currently being
+  applied) and *Tacho Freq (Hz)* let you watch the loop settle in real time.
+
+> Feedback is most useful at the top of the scale, where a small voltage sag would
+> otherwise leave the needle a few km/h low. Leave *Min Feedback Speed* around 40 km/h so
+> the loop only engages once the motor is comfortably out of its dead-band.
 
 ### Calibration Tab
 
-Contains the **5-Point Speed Offset Curve**.
+![Calibration tab — the interactive Calibration Builder with captured points](Images/ui-calibration.png)
 
-Allows a different trim offset to be applied per speed band instead of a single global value. Bands are fixed at 0–50 / 51–100 / 101–150 / 151–200 / 201+ km/h, each accepting ±20 km/h. Enable the checkbox to activate the curve in place of the global offset.
+| Card | Purpose |
+|---|---|
+| Calibration Builder | Build a cluster calibration interactively — change the motor duty, capture a point at each speed, and store the resulting curve without editing source code |
+| Export / Import | Export the active calibration to a text block, or upload one to load it |
 
-### OTA Tab
+The **Calibration Builder** is the no-code way to build a custom calibration on the bench.  The other advantage is that it uses a higher range of available duty so available scale is increased.
 
-Two upload slots:
+1. Tick **Enable Calibration Mode** — the motor now follows the big duty read-out instead
+   of the speed source.
+2. Change the duty to the maximum value (**4096**).  Adjust the trimmer to achieve maximum cluster value.
+3. Change the duty with the **−50 / −10 / −1 / +1 / +10 / +50** buttons until the needle sits exactly on a speed mark.
+4. Pick that speed from the **Target speed** or type it in and press **Capture Point**. Each capture
+   is listed under *Captured Points* and can be removed individually.
+5. Repeat across the scale, name the calibration, then **Generate & Apply** to preview it
+   live and **Save to Device** to store it. **Export / Import** shares it as a text block.
 
-- **Firmware** — upload a new compiled `.bin` to flash the application.
-- **Filesystem** — upload a new LittleFS `.bin` to replace the web UI assets.
+The **5-Point Speed Offset Curve** is switched on from the *Speed Offset* card on the
+Configuration tab. It applies a different trim per speed band instead of a single global
+value. Bands are fixed at 0–50 / 51–100 / 101–150 / 151–200 / 201+ km/h, each accepting
+±20 km/h.
 
-The device reboots automatically after a successful upload.
+### Diagnostics Tab
 
----
+![Diagnostics tab — every input read separately, plus Speed and RPM test modes](Images/ui-diagnostics.png)
+
+| Card | Purpose |
+|---|---|
+| Live Data – All Inputs | Independent read-out for every speed/RPM source (Hall, ECU, ABS, DSG, TP2.0, UDS, GPS, Custom CAN, plus filtered RPM) |
+| Speed Test Mode | Drive the speedometer directly to a chosen speed with a slider |
+| RPM Output Test | Drive the tachometer directly to a chosen RPM with a slider |
 
 ## GPS & Update Rates
 
@@ -269,7 +331,7 @@ The GPS module is driven via the ESP32 hardware UART for reliable reception. Spe
 
 ## Power Management
 
-The firmware includes a **universal reduced-power codeblock** (`power_manager` — also used in SpeedPulser and Can2Cluster) that activates automatically 1 minute after the last WiFi client disconnects. This cuts current through the on-board linear regulator, directly reducing its heat output — important for long ignition-on times.
+The firmware includes a **universal reduced-power manager** (`power_manager` — also used in SpeedPulser and Can2Cluster) that activates automatically 1 minute after the last WiFi client disconnects. This cuts current through the on-board linear regulator, directly reducing its heat output — important for long ignition-on times.
 
 **What changes when idle:**
 
@@ -291,7 +353,7 @@ As soon as a device reconnects to the WiFi AP, full power is restored automatica
 
 ## Calibration — How It Works
 
-### The Calibration Array
+### The Legacy Calibration Array
 
 Each calibration profile is a **386-element `uint16_t` array** stored in flash (`PROGMEM`). The **array index** represents speed in km/h (0–385) and the **array value** is the 10-bit PWM duty cycle (0–1023) that drives the motor to produce the corresponding reading on that cluster.
 
@@ -304,6 +366,8 @@ index 200  →  duty ~195  (motor at full scale for a 200 km/h cluster)
 ```
 
 Values near index 0 are `0` — the motor's dead band where it will not yet turn. Values plateau near the top because the cluster needle is at full deflection.
+
+> The Calibration Builder now supports a larger duty range and finer control is now available.  Legacy speed arrays are already produced so cannot be revisited.  Building your own may yield better results!
 
 ### Signal Processing 
 
@@ -335,26 +399,7 @@ Source (Hall / ECU / ABS / DSG / TP2.0 / UDS / GPS / Custom CAN)
 
 > **Default hall-sensor scaling:** 1 Hz = 1 km/h. This matches 02J / 02M gearbox sensors used in most VW/Audi applications. Adjust `maxFreqHall` and `maxSpeed` together if your sensor has a different ratio (e.g. set both to 160 for a sensor that outputs 160 Hz at 160 km/h).
 
-### How to Calibrate a New Cluster (Step by Step)
-
-1. **Bench setup** — Power the SpeedPulser Pro from 12 V. Fit the motor to the cluster.
-2. **Connect to WiFi** — Join the `SpeedPulserPro` AP and open `192.168.1.1`.
-3. On the **Advanced** tab, enable **Enable Calibration**.
-4. Press **Duty -1%** — this rolls the duty counter to the maximum. Use the on-board potentiometer to set the cluster needle to its maximum speed.
-5. Press **Duty +1%** — this rolls the duty counter back to zero.
-6. Press **Duty +1%** and increase the duty one step at a time, noting the resulting needle position.
-7. Build the 386-element array in `src/SpeedPulserPro_motorCal.cpp`:
-   - Each **index** is the km/h speed (0–385).
-   - Each **value** is the required duty recorded in steps 5–6.
-   - Linearly interpolate between measured points for unmeasured indices.
-   - Leave leading entries as `0` until the motor reliably starts turning.
-8. Add the array to `calibrationProfiles[]` with a descriptive name and rebuild.
-9. Flash and verify the full range on the cluster.
-10. **Please share the calibration** — open a pull request or post on Discord so others with the same cluster benefit.
-
-> Couplers are 3D printed and every motor / housing / cluster pairing wears in slightly differently. Expect to revisit the on-board potentiometer once after a few hours of running so the top-end reading still hits full-scale cleanly.
-
-### Reading / Parsing a Calibration Array
+### Reading a Legacy Calibration Array
 
 To check what duty a profile produces at a given speed, index directly:
 
@@ -421,16 +466,16 @@ The two modes are mutually exclusive and can be toggled from the CAN Analyzer ca
 
 ---
 
-## Over-the-Air Updates
+### OTA Tab
 
-New firmware (and the web UI) can be flashed without removing the unit from the vehicle:
+![OTA tab — Firmware Info and the drag-and-drop OTA Update card](Images/ui-ota.png)
 
-1. Build the project in PlatformIO → locate the `.bin` files in `.pio/build/esp32doit-devkit-v1/`.
-2. Connect to the `SpeedPulserPro` WiFi AP.
-3. Open the **OTA** tab in the browser.
-4. To update the application, select `firmware.bin` and click **Upload Firmware**.
-5. To update the web UI, build the filesystem image and upload `littlefs.bin` via **Upload Filesystem**.
-6. The device flashes and reboots automatically.
+Powered by the shared `ota_manager` module (see *Over-the-Air Updates* below).
+
+- **Firmware Info** — reports the running firmware version, hardware family and board name.
+- **OTA Update** — pick **Firmware** (application) or **Filesystem** (web UI) from the
+  dropdown, then drag-and-drop or choose a `.bin`. A progress bar tracks the upload and
+  the device reboots automatically once it completes.
 
 ---
 
@@ -446,9 +491,10 @@ New firmware (and the web UI) can be flashed without removing the unit from the 
 | 16 | TWAI / CAN TX |
 | 17 | TWAI / CAN RX |
 | 18 | RPM hall input (falling-edge interrupt) |
-| 19 | Motor direction (reserved for future use) |
+| 19 | Motor Direction |
 | 21 | Motor PWM output (LEDC, stepped to 5 V via NPN transistor) |
 | 22 | Coil-style RPM output (hardware timer) |
+| 23 | Motor Feedback |
 | 26 | Speed hall input (falling-edge interrupt) |
 
 ### PWM Parameters
@@ -535,3 +581,9 @@ The SpeedPulser Pro drives an analog speedometer for display purposes. It should
 | V2.30 | RPM / speed task pacing tuned so GPS has room to update |
 | V2.40 | GPS moved to hardware `HardwareSerial` UART for faster, cleaner reception |
 | V2.50 | Universal power-management module (WiFi-off + CPU scaling after 1 min idle); GPS auto-baud probe on boot; GPS update-rate auto-apply after satellite stability |
+| V3.00 | Closed-loop motor feedback (PID) — measures the motor tacho and trims PWM duty so the needle holds under load |
+| V3.01 | Live calibration-curve graph on the Dashboard (duty-vs-speed trace + achieved-point marker); Dashboard mirrors the standard SpeedPulser (Motor Duty / Measured Speed / PID Trim) |
+| V3.02 | Live Sweep Speed slider; needle sweep rewritten to drive both needles to full deflection over a bounded time with independent Speed/RPM ramp rates (drops the Linearise control); shared `ota_manager` OTA module + reworked OTA tab; three-state GPS status; Speed Test Mode moved to the Diagnostics tab |
+| V3.03 | Custom calibrations now remember the cluster unit they were captured in and the device auto-enables "Cluster in MPH" whenever an MPH cal becomes the active calibration |
+| V3.04 | Closed-loop feedback is sense-check for legacy PCBs without the motor-feedback circuit |
+
