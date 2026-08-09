@@ -15,6 +15,7 @@ extern TaskHandle_t taskRPMHandle;
 extern TaskHandle_t taskBroadcastSpeedHandle;
 extern TaskHandle_t taskTP20Handle;
 extern TaskHandle_t taskUDSHandle;
+extern TaskHandle_t taskDiagHandle;
 
 // Task function prototypes
 void taskWriteEEP(void *parameter);
@@ -24,6 +25,7 @@ void taskParseDSG(void *parameter);
 void taskProcessSpeed(void *parameter);
 void taskProcessRPM(void *parameter);
 void taskBroadcastSpeed(void *parameter);
+void taskDiagnostics(void *parameter);
 
 // Task management functions
 void tasksInit();

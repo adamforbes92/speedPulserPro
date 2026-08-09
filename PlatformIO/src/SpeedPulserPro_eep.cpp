@@ -20,7 +20,7 @@ void readEEP()
 {
   // Read GPS update rate (Hz), default 1
 #if serialDebugEEP
-  DEBUG_PRINTLN("EEPROM initialising!");
+  Serial.println("[EEP] EEPROM initialising!");
 #endif
 
   pref.begin("useHall", false);
@@ -87,11 +87,21 @@ void readEEP()
   pref.begin("amSpeedScale", false);
   pref.begin("amSpeedOffset", false);
 
+  pref.begin("fbEnable", false);
+  pref.begin("pidKp", false);
+  pref.begin("pidKi", false);
+  pref.begin("pidKd", false);
+  pref.begin("fbDeadband", false);
+  pref.begin("fbMinSpd", false);
+  pref.begin("fbMaxFreq", false);
+  pref.begin("reverseDir", false);
+
   if (pref.getUChar("motorPerfVal", 255) == 255)
   {
 #if serialDebugEEP
-    DEBUG_PRINTLN("First run, set Bluetooth module, write Software Version etc");
-    DEBUG_PRINTLN(pref.getUChar("motorPerfVal", 255));
+    Serial.println("[EEP] First run, set Bluetooth module, write Software Version etc");
+    Serial.print("[EEP] motorPerfVal: ");
+    Serial.println(pref.getUChar("motorPerfVal", 255));
 #endif
     pref.putBool("useHall", useHall);
     pref.putBool("useDSG", useDSG);
@@ -152,6 +162,16 @@ void readEEP()
     pref.putBool("amSpeedLE", aftermarketSpeedLittleEndian);
     pref.putFloat("amSpeedScale", aftermarketSpeedScale);
     pref.putShort("amSpeedOffset", aftermarketSpeedOffset);
+
+    pref.putBool("reverseDir", reverseDirection);
+
+    pref.putBool("fbEnable", feedbackEnable);
+    pref.putFloat("pidKp", pidKp);
+    pref.putFloat("pidKi", pidKi);
+    pref.putFloat("pidKd", pidKd);
+    pref.putFloat("fbDeadband", feedbackDeadband);
+    pref.putUShort("fbMinSpd", feedbackMinSpeed);
+    pref.putUShort("fbMaxFreq", feedbackMaxFreq);
   }
   else
   {
@@ -177,7 +197,7 @@ void readEEP()
       String dk = "brdSD" + String(i);
       broadcastSpeedData[i] = pref.getUChar(dk.c_str(), 0);
     }
-    coilType = pref.getBool("coilType", false);
+    coilType = pref.getBool("coilType", true);
     convertToMPH = pref.getBool("convertToMPH", false);
 
     hasNeedleSweep = pref.getBool("hasNeedleSweep", false);
@@ -215,6 +235,16 @@ void readEEP()
     aftermarketSpeedLittleEndian = pref.getBool("amSpeedLE", true);
     aftermarketSpeedScale = pref.getFloat("amSpeedScale", 1.0f);
     aftermarketSpeedOffset = pref.getShort("amSpeedOffset", 0);
+
+    reverseDirection = pref.getBool("reverseDir", false);
+
+    feedbackEnable = pref.getBool("fbEnable", false);
+    pidKp = pref.getFloat("pidKp", 0.15f);
+    pidKi = pref.getFloat("pidKi", 1.3f);
+    pidKd = pref.getFloat("pidKd", 0.0f);
+    feedbackDeadband = pref.getFloat("fbDeadband", 1.5f);
+    feedbackMinSpeed = pref.getUShort("fbMinSpd", 40);
+    feedbackMaxFreq = pref.getUShort("fbMaxFreq", 254);
   }
 
   averageFilterHall = constrain(averageFilterHall, 1, 10);
@@ -224,18 +254,27 @@ void readEEP()
   broadcastSpeedDLC = constrain(broadcastSpeedDLC, 0, 8);
   normaliseSpeedOffsetCurve();
 #if serialDebugEEP
-  DEBUG_PRINTLN("EEPROM initialised with...");
-  DEBUG_PRINTLN("Written EEPROM with data:...");
-  DEBUG_PRINTLN(testSpeedo);
-  DEBUG_PRINTLN(tempSpeed);
-  DEBUG_PRINTLN(hasNeedleSweep);
-  DEBUG_PRINTLN(sweepSpeed);
-  DEBUG_PRINTLN(maxFreqHall);
-  DEBUG_PRINTLN(maxFreqCAN);
-  DEBUG_PRINTLN(maxSpeed);
-  DEBUG_PRINTLN(speedOffset);
-  DEBUG_PRINTLN(speedOffsetPositive);
-  DEBUG_PRINTLN(motorPerformanceVal);
+  Serial.println("[EEP] EEPROM initialised with...");
+  Serial.print("[EEP] testSpeedo: ");
+  Serial.println(testSpeedo);
+  Serial.print("[EEP] tempSpeed: ");
+  Serial.println(tempSpeed);
+  Serial.print("[EEP] hasNeedleSweep: ");
+  Serial.println(hasNeedleSweep);
+  Serial.print("[EEP] sweepSpeed: ");
+  Serial.println(sweepSpeed);
+  Serial.print("[EEP] maxFreqHall: ");
+  Serial.println(maxFreqHall);
+  Serial.print("[EEP] maxFreqCAN: ");
+  Serial.println(maxFreqCAN);
+  Serial.print("[EEP] maxSpeed: ");
+  Serial.println(maxSpeed);
+  Serial.print("[EEP] speedOffset: ");
+  Serial.println(speedOffset);
+  Serial.print("[EEP] speedOffsetPositive: ");
+  Serial.println(speedOffsetPositive);
+  Serial.print("[EEP] motorPerformanceVal: ");
+  Serial.println(motorPerformanceVal);
 #endif
 }
 
@@ -250,7 +289,7 @@ void writeEEP()
   // Write GPS update rate
   pref.putUChar("gpsUpdateRateHz", gpsUpdateRateHz);
 #if serialDebugEEP
-  DEBUG_PRINTLN("Writing EEPROM...");
+  Serial.println("[EEP] Writing EEPROM...");
 #endif
 
   pref.putBool("useHall", useHall);
@@ -314,18 +353,38 @@ void writeEEP()
   pref.putFloat("amSpeedScale", aftermarketSpeedScale);
   pref.putShort("amSpeedOffset", aftermarketSpeedOffset);
 
+  pref.putBool("reverseDir", reverseDirection);
+
+  pref.putBool("fbEnable", feedbackEnable);
+  pref.putFloat("pidKp", pidKp);
+  pref.putFloat("pidKi", pidKi);
+  pref.putFloat("pidKd", pidKd);
+  pref.putFloat("fbDeadband", feedbackDeadband);
+  pref.putUShort("fbMinSpd", feedbackMinSpeed);
+  pref.putUShort("fbMaxFreq", feedbackMaxFreq);
+
 #if serialDebugEEP
-  DEBUG_PRINTLN("Written EEPROM with data:...");
-  DEBUG_PRINTLN(testSpeedo);
-  DEBUG_PRINTLN(tempSpeed);
-  DEBUG_PRINTLN(hasNeedleSweep);
-  DEBUG_PRINTLN(sweepSpeed);
-  DEBUG_PRINTLN(maxFreqHall);
-  DEBUG_PRINTLN(maxFreqCAN);
-  DEBUG_PRINTLN(maxSpeed);
-  DEBUG_PRINTLN(speedOffset);
-  DEBUG_PRINTLN(speedOffsetPositive);
-  DEBUG_PRINTLN(motorPerformanceVal);
+  Serial.println("[EEP] Written EEPROM with data:...");
+  Serial.print("[EEP] testSpeedo: ");
+  Serial.println(testSpeedo);
+  Serial.print("[EEP] tempSpeed: ");
+  Serial.println(tempSpeed);
+  Serial.print("[EEP] hasNeedleSweep: ");
+  Serial.println(hasNeedleSweep);
+  Serial.print("[EEP] sweepSpeed: ");
+  Serial.println(sweepSpeed);
+  Serial.print("[EEP] maxFreqHall: ");
+  Serial.println(maxFreqHall);
+  Serial.print("[EEP] maxFreqCAN: ");
+  Serial.println(maxFreqCAN);
+  Serial.print("[EEP] maxSpeed: ");
+  Serial.println(maxSpeed);
+  Serial.print("[EEP] speedOffset: ");
+  Serial.println(speedOffset);
+  Serial.print("[EEP] speedOffsetPositive: ");
+  Serial.println(speedOffsetPositive);
+  Serial.print("[EEP] motorPerformanceVal: ");
+  Serial.println(motorPerformanceVal);
 #endif
 
   xSemaphoreGive(writeMutex);

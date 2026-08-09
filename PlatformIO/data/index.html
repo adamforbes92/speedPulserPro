@@ -9,7 +9,7 @@
     <meta http-equiv="Expires" content="0">
 
     <title>SpeedPulserPro</title>
-    <link rel="stylesheet" href="style.css?v=2.01">
+    <link rel="stylesheet" href="style.css?v=2.50">
 </head>
 
 <body>
@@ -28,6 +28,7 @@
             <button class="nav-tab" data-page="configuration">Configuration</button>
             <button class="nav-tab" data-page="advanced">Advanced</button>
             <button class="nav-tab" data-page="calibration">Calibration</button>
+            <button class="nav-tab" data-page="diag">Diagnostics</button>
             <button class="nav-tab" data-page="ota">OTA</button>
         </nav>
 
@@ -41,9 +42,14 @@
                         <div class="gauge-unit">RPM</div>
                     </div>
                     <div class="gauge">
-                        <div class="gauge-label">Speed (Final)</div>
+                        <div class="gauge-label" id="incomingSpeedLabel">Speed (Final)</div>
                         <div class="gauge-value" id="speed">--</div>
                         <div class="gauge-unit" id="speedUnit">KMH</div>
+                    </div>
+                    <div class="gauge">
+                        <div class="gauge-label" id="motorDutyLabel">Motor Duty</div>
+                        <div class="gauge-value" id="motorDuty">--</div>
+                        <div class="gauge-unit">duty</div>
                     </div>
                     <div class="gauge">
                         <div class="gauge-label">Speed Offset Type</div>
@@ -55,6 +61,26 @@
                         <div class="gauge-value" id="currentSpeedOffset">--</div>
                         <div class="gauge-unit" id="speedOffsetUnit">KMH</div>
                     </div>
+                    <div class="gauge">
+                        <div class="gauge-label">Measured Speed</div>
+                        <div class="gauge-value" id="measuredSpeed">--</div>
+                        <div class="gauge-unit" id="measuredSpeedUnit">KMH</div>
+                    </div>
+                    <div class="gauge">
+                        <div class="gauge-label">PID Trim</div>
+                        <div class="gauge-value" id="pidCorrection">--</div>
+                        <div class="gauge-unit">duty</div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="card">
+                <h2>Calibration Curve</h2>
+                <div class="cal-graph-wrap">
+                    <canvas id="calCurveCanvas" class="cal-graph"></canvas>
+                </div>
+                <div class="cal-graph-legend">
+                    <span class="legend-item"><span class="legend-swatch point"></span>Current Duty/Speed</span>
                 </div>
             </section>
 
@@ -75,40 +101,34 @@
 
         <div class="page" id="configuration-page">
             <section class="card">
-                <h2>Needle Sweep Configuration</h2>
+                <h2>Needle Sweep</h2>
                 <div class="form-group">
                     <label>
                         <input type="checkbox" id="hasNeedleSweep">
                         Enable Needle Sweep
                     </label>
                 </div>
-                <div class="form-group">
-                    <label>
-                        <input type="checkbox" id="linearSpeedSweep">
-                        Linearise Speed Array
-                    </label>
+                <div class="input-group">
+                    <label>Sweep Speed (ms): <span id="sweepSpeed-display">18</span></label>
+                    <input type="range" id="sweepSpeed" min="0" max="50" step="1" value="18" class="slider">
                 </div>
                 <div class="input-group">
-                    <label>Sweep Speed (ms)</label>
-                    <input type="number" id="sweepSpeed" min="0" max="100" value="0">
+                    <label>Speed Ramp Rate (higher = faster): <span id="stepSpeed-display">17</span></label>
+                    <input type="range" id="stepSpeed" min="1" max="50" step="1" value="17" class="slider">
                 </div>
                 <div class="input-group">
-                    <label>RPM Step</label>
-                    <input type="number" id="stepRPM" min="0" max="500" value="100">
-                </div>
-                <div class="input-group">
-                    <label>Speed Step</label>
-                    <input type="number" id="stepSpeed" min="0" max="500" value="100">
+                    <label>RPM Ramp Rate (higher = faster): <span id="stepRPM-display">14</span></label>
+                    <input type="range" id="stepRPM" min="1" max="50" step="1" value="14" class="slider">
                 </div>
                 <button class="btn-secondary" id="testNeedleSweep">Test Needle Sweep</button>
             </section>
 
             <section class="card">
-                <h2>Cluster Output Configuration</h2>
+                <h2>Cluster Output</h2>
                 <div class="form-group">
                     <label>
-                        <input type="checkbox" id="coilType">
-                        Use Coil Output (RPM)
+                        <input type="checkbox" id="coilType" checked>
+                        Enable RPM Output (Ignition Coil Type)
                     </label>
                 </div>
                 <div class="form-group">
@@ -126,7 +146,7 @@
             </section>
 
             <section class="card">
-                <h2>Speed Limits and Global Offset</h2>
+                <h2>Speed Limits</h2>
                 <div class="input-group">
                     <label>Maximum Speed (km/h): <span id="maxSpeed-display">200</span></label>
                     <input type="range" id="maxSpeed" min="0" max="400" step="5" value="200" class="slider">
@@ -136,79 +156,126 @@
                     <input type="range" id="maxFreqHall" min="10" max="500" step="5" value="200" class="slider">
                 </div>
                 <button class="btn-secondary" id="resetMaxFreqHall">Reset Hall Frequency</button>
+            </section>
+
+            <section class="card">
+                <h2>Speed Offset</h2>
                 <div class="form-group">
                     <label>
-                        <input type="checkbox" id="useGlobalSpeedOffset" checked>
-                        Enable Global Speed Offset
+                        <input type="checkbox" id="useSpeedOffsetCurve">
+                        Speed-Dependent Offset Curve (5 Points)
                     </label>
                 </div>
-                <div class="form-group">
-                    <label>
-                        <input type="checkbox" id="speedOffsetPositive" checked>
-                        Positive Offset
-                    </label>
+
+                <div id="globalOffsetSection">
+                    <div class="form-group">
+                        <label>
+                            <input type="checkbox" id="useGlobalSpeedOffset" checked>
+                            Enable Global Speed Offset
+                        </label>
+                    </div>
+                    <div class="form-group">
+                        <label>
+                            <input type="checkbox" id="speedOffsetPositive" checked>
+                            Positive Offset
+                        </label>
+                    </div>
+                    <div class="input-group">
+                        <label>Global Speed Offset: <span id="speedOffset-display">0</span> km/h</label>
+                        <input type="range" id="speedOffset" min="0" max="50" step="1" value="0" class="slider">
+                    </div>
                 </div>
-                <div class="input-group">
-                    <label>Global Speed Offset: <span id="speedOffset-display">0</span> km/h</label>
-                    <input type="range" id="speedOffset" min="0" max="50" step="1" value="0" class="slider">
+
+                <div id="offsetCurveSection" style="display:none;">
+                    <div class="input-group">
+                        <label>Point 1 (0-50 km/h): <span id="curveOffset0-display">0</span> km/h</label>
+                        <input type="range" id="curveOffset0" min="-20" max="20" step="1" value="0" class="slider">
+                    </div>
+                    <div class="input-group">
+                        <label>Point 2 (51-100 km/h): <span id="curveOffset1-display">0</span> km/h</label>
+                        <input type="range" id="curveOffset1" min="-20" max="20" step="1" value="0" class="slider">
+                    </div>
+                    <div class="input-group">
+                        <label>Point 3 (101-150 km/h): <span id="curveOffset2-display">0</span> km/h</label>
+                        <input type="range" id="curveOffset2" min="-20" max="20" step="1" value="0" class="slider">
+                    </div>
+                    <div class="input-group">
+                        <label>Point 4 (151-200 km/h): <span id="curveOffset3-display">0</span> km/h</label>
+                        <input type="range" id="curveOffset3" min="-20" max="20" step="1" value="0" class="slider">
+                    </div>
+                    <div class="input-group">
+                        <label>Point 5 (201+ km/h): <span id="curveOffset4-display">0</span> km/h</label>
+                        <input type="range" id="curveOffset4" min="-20" max="20" step="1" value="0" class="slider">
+                    </div>
+                    <p class="hint">One offset per fixed speed range — used instead of the global offset.</p>
                 </div>
             </section>
         </div>
 
         <div class="page" id="advanced-page">
-                        <section class="card">
-                            <h2>Live Data - All Inputs</h2>
-                            <div class="live-data-grid">
-                                <div class="live-data-item">
-                                    <div class="live-data-label">RPM</div>
-                                    <div class="live-data-value" id="liveRPM">--</div>
-                                </div>
-                                <div class="live-data-item">
-                                    <div class="live-data-label">Hall RPM</div>
-                                    <div class="live-data-value" id="liveHallRPM">--</div>
-                                </div>
-                                <div class="live-data-item">
-                                    <div class="live-data-label">CAN RPM</div>
-                                    <div class="live-data-value" id="liveCANRPM">--</div>
-                                </div>
-                                <div class="live-data-item">
-                                    <div class="live-data-label">Hall Speed</div>
-                                    <div class="live-data-value" id="liveHallSpeed">--</div>
-                                </div>
-                                <div class="live-data-item">
-                                    <div class="live-data-label">ECU Speed</div>
-                                    <div class="live-data-value" id="liveECUSpeed">--</div>
-                                </div>
-                                <div class="live-data-item">
-                                    <div class="live-data-label">ABS Speed</div>
-                                    <div class="live-data-value" id="liveABSSpeed">--</div>
-                                </div>
-                                <div class="live-data-item">
-                                    <div class="live-data-label">DSG Speed</div>
-                                    <div class="live-data-value" id="liveDSGSpeed">--</div>
-                                </div>
-                                <div class="live-data-item">
-                                    <div class="live-data-label">TP2.0 Speed</div>
-                                    <div class="live-data-value" id="liveTP20Speed">--</div>
-                                </div>
-                                <div class="live-data-item">
-                                    <div class="live-data-label">UDS Speed</div>
-                                    <div class="live-data-value" id="liveUDSSpeed">--</div>
-                                </div>
-                                <div class="live-data-item">
-                                    <div class="live-data-label">GPS Speed</div>
-                                    <div class="live-data-value" id="liveGPSSpeed">--</div>
-                                </div>
-                                <div class="live-data-item">
-                                    <div class="live-data-label">Custom CAN Speed</div>
-                                    <div class="live-data-value" id="liveAftermarketSpeed">--</div>
-                                </div>
-                                <div class="live-data-item">
-                                    <div class="live-data-label">GPS Status</div>
-                                    <div class="live-data-value" id="liveGPSStatus">--</div>
-                                </div>
-                            </div>
-                        </section>
+            <section class="card">
+                <h2>Closed-Loop Feedback (PID)</h2>
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="feedbackEnable">
+                        Enable Closed-Loop Feedback
+                    </label>
+                </div>
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="reverseDirection">
+                        Reverse Motor Direction
+                    </label>
+                </div>
+                <p style="margin-top:0;">
+                    When enabled, the motor's own tacho pulse is compared to the requested
+                    speed and the PWM duty is trimmed so the motor tracks the target.
+                </p>
+                <div class="input-group">
+                    <label>Min Feedback Speed (km/h): <span id="feedbackMinSpeed-display">40</span></label>
+                    <input type="range" id="feedbackMinSpeed" min="0" max="100" value="40" class="slider">
+                    <p style="margin:0.25rem 0 0;font-size:0.85rem;opacity:0.8;">
+                        Below this target the loop runs open-loop (feed-forward only) to stop
+                        low-speed hunting. Set to 0 to always run closed-loop.
+                    </p>
+                </div>
+                <div class="input-group">
+                    <label>PID Kp</label>
+                    <input type="number" id="pidKp" min="0" max="10" step="0.01" value="0.15">
+                </div>
+                <div class="input-group">
+                    <label>PID Ki</label>
+                    <input type="number" id="pidKi" min="0" max="20" step="0.01" value="1.3">
+                </div>
+                <div class="input-group">
+                    <label>PID Kd</label>
+                    <input type="number" id="pidKd" min="0" max="10" step="0.01" value="0">
+                </div>
+                <div class="input-group">
+                    <label>PID Deadband (Hz): <span id="feedbackDeadband-display">1.5</span></label>
+                    <input type="range" id="feedbackDeadband" min="0" max="5" step="0.1" value="1.5" class="slider">
+                    <p style="margin:0.25rem 0 0;font-size:0.85rem;opacity:0.8;">
+                        Within this many Hz of target the P/D terms are silenced to stop
+                        needle hunting; the integral still trims out the last error.
+                        Lower = tighter tracking, higher = calmer needle. 0 = always full PID.
+                    </p>
+                </div>
+                <button class="btn-secondary" id="resetPidDefaults">Reset PID Defaults</button>
+                <div class="live-data-grid" style="margin-top:1rem;">
+                    <div class="live-data-item">
+                        <div class="live-data-label">Measured Speed</div>
+                        <div class="live-data-value" id="liveMeasuredSpeed">--</div>
+                    </div>
+                    <div class="live-data-item">
+                        <div class="live-data-label">PID Trim</div>
+                        <div class="live-data-value" id="livePidCorrection">--</div>
+                    </div>
+                    <div class="live-data-item">
+                        <div class="live-data-label">Tacho Freq (Hz)</div>
+                        <div class="live-data-value" id="liveMeasuredFreqHz">--</div>
+                    </div>
+                </div>
+            </section>
             <section class="card">
                 <h2>Broadcast Speed</h2>
                 <div class="form-group">
@@ -302,7 +369,7 @@
             </section>
 
             <section class="card">
-                <h2>CAN Analyzer</h2>
+                <h2>CAN Analyser</h2>
                 <p style="margin-top: 0;">
                     Forward all received CAN frames to SavvyCAN. WiFi and Serial modes are mutually exclusive.
                     <br>WiFi (GVRET): connect SavvyCAN to <strong>192.168.4.1:23</strong>.
@@ -319,34 +386,6 @@
                         <input type="checkbox" id="analyzerSerial">
                         SavvyCAN via Serial
                     </label>
-                </div>
-            </section>
-
-            <section class="card">
-                <h2>RPM Output Test</h2>
-                <div class="form-group">
-                    <label>
-                        <input type="checkbox" id="testRPM">
-                        Enable RPM Test
-                    </label>
-                </div>
-                <div class="input-group">
-                    <label>Test RPM Value: <span id="tempRPM-display">0</span> RPM</label>
-                    <input type="range" id="tempRPM" min="0" max="8000" value="0" class="slider">
-                </div>
-            </section>
-
-            <section class="card">
-                <h2>Speed Output Test</h2>
-                <div class="form-group">
-                    <label>
-                        <input type="checkbox" id="testSpeedo">
-                        Enable Speed Test
-                    </label>
-                </div>
-                <div class="input-group">
-                    <label>Test Speed Value: <span id="tempSpeed-display">0</span> km/h</label>
-                    <input type="range" id="tempSpeed" min="0" max="400" step="5" value="0" class="slider">
                 </div>
             </section>
 
@@ -422,119 +461,215 @@
                 </div>
                 <button class="btn-secondary" id="resetClusterRPMLimit">Reset Cluster RPM Limit</button>
             </section>
-
-            <section class="card">
-                <h2>Calibration</h2>
-                <div class="form-group">
-                    <label>
-                        <input type="checkbox" id="testCal">
-                        Enable Calibration
-                    </label>
-                </div>
-                <div class="input-group">
-                    <button class="btn-secondary" id="dutyDownBtn">Duty -1%</button>
-                    <button class="btn-secondary" id="dutyUpBtn">Duty +1%</button>
-                </div>
-                <div class="status-item" style="margin-top: 1rem;">
-                    <div class="status-label">Current Duty Cycle</div>
-                    <div class="status-value" id="tempDutyCycle-display">0</div>
-                </div>
-            </section>
         </div>
 
         <div class="page" id="calibration-page">
-            <section class="card">
-                <h2>Speed Offset Curve (5 Points)</h2>
+            <section class="card" id="calBuilderCard">
+                <h2>Calibration Builder</h2>
+                <p class="hint">
+                    Enable Calibration Mode, jog to Max Duty and adjust the potentiometer to reach
+                    your Max Cluster Speed. Then jog each duty until the needle sits exactly on a
+                    speed mark, choose that speed below and click Capture. Repeat for each major
+                    speed, then Generate &amp; Apply, then Save.
+                </p>
+
                 <div class="form-group">
                     <label>
-                        <input type="checkbox" id="useSpeedOffsetCurve">
-                        Enable Speed-Dependent Offset Curve
+                        <input type="checkbox" id="testCal">
+                        Enable Calibration Mode
                     </label>
                 </div>
-                <p class="hint">When enabled, the curve offsets below are used instead of the global speed offset.</p>
-            </section>
 
-            <section class="card">
-                <h2>Point 1 (0-50 km/h)</h2>
-                <div class="input-group">
-                    <label>Offset: <span id="curveOffset0-display">0</span> km/h</label>
-                    <input type="range" id="curveOffset0" min="-20" max="20" step="1" value="0" class="slider">
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="calConvertToMPH">
+                        Cluster in MPH
+                    </label>
+                </div>
+
+                <div class="cal-duty-readout">
+                    <div class="cal-duty-value"><span id="calDutyNow">0</span> <small>/ 4095</small></div>
+                    <div class="cal-duty-sub"><span id="calDutyPct">0.0</span>% duty</div>
+                </div>
+
+                <div class="stepper-row">
+                    <button class="stepper-btn coarse" data-jog="-50">&minus;50</button>
+                    <button class="stepper-btn" data-jog="-10">&minus;10</button>
+                    <button class="stepper-btn fine" data-jog="-1">&minus;1</button>
+                    <button class="stepper-btn fine" data-jog="1">+1</button>
+                    <button class="stepper-btn" data-jog="10">+10</button>
+                    <button class="stepper-btn coarse" data-jog="50">+50</button>
+                </div>
+
+                <div class="input-group" style="margin-top:1rem;">
+                    <label>Target speed for this point (<span id="calUnitLabel">km/h</span>)</label>
+                    <div class="chip-grid" id="calTargetChips"></div>
+                    <input type="number" id="calTargetSpeed" min="0" max="400" step="1" value="0"
+                           style="margin-top:0.75rem;">
+                </div>
+
+                <button class="btn-secondary" id="calCaptureBtn">＋ Capture Point (<span id="calCaptureSpeed">0</span> @ <span id="calCaptureDuty">0</span>)</button>
+
+                <h3 class="cal-subhead">Captured Points</h3>
+                <div class="cal-points" id="calPointsList">
+                    <p class="hint">No points captured yet.</p>
+                </div>
+
+                <div class="input-group" style="margin-top:1rem;">
+                    <label>Calibration Name</label>
+                    <input type="text" id="calName" maxlength="39" placeholder="e.g. VW VDO 90mph — Adam">
+                </div>
+
+                <div class="cal-action-grid">
+                    <button class="btn-secondary" id="calApplyBtn">Generate &amp; Apply</button>
+                    <button class="btn-secondary" id="calSaveBtn">Save to Device</button>
+                    <button class="btn-secondary" id="calClearBtn">Clear All</button>
                 </div>
             </section>
 
             <section class="card">
-                <h2>Point 2 (51-100 km/h)</h2>
-                <div class="input-group">
-                    <label>Offset: <span id="curveOffset1-display">0</span> km/h</label>
-                    <input type="range" id="curveOffset1" min="-20" max="20" step="1" value="0" class="slider">
+                <h2>Export / Import</h2>
+                <div class="cal-action-grid">
+                    <button class="btn-secondary" id="calExportTextBtn">Export Text</button>
+                    <button class="btn-secondary" id="calImportBtn">Import Text</button>
+                </div>
+                <input type="file" id="calImportFile" accept=".txt,text/plain" hidden>
+                <textarea id="calText" class="cal-textarea" rows="8" readonly
+                          placeholder="Exported / imported calibration text appears here."></textarea>
+                <p class="hint">Export Text saves the active calibration to a .txt file you can share
+                   or back up. Import Text opens a .txt file, shows it here, and applies it.</p>
+            </section>
+        </div>
+
+        <div class="page" id="diag-page">
+            <section class="card">
+                <h2>Live Data - All Inputs</h2>
+                <div class="live-data-grid">
+                    <div class="live-data-item">
+                        <div class="live-data-label">RPM</div>
+                        <div class="live-data-value" id="liveRPM">--</div>
+                    </div>
+                    <div class="live-data-item">
+                        <div class="live-data-label">Hall RPM</div>
+                        <div class="live-data-value" id="liveHallRPM">--</div>
+                    </div>
+                    <div class="live-data-item">
+                        <div class="live-data-label">CAN RPM</div>
+                        <div class="live-data-value" id="liveCANRPM">--</div>
+                    </div>
+                    <div class="live-data-item">
+                        <div class="live-data-label">Hall Speed</div>
+                        <div class="live-data-value" id="liveHallSpeed">--</div>
+                    </div>
+                    <div class="live-data-item">
+                        <div class="live-data-label">ECU Speed</div>
+                        <div class="live-data-value" id="liveECUSpeed">--</div>
+                    </div>
+                    <div class="live-data-item">
+                        <div class="live-data-label">ABS Speed</div>
+                        <div class="live-data-value" id="liveABSSpeed">--</div>
+                    </div>
+                    <div class="live-data-item">
+                        <div class="live-data-label">DSG Speed</div>
+                        <div class="live-data-value" id="liveDSGSpeed">--</div>
+                    </div>
+                    <div class="live-data-item">
+                        <div class="live-data-label">TP2.0 Speed</div>
+                        <div class="live-data-value" id="liveTP20Speed">--</div>
+                    </div>
+                    <div class="live-data-item">
+                        <div class="live-data-label">UDS Speed</div>
+                        <div class="live-data-value" id="liveUDSSpeed">--</div>
+                    </div>
+                    <div class="live-data-item">
+                        <div class="live-data-label">GPS Speed</div>
+                        <div class="live-data-value" id="liveGPSSpeed">--</div>
+                    </div>
+                    <div class="live-data-item">
+                        <div class="live-data-label">Custom CAN Speed</div>
+                        <div class="live-data-value" id="liveAftermarketSpeed">--</div>
+                    </div>
+                    <div class="live-data-item">
+                        <div class="live-data-label">GPS Status</div>
+                        <div class="live-data-value" id="liveGPSStatus">--</div>
+                    </div>
                 </div>
             </section>
 
             <section class="card">
-                <h2>Point 3 (101-150 km/h)</h2>
+                <h2>Speed Test Mode</h2>
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="testSpeedo">
+                        Enable Speed Test
+                    </label>
+                </div>
                 <div class="input-group">
-                    <label>Offset: <span id="curveOffset2-display">0</span> km/h</label>
-                    <input type="range" id="curveOffset2" min="-20" max="20" step="1" value="0" class="slider">
+                    <label>Test Speed Value: <span id="tempSpeed-display">0</span> km/h</label>
+                    <input type="range" id="tempSpeed" min="0" max="400" step="5" value="0" class="slider">
                 </div>
             </section>
 
             <section class="card">
-                <h2>Point 4 (151-200 km/h)</h2>
-                <div class="input-group">
-                    <label>Offset: <span id="curveOffset3-display">0</span> km/h</label>
-                    <input type="range" id="curveOffset3" min="-20" max="20" step="1" value="0" class="slider">
+                <h2>RPM Output Test</h2>
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="testRPM">
+                        Enable RPM Test
+                    </label>
                 </div>
-            </section>
-
-            <section class="card">
-                <h2>Point 5 (201+ km/h)</h2>
                 <div class="input-group">
-                    <label>Offset: <span id="curveOffset4-display">0</span> km/h</label>
-                    <input type="range" id="curveOffset4" min="-20" max="20" step="1" value="0" class="slider">
+                    <label>Test RPM Value: <span id="tempRPM-display">0</span> RPM</label>
+                    <input type="range" id="tempRPM" min="0" max="8000" value="0" class="slider">
                 </div>
             </section>
         </div>
 
         <div class="page" id="ota-page">
-            <section class="card">
-                <h2>OTA Firmware Update</h2>
-                <div class="status-item" style="margin-bottom: 1rem;">
-                    <div class="status-label">Firmware Version</div>
-                    <div class="status-value" id="fwVersion">FW: --</div>
-                </div>
-                <p>Select a compiled firmware <code>.bin</code> file and upload it over WiFi. The device will reboot automatically.</p>
-                <div class="input-group">
-                    <label>Firmware Binary (.bin)</label>
-                    <input type="file" id="otaBinFile" accept=".bin,application/octet-stream">
-                </div>
-                <button class="btn-secondary" id="otaUploadBtn">Upload Firmware</button>
-                <progress id="otaProgress" max="100" value="0" class="ota-progress"></progress>
-                <div class="status-item" style="margin-top: 1rem;">
-                    <div class="status-label">Status</div>
-                    <div class="status-value" id="otaStatus">Idle</div>
+            <section class="card centered-card">
+                <h2>Firmware Info</h2>
+                <div class="info-box">
+                    <p><strong>Firmware Version:</strong> <span id="otaFwVersion">--</span></p>
+                    <p><strong>Hardware:</strong> <span id="otaHardware">--</span></p>
+                    <p><strong>Board:</strong> <span id="otaBoard">--</span></p>
                 </div>
             </section>
-
-            <section class="card">
-                <h2>OTA Filesystem Update</h2>
-                <p>Select a compiled LittleFS <code>.bin</code> to update the web UI and configuration files. The device will reboot automatically.</p>
+            <section class="card centered-card">
+                <h2>OTA Update</h2>
+                <div class="info-box" style="margin-bottom:1rem">
+                    <p><strong>Firmware</strong> updates the application (compiled <strong>firmware.bin</strong>).</p>
+                    <p><strong>Filesystem</strong> updates the web interface (<strong>littlefs.bin</strong>).</p>
+                    <p>The device reboots automatically once the upload completes.</p>
+                </div>
                 <div class="input-group">
-                    <label>Filesystem Binary (.bin)</label>
-                    <input type="file" id="otaFsBinFile" accept=".bin,application/octet-stream">
+                    <label>Update Type</label>
+                    <select id="otaType">
+                        <option value="firmware">Firmware (application)</option>
+                        <option value="filesystem">Filesystem (web UI)</option>
+                    </select>
                 </div>
-                <button class="btn-secondary" id="otaFsUploadBtn">Upload Filesystem</button>
-                <progress id="otaFsProgress" max="100" value="0" class="ota-progress"></progress>
-                <div class="status-item" style="margin-top: 1rem;">
-                    <div class="status-label">Status</div>
-                    <div class="status-value" id="otaFsStatus">Idle</div>
+                <div class="ota-upload-area" id="otaDropZone">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                    <p>Drag &amp; drop a <strong>.bin</strong> file here, or</p>
+                    <button class="btn-secondary" id="otaChooseBtn" type="button">Choose File</button>
+                    <p id="otaFileName" class="ota-file-name"></p>
+                    <input type="file" id="otaFile" accept=".bin" style="display:none">
                 </div>
+                <div class="ota-progress" id="otaProgressWrap" style="display:none">
+                    <div class="ota-progress-bar" id="otaProgressBar"></div>
+                    <div class="ota-progress-label" id="otaProgressLabel">0%</div>
+                </div>
+                <div class="button-group" style="margin-top:1rem">
+                    <button class="btn-primary" id="otaUploadBtn" disabled>Upload Firmware</button>
+                </div>
+                <div class="ota-status" id="otaStatus"></div>
             </section>
         </div>
 
 
     </div>
 
-    <script src="app.js?v=2.20"></script>
+    <script src="app.js?v=2.50"></script>
 </body>
 
 </html>

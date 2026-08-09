@@ -239,9 +239,7 @@ void taskTP20(void *arg)
             uint16_t raw = ((uint16_t)kwpBuf[3] << 8) | kwpBuf[4];
             tp20Speed = (uint16_t)((float)raw / TP20_SPEED_SCALE_DIV + 0.5f);
 
-#ifdef ChassisCANDebug
-            Serial.printf("[TP2.0] raw=%u  speed=%u km/h\n", raw, tp20Speed);
-#endif
+            DEBUG_UDS("TP2.0 raw=%u  speed=%u km/h", raw, tp20Speed);
         }
 
         // Lost connection or disabled
@@ -348,9 +346,7 @@ void taskUDS(void *arg)
                     udsSpeed = rsp.data[4];
                 }
 
-#ifdef ChassisCANDebug
-                Serial.printf("[UDS] DID 0x%04X  speed=%u km/h\n", respDID, udsSpeed);
-#endif
+                DEBUG_UDS("DID 0x%04X  speed=%u km/h", respDID, udsSpeed);
                 break;
             }
 

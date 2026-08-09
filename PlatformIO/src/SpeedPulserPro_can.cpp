@@ -13,9 +13,7 @@
  */
 void canInit()
 {
-#ifdef ChassisCANDebug
-  Serial.println("[CAN] Initializing TWAI driver...");
-#endif
+  DEBUG_CAN("Initialising TWAI driver...");
 
   // General configuration (pins, TX/RX queues)
   twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)pinTX_CAN, (gpio_num_t)pinRX_CAN, TWAI_MODE_NORMAL);
@@ -30,9 +28,7 @@ void canInit()
   esp_err_t ret = twai_driver_install(&g_config, &t_config, &f_config);
   if (ret != ESP_OK)
   {
-#ifdef ChassisCANDebug
-    Serial.println("[CAN] Failed to install TWAI driver");
-#endif
+    DEBUG_CAN("Failed to install TWAI driver");
     return;
   }
 
@@ -40,15 +36,11 @@ void canInit()
   ret = twai_start();
   if (ret != ESP_OK)
   {
-#ifdef ChassisCANDebug
-    Serial.println("[CAN] Failed to start TWAI driver");
-#endif
+    DEBUG_CAN("Failed to start TWAI driver");
     return;
   }
 
-#ifdef ChassisCANDebug
-  Serial.println("[CAN] TWAI driver initialized successfully");
-#endif
+  DEBUG_CAN("TWAI driver initialised successfully");
 
   // Create CAN receive task
   xTaskCreate(
@@ -67,9 +59,7 @@ void canInit()
  */
 void taskCANRx(void *parameter)
 {
-#ifdef ChassisCANDebug
-  Serial.println("[CAN] CAN receive task started");
-#endif
+  DEBUG_CAN("CAN receive task started");
 
   twai_message_t frame;
 
@@ -108,16 +98,11 @@ void taskCANRx(void *parameter)
  */
 void processTWAIMessage(const twai_message_t &frame)
 {
-#if ChassisCANDebug
-  Serial.print("Length Recv: ");
-  Serial.print(frame.data_length_code);
-  Serial.print(" CAN ID: ");
-  Serial.print(frame.identifier, HEX);
-  Serial.print(" Buffer: ");
+#if enableDebug && debugCAN
+  DEBUG_CAN_("RX Len:%u ID:0x%X Data:", frame.data_length_code, frame.identifier);
   for (uint8_t i = 0; i < frame.data_length_code; i++)
   {
-    Serial.print(frame.data[i], HEX);
-    Serial.print(" ");
+    Serial.printf("%02X ", frame.data[i]);
   }
   Serial.println();
 #endif
@@ -266,8 +251,8 @@ void sendBroadcastSpeedFrame()
     speedFrame.data[highByteIndex] = lowByte;
   }
 
-#if ChassisCANDebug
-  Serial.printf("[CAN TX] ID:0x%03X DLC:%u Data:", speedFrame.identifier, speedFrame.data_length_code);
+#if enableDebug && debugCAN
+  DEBUG_CAN_("TX ID:0x%03X DLC:%u Data:", speedFrame.identifier, speedFrame.data_length_code);
   for (uint8_t i = 0; i < speedFrame.data_length_code; i++) {
     Serial.printf(" %02X", speedFrame.data[i]);
   }

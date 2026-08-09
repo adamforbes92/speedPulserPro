@@ -9,9 +9,11 @@
 #include "SpeedPulserPro_eep.h"
 #include "SpeedPulserPro_dsg.h"
 #include "SpeedPulserPro_motorCal.h"
+#include "SpeedPulserPro_calBuilder.h"
 #include "SpeedPulserPro_tasks.h"
 #include "SpeedPulserPro_control.h"
 #include "SpeedPulserPro_savvycan.h"
+#include "power_manager.h"
 
 // Forward declarations for main.cpp functions
 void setup();
@@ -21,14 +23,13 @@ void setup()
 {
   // Always begin Serial - many GPS/rate diagnostic prints are unconditional
   // and parts of the framework misbehave writing to a never-begun UART.
-  Serial.begin(115200);
+  Serial.begin(baudSerial);
   Serial.setTimeout(10);
-#if serialDebug || serialDebugIncoming || serialDebugWifi || serialDebugEEP || serialDebugGPS || ChassisCANDebug
-  DEBUG_PRINTLN("Initialising SpeedPulser Pro...");
-#endif
+  DEBUG("SpeedPulser Pro booting  |  FW %s  |  debug=%d", FW_VERSION, enableDebug);
 
-  basicInit();        // Initialize hardware, interrupts, CAN, GPS, etc.
+  basicInit();        // Initialize hardware, interrupts, CAN, GPS, etc. (also readEEP)
   setupTimer();       // Set up hardware timer for RPM output
+  calBuilderInit();   // Load any user (SpeedPulser) custom calibration from NVS
   updateMotorArray(); // Load motor calibration data into array for quick lookup
 
   if (hasNeedleSweep)
@@ -37,11 +38,18 @@ void setup()
   }
 
   tasksInit();                               // Initialize FreeRTOS tasks for background operations
-  ledcWrite(LEDC_OUTPUT_CHANNEL, dutyCycle); // Ensure initial duty cycle is set to zero to turn off motor
+  setMotorDuty(dutyCycle);                   // Ensure initial duty cycle is set to zero to turn off motor
 
   connectWifi();    // Start WiFi
   setupUI();        // Set up web server and API
   setupAnalyzer();  // Start SavvyCAN analyzer task (idle until mode is enabled)
+
+  // Universal reduced-power module: turns WiFi off 1 min after the last client
+  // disconnects, scales CPU 240->80 MHz, releases Bluetooth and kills the
+  // onboard LED to cut current draw (and therefore linear-regulator heat).
+  power_config_t pcfg = powerDefaultConfig();
+  pcfg.verbose = (enableDebug && debugPower);
+  powerInit(&pcfg);
 }
 
 void loop()
@@ -57,9 +65,8 @@ void loop()
     String resp;
     bool ok = setGPSUpdateRate(gpsUpdateRateHz, resp);
     tasksResumeAll();
-    Serial.print(F("[GPS Auto] Rate apply "));
-    Serial.print(ok ? F("OK: ") : F("FAILED: "));
-    Serial.println(resp);
+    (void)ok;
+    DEBUG_GPS("Auto rate apply %s: %s", ok ? "OK" : "FAILED", resp.c_str());
   }
 
   if (tempNeedleSweep)

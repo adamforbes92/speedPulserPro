@@ -20,22 +20,22 @@
 // Global Object Declarations
 // ============================================================================
 // LEDC PWM Control
-#define LEDC_TIMER           LEDC_TIMER_0
-#define LEDC_MODE            LEDC_HIGH_SPEED_MODE
-#define LEDC_OUTPUT_CHANNEL  LEDC_CHANNEL_0
-#define LEDC_RESOLUTION      LEDC_TIMER_10_BIT
-#define LEDC_FREQUENCY       (10000)
-#define LEDC_RPM_TIMER       LEDC_TIMER_1
-#define LEDC_RPM_CHANNEL     LEDC_CHANNEL_1
-#define LEDC_RPM_DUTY_50     (1U << ((uint32_t)LEDC_RESOLUTION - 1U))
+#define LEDC_TIMER LEDC_TIMER_0
+#define LEDC_MODE LEDC_HIGH_SPEED_MODE
+#define LEDC_OUTPUT_CHANNEL LEDC_CHANNEL_0
+#define LEDC_RESOLUTION LEDC_TIMER_10_BIT
+#define LEDC_FREQUENCY (10000)
+#define LEDC_RPM_TIMER LEDC_TIMER_1
+#define LEDC_RPM_CHANNEL LEDC_CHANNEL_1
+#define LEDC_RPM_DUTY_50 (1U << ((uint32_t)LEDC_RESOLUTION - 1U))
 #define SPEED_OFFSET_CURVE_POINTS 5
 extern RunningMedian samples;
 extern RunningMedian samplesRPM;
-extern SoftwareSerial ss;
+extern HardwareSerial ss;
 extern TinyGPSPlus gps;
 extern Preferences pref;
 extern AsyncWebServer server;
-extern hw_timer_t* timer0;
+extern hw_timer_t *timer0;
 extern TaskHandle_t taskCANRxHandle;
 
 // ============================================================================
@@ -48,6 +48,29 @@ extern long dutyCycle;
 extern int pwmResolution;
 extern unsigned long dutyCycleIncoming;
 extern unsigned long dutyCycleMotor;
+extern uint16_t appliedDutyCycle; // last duty value written to the motor (for the live curve marker)
+
+// Motor direction: false = normal (pinMotorDirection LOW), true = reverse (HIGH)
+extern bool reverseDirection;
+void applyDirection(); // drive pinMotorDirection from reverseDirection (io.cpp)
+
+// ============================================================================
+// Closed-Loop Motor Feedback (PID)
+// ============================================================================
+extern volatile uint32_t feedbackCount; // motor tacho pulses — incremented in ISR
+extern bool feedbackEnable;             // enable PID duty trim from the motor tacho
+extern float pidKp;                     // PID proportional gain
+extern float pidKi;                     // PID integral gain
+extern float pidKd;                     // PID derivative gain
+extern float feedbackDeadband;          // PID deadband (Hz); within this error P/D are silenced (integral still trims). 0 = off
+extern uint16_t feedbackMaxFreq;        // tacho Hz that corresponds to maxSpeed (bench-baked)
+extern uint16_t feedbackMinSpeed;       // kph; below this target the loop runs open-loop (anti-hunt)
+extern uint16_t measuredSpeed;          // measured motor speed from tacho (kph, UI/status)
+extern int16_t pidCorrection;           // current PID duty correction (UI/status)
+extern float measuredFreqHz;            // EMA-smoothed tacho frequency (Hz)
+extern float measuredFreqRawHz;         // un-smoothed tacho frequency (Hz), diagnostic
+extern bool feedbackAvailable;          // true once a real tacho signal has been seen this session
+extern bool feedbackMissing;            // true when the motor runs but no feedback signal is present (legacy PCB)
 
 // ============================================================================
 // Speed Variables
@@ -129,21 +152,21 @@ extern uint8_t speedType;
 // ============================================================================
 // Speed Input Selection
 // ============================================================================
-extern bool useHall;
-extern bool useDSG;
-extern bool useGPS;
-extern bool useABS;
-extern bool useECU;
-extern bool useUDS;
-extern bool useTP20;
-extern bool useAftermarket;           // speed input: custom CAN (aftermarket)
-extern uint32_t aftermarketSpeedID;      // CAN ID to listen on
-extern uint8_t aftermarketSpeedLowByte;  // byte index holding speed LSB
-extern uint8_t aftermarketSpeedHighByte; // byte index holding speed MSB
+extern bool useHall;                      // true = Hall sensor
+extern bool useDSG;                       // true = DSG speed
+extern bool useGPS;                       // true = GPS speed
+extern bool useABS;                       // true = ABS speed
+extern bool useECU;                       // true = ECU speed
+extern bool useUDS;                       // true = UDS speed
+extern bool useTP20;                      // true = TP2.0 speed
+extern bool useAftermarket;               // speed input: custom CAN (aftermarket)
+extern uint32_t aftermarketSpeedID;       // CAN ID to listen to
+extern uint8_t aftermarketSpeedLowByte;   // byte index holding speed LSB
+extern uint8_t aftermarketSpeedHighByte;  // byte index holding speed MSB
 extern bool aftermarketSpeedLittleEndian; // true = LSB at lowByte index
-extern float aftermarketSpeedScale;      // scale applied to raw value
-extern int16_t aftermarketSpeedOffset;   // offset applied after scale
-extern uint16_t aftermarketSpeed;        // parsed speed from aftermarket CAN frame
+extern float aftermarketSpeedScale;       // scale applied to raw value
+extern int16_t aftermarketSpeedOffset;    // offset applied after scale
+extern uint16_t aftermarketSpeed;         // parsed speed from aftermarket CAN frame
 
 // RPM Input Selection
 extern bool useRPMHall;
@@ -175,10 +198,10 @@ extern unsigned long lastPulse;
 extern unsigned long lastPulseRPM;
 
 // ============================================================================
-// SavvyCAN / Analyzer Variables
+// SavvyCAN / Analyser Variables
 // ============================================================================
-extern bool    analyzerMode;      // WiFi GVRET/SLCAN (TCP port 23)
-extern bool    analyzerSerial;    // Serial GVRET (SavvyCAN over USB, 1 Mbaud)
+extern bool analyzerMode;        // WiFi GVRET/SLCAN (TCP port 23)
+extern bool analyzerSerial;      // Serial GVRET (SavvyCAN over USB, 1 Mbaud)
 extern uint8_t analyzerProtocol; // ANALYZER_PROTOCOL_GVRET or ANALYZER_PROTOCOL_LAWICEL
 
 // ============================================================================

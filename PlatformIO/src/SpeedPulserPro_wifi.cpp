@@ -4,12 +4,15 @@
 #include <ESPAsyncWebServer.h>
 #include <Update.h>
 #include "SpeedPulserPro_wifi.h"
+#include "power_manager.h"
+#include "ota_manager.h"
 #include "SpeedPulserPro_motorCal.h"
 #include "SpeedPulserPro_globals.h"
 #include "SpeedPulserPro_tasks.h"
 #include "SpeedPulserPro_control.h"
 #include "SpeedPulserPro_gps.h"
 #include "SpeedPulserPro_savvycan.h"
+#include "SpeedPulserPro_calBuilder.h"
 
 static uint32_t parseHexCanId(const String& text, uint32_t defaultVal) {
   String s = text;
@@ -25,9 +28,7 @@ static uint32_t parseHexCanId(const String& text, uint32_t defaultVal) {
 
 void handleGetSettings(AsyncWebServerRequest *request)
 {
-#ifdef serialDebugWifi
-  Serial.println("GET /api/settings");
-#endif
+  DEBUG_WIFI("GET /api/settings");
 
   JsonDocument doc;
   doc["hasNeedleSweep"] = hasNeedleSweep;
@@ -111,6 +112,17 @@ void handleGetSettings(AsyncWebServerRequest *request)
   doc["analyzerMode"] = analyzerMode;
   doc["analyzerSerial"] = analyzerSerial;
 
+  doc["reverseDirection"] = reverseDirection;
+
+  // Closed-loop feedback (PID)
+  doc["feedbackEnable"] = feedbackEnable;
+  doc["pidKp"] = pidKp;
+  doc["pidKi"] = pidKi;
+  doc["pidKd"] = pidKd;
+  doc["feedbackDeadband"] = feedbackDeadband;
+  doc["feedbackMinSpeed"] = feedbackMinSpeed;
+  doc["feedbackMaxFreq"] = feedbackMaxFreq;
+
   doc["FW_VERSION"] = FW_VERSION;
 
   String response;
@@ -143,6 +155,7 @@ void handleGetStatus(AsyncWebServerRequest *request)
   doc["tempRPM"] = tempRPM;
   doc["testCal"] = testCal;
   doc["tempDutyCycle"] = tempDutyCycle;
+  doc["appliedDutyCycle"] = appliedDutyCycle;
   doc["speedOffsetType"] = useSpeedOffsetCurve ? "Curve" : (useGlobalSpeedOffset ? "Global" : "Off");
   doc["currentSpeedOffset"] = currentSpeedOffset;
   doc["averageFilterHall"] = averageFilterHall;
@@ -161,6 +174,15 @@ void handleGetStatus(AsyncWebServerRequest *request)
   doc["gpsFrequency"] = getGPSUpdateFrequency();
   doc["gpsAutoApplySecs"] = gpsAutoApplySecondsRemaining();
 
+  // Closed-loop feedback (PID) live status
+  doc["feedbackEnable"] = feedbackEnable;
+  doc["reverseDirection"] = reverseDirection;
+  doc["measuredSpeed"] = measuredSpeed;
+  doc["pidCorrection"] = pidCorrection;
+  doc["measuredFreqHz"] = measuredFreqHz;
+  doc["feedbackAvailable"] = feedbackAvailable;
+  doc["feedbackMissing"] = feedbackMissing;
+
   String response;
   serializeJson(doc, response);
   request->send(200, "application/json", response);
@@ -168,9 +190,7 @@ void handleGetStatus(AsyncWebServerRequest *request)
 
 void handleGetCalibrations(AsyncWebServerRequest *request)
 {
-#ifdef serialDebugWifi
-  Serial.println("GET /api/calibrations");
-#endif
+  DEBUG_WIFI("GET /api/calibrations");
 
   JsonDocument doc;
   JsonArray calibrations = doc["calibrations"].to<JsonArray>();
@@ -183,10 +203,230 @@ void handleGetCalibrations(AsyncWebServerRequest *request)
     item["name"] = getCalibrationText(index);
   }
 
+  // Custom (SpeedPulser) calibration slot — only offered once it has anchors.
+  if (customCalCount >= 2)
+  {
+    JsonObject item = calibrations.add<JsonObject>();
+    item["id"] = CUSTOM_CAL_ID;
+    item["name"] = String("\u2605 Custom: ") + customCalName;
+  }
+
   doc["currentCalibrationId"] = motorPerformanceVal;
 
   String response;
   serializeJson(doc, response);
+  request->send(200, "application/json", response);
+}
+
+// GET /api/calcurve - Return the active calibration curve (duty vs speed) for
+// the live Dashboard graph. Samples the live feed-forward mapping so the trace
+// reflects both the built-in presets and a custom-built calibration (12-bit duty).
+void handleGetCalCurve(AsyncWebServerRequest *request)
+{
+  JsonDocument doc;
+  doc["pwmMax"]          = PWM_DUTY_MAX;
+  doc["maxSpeed"]        = maxSpeed;
+  doc["calibrationText"] = getCalibrationText(motorPerformanceVal);
+  doc["custom"]          = (motorPerformanceVal == CUSTOM_CAL_ID && customCalValid);
+
+  JsonArray speeds = doc["speed"].to<JsonArray>();
+  JsonArray duties = doc["duty"].to<JsonArray>();
+
+  uint16_t top = (maxSpeed < 10) ? 200 : maxSpeed;
+  uint16_t step = top / 80;
+  if (step < 1) step = 1;
+  for (uint16_t s = 0; s <= top; s += step)
+  {
+    speeds.add(s);
+    duties.add((uint32_t)speedToPwmDuty(s));
+  }
+  if ((top % step) != 0) // always include the exact max-speed point
+  {
+    speeds.add(top);
+    duties.add((uint32_t)speedToPwmDuty(top));
+  }
+
+  // Anchor points for the ACTIVE cal: the real captured points for a custom cal,
+  // or reference marks sampled on the curve for a preset. Both lie on the curve.
+  JsonArray anchorSpeeds = doc["anchorSpeed"].to<JsonArray>();
+  JsonArray anchorDuties = doc["anchorDuty"].to<JsonArray>();
+  if (motorPerformanceVal == CUSTOM_CAL_ID && customCalValid)
+  {
+    for (uint8_t i = 0; i < customCalCount; i++)
+    {
+      anchorSpeeds.add(customCalPoints[i].speed);
+      anchorDuties.add(customCalPoints[i].duty);
+    }
+  }
+  else
+  {
+    for (uint16_t s = 20; s <= top; s += 20)
+    {
+      uint32_t d = (uint32_t)speedToPwmDuty(s);
+      if (d == 0) continue;
+      anchorSpeeds.add(s);
+      anchorDuties.add(d);
+    }
+  }
+
+  String response;
+  serializeJson(doc, response);
+  request->send(200, "application/json", response);
+}
+
+// Serialise the current calibration-builder state. Shared by GET /api/cal and
+// the POST responses so the UI always gets a fresh view.
+static void fillCalState(JsonDocument &doc)
+{
+  doc["name"]     = customCalName;
+  doc["unit"]     = customCalUnitMph ? "mph" : "kmh";
+  doc["convertToMPH"] = convertToMPH;   // lets the UI mirror an auto-enabled MPH cluster
+  doc["count"]    = customCalCount;
+  doc["valid"]    = customCalValid;
+  doc["selected"] = (motorPerformanceVal == CUSTOM_CAL_ID);
+  doc["duty"]     = (uint16_t)tempDutyCycle;
+  doc["pwmMax"]   = PWM_DUTY_MAX;
+  doc["maxSpeed"] = maxSpeed;
+
+  JsonArray pts = doc["points"].to<JsonArray>();
+  for (uint8_t i = 0; i < customCalCount; i++)
+  {
+    JsonObject p = pts.add<JsonObject>();
+    p["speed"] = customCalPoints[i].speed;
+    p["duty"]  = customCalPoints[i].duty;
+  }
+}
+
+// GET /api/cal - Return the custom calibration builder state
+void handleGetCal(AsyncWebServerRequest *request)
+{
+  JsonDocument doc;
+  fillCalState(doc);
+  String response;
+  serializeJson(doc, response);
+  request->send(200, "application/json", response);
+}
+
+// POST /api/cal - Custom calibration builder operations
+// { "op": "jog|setDuty|addPoint|deletePoint|clearPoints|setName|apply|save|export|import", ... }
+void handlePostCal(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
+{
+  if (index + len != total) return; // wait for complete payload
+
+  JsonDocument doc;
+  if (deserializeJson(doc, data, len))
+  {
+    request->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+    return;
+  }
+
+  const char *op = doc["op"];
+  if (!op)
+  {
+    request->send(400, "application/json", "{\"error\":\"Missing op\"}");
+    return;
+  }
+
+  if (strcmp(op, "jog") == 0)
+  {
+    int32_t delta = doc["delta"] | 0;
+    int32_t range = (int32_t)PWM_DUTY_MAX + 1;
+    int32_t next = ((int32_t)tempDutyCycle + delta) % range;
+    if (next < 0) next += range;
+    tempDutyCycle = next;
+  }
+  else if (strcmp(op, "setDuty") == 0)
+  {
+    int32_t duty = doc["duty"] | 0;
+    if (duty < 0) duty = 0;
+    if (duty > (int32_t)PWM_DUTY_MAX) duty = PWM_DUTY_MAX;
+    tempDutyCycle = duty;
+  }
+  else if (strcmp(op, "addPoint") == 0)
+  {
+    uint16_t speed = doc["speed"] | 0;
+    uint16_t duty  = doc["duty"].isNull() ? (uint16_t)tempDutyCycle : doc["duty"].as<uint16_t>();
+    if (!calAddPoint(speed, duty))
+    {
+      request->send(409, "application/json", "{\"error\":\"Point list full\"}");
+      return;
+    }
+  }
+  else if (strcmp(op, "deletePoint") == 0)
+  {
+    uint8_t idx = doc["index"] | 0;
+    calDeletePoint(idx);
+  }
+  else if (strcmp(op, "clearPoints") == 0)
+  {
+    calClearPoints();
+  }
+  else if (strcmp(op, "setName") == 0)
+  {
+    const char *name = doc["name"];
+    if (name) calSetName(name);
+    customCalUnitMph = convertToMPH;
+  }
+  else if (strcmp(op, "apply") == 0)
+  {
+    buildCustomCalTable();
+    if (customCalValid)
+    {
+      motorPerformanceVal = CUSTOM_CAL_ID;
+      updateMotorPerformance = true;
+    }
+  }
+  else if (strcmp(op, "save") == 0)
+  {
+    customCalUnitMph = convertToMPH;
+    calSaveToNvs();
+    buildCustomCalTable();
+    if (customCalValid)
+    {
+      motorPerformanceVal = CUSTOM_CAL_ID; // persisted by the periodic writeEEP
+      updateMotorPerformance = true;
+    }
+  }
+  else if (strcmp(op, "export") == 0)
+  {
+    JsonDocument out;
+    String json, carray;
+    calExportJson(json);
+    calExportCArray(carray);
+    out["json"]   = json;
+    out["carray"] = carray;
+    String response;
+    serializeJson(out, response);
+    request->send(200, "application/json", response);
+    return;
+  }
+  else if (strcmp(op, "import") == 0)
+  {
+    const char *json = doc["json"];
+    if (!json || !calImportJson(json))
+    {
+      request->send(400, "application/json", "{\"error\":\"Import failed\"}");
+      return;
+    }
+  }
+  else
+  {
+    request->send(400, "application/json", "{\"error\":\"Unknown op\"}");
+    return;
+  }
+
+  // A custom cal captured in MPH implies the cluster reads MPH; auto-enable the
+  // runtime "Cluster in MPH" conversion whenever such a cal is the active one.
+  if (motorPerformanceVal == CUSTOM_CAL_ID && customCalValid && customCalUnitMph) {
+    convertToMPH = true;
+  }
+
+  DEBUG_WIFI("cal op: %s (count=%u duty=%u)", op, (unsigned)customCalCount, (unsigned)tempDutyCycle);
+
+  JsonDocument state;
+  fillCalState(state);
+  String response;
+  serializeJson(state, response);
   request->send(200, "application/json", response);
 }
 
@@ -199,12 +439,7 @@ void handlePostControl(AsyncWebServerRequest *request, uint8_t *data, size_t len
   String key = doc["key"];
   String value = doc["value"].as<String>();
 
-#ifdef serialDebugWifi
-  Serial.print("POST /api/control - ");
-  Serial.print(key);
-  Serial.print(" = ");
-  Serial.println(value);
-#endif
+  DEBUG_WIFI("POST /api/control - %s = %s", key.c_str(), value.c_str());
 
   // Parse and handle setting changes
   if (key == "hasNeedleSweep")
@@ -584,6 +819,49 @@ void handlePostControl(AsyncWebServerRequest *request, uint8_t *data, size_t len
     setAnalyzerSerialMode(analyzerSerial);
   }
 
+  if (key == "reverseDirection")
+  {
+    reverseDirection = (value == "true" || value == "1");
+    applyDirection(); // apply the new direction immediately
+  }
+
+  // ---- Closed-loop feedback (PID) ----
+  if (key == "feedbackEnable")
+  {
+    feedbackEnable = (value == "true" || value == "1");
+    resetPid(); // clear accumulators whenever the loop is toggled
+  }
+
+  if (key == "pidKp")
+  {
+    pidKp = constrain(value.toFloat(), 0.0f, 10.0f);
+  }
+
+  if (key == "pidKi")
+  {
+    pidKi = constrain(value.toFloat(), 0.0f, 20.0f);
+  }
+
+  if (key == "pidKd")
+  {
+    pidKd = constrain(value.toFloat(), 0.0f, 10.0f);
+  }
+
+  if (key == "feedbackDeadband")
+  {
+    feedbackDeadband = constrain(value.toFloat(), 0.0f, 20.0f);
+  }
+
+  if (key == "feedbackMinSpeed")
+  {
+    feedbackMinSpeed = (uint16_t)constrain(value.toInt(), 0, (long)maxSpeed);
+  }
+
+  if (key == "feedbackMaxFreq")
+  {
+    feedbackMaxFreq = (uint16_t)constrain(value.toInt(), 1, 2000);
+  }
+
   request->send(200);
 }
 
@@ -646,22 +924,16 @@ void handlePostTestSpeed(AsyncWebServerRequest *request, uint8_t *data, size_t l
 
 void setupUI()
 {
-#ifdef serialDebugWifi
-  Serial.println("[WiFi] Setting up web server...");
-#endif
+  DEBUG_WIFI("Setting up web server...");
 
   // Initialize LittleFS filesystem
   if (!LittleFS.begin(false))
   { // true = format if mount failed
-#ifdef serialDebugWifi
-    Serial.println("[LittleFS] Mount failed");
-#endif
+    DEBUG_WIFI("LittleFS mount failed");
   }
   else
   {
-#ifdef serialDebugWifi
-    Serial.println("[LittleFS] Successfully mounted");
-#endif
+    DEBUG_WIFI("LittleFS successfully mounted");
   }
 
   // Serve static files from LittleFS
@@ -673,10 +945,16 @@ void setupUI()
   server.on("/api/settings", HTTP_GET, handleGetSettings);
   server.on("/api/status", HTTP_GET, handleGetStatus);
   server.on("/api/calibrations", HTTP_GET, handleGetCalibrations);
+  server.on("/api/calcurve", HTTP_GET, handleGetCalCurve);
+  server.on("/api/cal", HTTP_GET, handleGetCal);
 
   // API routes for receiving commands
   server.on("/api/control", HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr, [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
             { handlePostControl(request, data, len, index, total); });
+
+  // Custom calibration builder operations
+  server.on("/api/cal", HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr, [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
+            { handlePostCal(request, data, len, index, total); });
 
   server.on("/api/action", HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr, [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
             { handlePostAction(request, data, len, index, total); });
@@ -688,97 +966,13 @@ void setupUI()
   server.on("/api/testSpeed", HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr, [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
             { handlePostTestSpeed(request, data, len, index, total); });
 
-  // OTA firmware upload route
-  server.on("/api/ota", HTTP_POST, [](AsyncWebServerRequest *request)
-            {
-      bool success = !Update.hasError();
-      request->send(success ? 200 : 500, "application/json", success ? "{\"success\":true}" : "{\"success\":false}");
-
-      // Reboot only after a successful flash write.
-      // Use a FreeRTOS task so the async TCP stack can flush the HTTP response
-      // before the restart — delay() would block the Arduino task and prevent
-      // ESPAsyncWebServer from transmitting the response.
-      if (success) {
-        xTaskCreate([](void*) {
-          vTaskDelay(pdMS_TO_TICKS(1500));
-          ESP.restart();
-          vTaskDelete(nullptr);
-        }, "ota_restart", 2048, nullptr, 1, nullptr);
-      } }, [](AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final)
-            {
-      if (index == 0) {
-#ifdef serialDebugWifi
-        Serial.printf("[OTA] Upload start: %s\n", filename.c_str());
-#endif
-        if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
-#ifdef serialDebugWifi
-          Update.printError(Serial);
-#endif
-        }
-      }
-
-      if (!Update.hasError()) {
-        if (Update.write(data, len) != len) {
-#ifdef serialDebugWifi
-          Update.printError(Serial);
-#endif
-        }
-      }
-
-      if (final) {
-        if (!Update.end(true)) {
-#ifdef serialDebugWifi
-          Update.printError(Serial);
-#endif
-        }
-#ifdef serialDebugWifi
-        Serial.printf("[OTA] Upload complete: %u bytes\n", index + len);
-#endif
-      } });
-
-  // OTA filesystem (LittleFS) upload route
-  server.on("/api/ota/fs", HTTP_POST,
-    [](AsyncWebServerRequest *request) {
-      bool success = !Update.hasError();
-      request->send(success ? 200 : 500, "application/json", success ? "{\"success\":true}" : "{\"success\":false}");
-      if (success) {
-        xTaskCreate([](void*) {
-          vTaskDelay(pdMS_TO_TICKS(1500));
-          ESP.restart();
-          vTaskDelete(nullptr);
-        }, "ota_fs_restart", 2048, nullptr, 1, nullptr);
-      }
-    },
-    [](AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final) {
-      if (index == 0) {
-#ifdef serialDebugWifi
-        Serial.printf("[OTA-FS] Upload start: %s\n", filename.c_str());
-#endif
-        if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_SPIFFS)) {
-#ifdef serialDebugWifi
-          Update.printError(Serial);
-#endif
-        }
-      }
-      if (!Update.hasError()) {
-        if (Update.write(data, len) != len) {
-#ifdef serialDebugWifi
-          Update.printError(Serial);
-#endif
-        }
-      }
-      if (final) {
-        if (!Update.end(true)) {
-#ifdef serialDebugWifi
-          Update.printError(Serial);
-#endif
-        }
-#ifdef serialDebugWifi
-        Serial.printf("[OTA-FS] Upload complete: %u bytes\n", index + len);
-#endif
-      }
-    }
-  );
+  // OTA (firmware + LittleFS web UI) via the shared, project-agnostic module.
+  // Registers POST /api/ota-update?mode=firmware|filesystem and GET /api/version.
+  OtaInfo otaInfo;
+  otaInfo.version = FW_VERSION;
+  otaInfo.hardware = "ESP32";
+  otaInfo.board = "DOIT ESP32 DEVKIT V1";
+  otaBegin(server, otaInfo, (enableDebug && debugWifi));
 
     // New endpoint: Set GPS update rate
     server.on("/api/gpsRate", HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr, [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
@@ -802,42 +996,35 @@ void setupUI()
 
   server.begin();
 
-#ifdef serialDebugWifi
-  Serial.println("[WiFi] Web server started");
-  Serial.print("[WiFi] IP: ");
-  Serial.println(WiFi.softAPIP());
+#if enableDebug && debugWifi
+  DEBUG_WIFI("Web server started");
+  DEBUG_WIFI("IP: %s", WiFi.softAPIP().toString().c_str());
 #endif
 }
 
 void connectWifi()
 {
   WiFi.setHostname(wifiHostName);
-#ifdef serialDebugWifi
-  DEBUG_PRINTLN("[WiFi] Beginning WiFi...");
-  DEBUG_PRINTLN("[WiFi] Creating Access Point...");
-#endif
+  DEBUG_WIFI("Beginning WiFi / creating Access Point...");
 
   WiFi.mode(WIFI_AP);
   WiFi.setSleep(false);
   WiFi.softAPConfig(IPAddress(192, 168, 1, 1), IPAddress(192, 168, 1, 1), IPAddress(255, 255, 255, 0));
   WiFi.softAP(wifiHostName);
 
-#ifdef serialDebugWifi
-  DEBUG_PRINT("[WiFi] AP SSID: ");
-  DEBUG_PRINTLN(wifiHostName);
-  DEBUG_PRINT("[WiFi] AP IP: ");
-  DEBUG_PRINTLN(WiFi.softAPIP());
+#if enableDebug && debugWifi
+  DEBUG_WIFI("AP SSID: %s", wifiHostName);
+  DEBUG_WIFI("AP IP: %s", WiFi.softAPIP().toString().c_str());
 #endif
 }
 
 void disconnectWifi()
 {
-  DEBUG_PRINTF("[WiFi] Number of connections: ");
-  DEBUG_PRINTLN(WiFi.softAPgetStationNum());
+  DEBUG_WIFI("Number of connections: %u", WiFi.softAPgetStationNum());
 
   if (WiFi.softAPgetStationNum() == 0)
   {
-    DEBUG_PRINTLN("[WiFi] No connections, turning off");
+    DEBUG_WIFI("No connections, turning off");
     WiFi.disconnect(true, false);
     WiFi.mode(WIFI_OFF);
   }
@@ -861,4 +1048,32 @@ void updateLabels()
     updateMotorArray();
     updateMotorPerformance = false; // Reset flag
   }
+}
+
+// ----------------------------------------------------------------------------
+// power_manager integration (universal reduced-power module)
+// ----------------------------------------------------------------------------
+// These override the weak hooks in power_manager.cpp. The device stays fully
+// awake while ANY client is associated to the AP. Once the last client leaves,
+// the manager's idle timer runs, then turns the radio off and drops the CPU
+// clock. A power-cycle (ignition off/on) brings WiFi back automatically.
+
+bool powerIsBusy()
+{
+  return WiFi.softAPgetStationNum() > 0;
+}
+
+// ACTIVE -> REDUCED: close the web server cleanly before the radio drops.
+void powerOnEnterReduced()
+{
+  server.end();
+}
+
+// REDUCED -> ACTIVE: bring the AP and web server back. Routes are already
+// registered (no need to re-run setupUI()), so we only restart the radio
+// and the listener.
+void powerOnExitReduced()
+{
+  connectWifi();
+  server.begin();
 }

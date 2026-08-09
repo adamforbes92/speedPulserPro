@@ -10,8 +10,7 @@ static void printFloat(float val, bool valid, int len, int prec);
 // Initialize GPS serial at default baud on startup (9600). Returns selected baud.
 unsigned long initGPS();
 
-
-// Persistent GPS update rate (Hz), default 1Hz
+// GPS update rate (Hz), default 1Hz
 extern uint8_t gpsUpdateRateHz;
 
 // Set GPS update rate (Hz: 1, 5, 10, 16). Returns true if sent, false if invalid.

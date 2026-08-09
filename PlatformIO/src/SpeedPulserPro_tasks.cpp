@@ -7,6 +7,7 @@
 #include "SpeedPulserPro_control.h"
 #include "SpeedPulserPro_can.h"
 #include "SpeedPulserPro_uds.h"
+#include "SpeedPulserPro_io.h"
 
 // Task handles
 TaskHandle_t taskEEPHandle = NULL;
@@ -18,6 +19,7 @@ TaskHandle_t taskRPMHandle = NULL;
 TaskHandle_t taskBroadcastSpeedHandle = NULL;
 TaskHandle_t taskTP20Handle = NULL;
 TaskHandle_t taskUDSHandle  = NULL;
+TaskHandle_t taskDiagHandle = NULL;
 
 /**
  * Task: Write EEPROM/Preferences at regular intervals
@@ -25,16 +27,13 @@ TaskHandle_t taskUDSHandle  = NULL;
  */
 void taskWriteEEP(void *parameter)
 {
-  DEBUG_PRINTLN("[TASK] EEP: Starting EEPROM write task");
+  DEBUG_EEP("Write task started");
 
   while (1)
   {
     // Write current settings to EEPROM
     writeEEP();
-
-#if serialDebugEEP
-    DEBUG_PRINTLN("[TASK] EEP: Settings written to EEPROM");
-#endif
+    DEBUG_EEP("Settings written to EEPROM");
 
     // Delay before next write
     vTaskDelay(pdMS_TO_TICKS(DELAY_EEPROM));
@@ -47,16 +46,12 @@ void taskWriteEEP(void *parameter)
  */
 void taskUpdateUI(void *parameter)
 {
-  DEBUG_PRINTLN("[TASK] UI: Starting UI update task");
+  DEBUG_WIFI("UI update task started");
 
   while (1)
   {
     // Update WiFi interface labels
     updateLabels();
-
-#if serialDebugWifi
-    DEBUG_PRINTLN("[TASK] UI: Labels updated");
-#endif
 
     // Delay before next update
     vTaskDelay(pdMS_TO_TICKS(DELAY_UI));
@@ -70,19 +65,17 @@ void taskUpdateUI(void *parameter)
  */
 void taskParseGPS(void *parameter)
 {
-#if serialDebugGPS
-  DEBUG_PRINTLN("[TASK] GPS: Starting GPS parse task");
-#endif
+  DEBUG_GPS("Parse task started");
 
   while (1)
   {
     // Parse incoming GPS data
     parseGPS();
 
-#if serialDebugGPS
+#if enableDebug && debugGPS
     if (gps.speed.isUpdated())
     {
-      DEBUG_PRINTF("[TASK] GPS: Speed updated to %d km/h\n", (int)gpsSpeed);
+      DEBUG_GPS("Speed updated to %d km/h", (int)gpsSpeed);
     }
 #endif
 
@@ -98,17 +91,17 @@ void taskParseGPS(void *parameter)
  */
 void taskParseDSG(void *parameter)
 {
-  DEBUG_PRINTLN("[TASK] DSG: Starting DSG parse task");
+  DEBUG_DSG("Parse task started");
 
   while (1)
   {
     // Calculate DSG speed from RPM and gear ratio
     parseDSG();
 
-#if serialDebugIncoming
+#if enableDebug && debugDSG
     if (dsgSpeed > 0)
     {
-      DEBUG_PRINTF("[TASK] DSG: Speed calculated to %u km/h, Gear: %d\n", dsgSpeed, gear);
+      DEBUG_DSG("Speed %u km/h, Gear %d", dsgSpeed, gear);
     }
 #endif
 
@@ -124,12 +117,38 @@ void taskParseDSG(void *parameter)
  */
 void taskProcessSpeed(void *parameter)
 {
-  DEBUG_PRINTLN("[TASK] Speed: Starting speed processing task");
+  DEBUG_SPD("Speed processing task started");
   unsigned long lastIncomingHallHz = 0;
   uint16_t lastValidVehicleSpeed = 0;
+  TickType_t lastPidTick = xTaskGetTickCount();  // closed-loop PID cadence
+  TickType_t lastMeasTick = xTaskGetTickCount(); // open-loop tacho readout cadence
+  TickType_t motorRunSince = 0;                  // when the motor started running with no feedback yet
 
   while (1)
   {
+    // PID may only run when feedback is actually available. If the user enables it
+    // but the PCB has no feedback trace (legacy board) the loop stays open-loop, so
+    // an unaware user can't accidentally drive a closed loop with no measurement.
+    const bool pidActive = feedbackEnable && feedbackAvailable;
+
+    // Feedback-availability signalling for the UI: once the motor has been running
+    // for a moment with no tacho signal seen, mark it missing so the dashboard can
+    // show "N/A" instead of "--". Clears automatically once feedback appears.
+    const TickType_t FB_DETECT_TICKS = pdMS_TO_TICKS(1500);
+    if (appliedDutyCycle > 0)
+    {
+      if (motorRunSince == 0)
+      {
+        motorRunSince = xTaskGetTickCount();
+      }
+    }
+    else
+    {
+      motorRunSince = 0;
+    }
+    feedbackMissing = (!feedbackAvailable && motorRunSince != 0 &&
+                       (xTaskGetTickCount() - motorRunSince) > FB_DETECT_TICKS);
+
     // Handle Hall sensor pulse processing and averaging
     if (!testSpeedo && !testCal)
     {
@@ -174,11 +193,18 @@ void taskProcessSpeed(void *parameter)
       }
     }
 
-    // Calibration mode drives direct duty output (0..385)
+    // Calibration mode drives the raw 12-bit hardware duty directly (0..PWM_DUTY_MAX)
     if (testCal)
     {
-      dutyCycle = constrain(tempDutyCycle, 0, 385);
-      ledcWrite(LEDC_OUTPUT_CHANNEL, dutyCycle);
+      dutyCycle = constrain(tempDutyCycle, 0, (long)PWM_DUTY_MAX);
+      setMotorDutyRaw((uint32_t)dutyCycle);
+      // Keep the tacho readout live so measured speed shows and feedbackAvailable
+      // can latch while jogging the motor to build a calibration.
+      if ((xTaskGetTickCount() - lastMeasTick) >= pdMS_TO_TICKS(100))
+      {
+        lastMeasTick = xTaskGetTickCount();
+        updateMeasuredFreq();
+      }
       vTaskDelay(pdMS_TO_TICKS(DELAY_SPEED));
       continue;
     }
@@ -255,19 +281,43 @@ void taskProcessSpeed(void *parameter)
       }
     }
 
-#if serialDebugIncoming
+#if enableDebug && debugSpeed
     if (vehicleSpeed > 0)
     {
-      DEBUG_PRINTF("[TASK] Speed: vehicleSpeed=%d, dutyCycle=%d\n", vehicleSpeed, dutyCycle);
+      DEBUG_SPD("vehicleSpeed=%d km/h  dutyCycle=%ld", vehicleSpeed, dutyCycle);
     }
 #endif
 
-    // Apply motor calibration lookup and write to PWM output
-    uint16_t calibratedDuty = findClosestMatch(dutyCycle);
-    ledcWrite(LEDC_OUTPUT_CHANNEL, calibratedDuty);
+    // Feed-forward base duty: interpolate the requested speed to a 12-bit hardware
+    // duty (finer than the raw calibration grid), mirroring SpeedPulser.
+    uint32_t baseDuty = speedToPwmDuty((uint16_t)dutyCycle);
+
+    // Closed-loop PID trim, or plain open-loop write.
+    // The PID and the tacho readout run on a fixed 100 ms cadence regardless of the
+    // 50 ms task period, so the derivative/integral maths stay time-consistent.
+    if (pidActive)
+    {
+      if ((xTaskGetTickCount() - lastPidTick) >= pdMS_TO_TICKS(100))
+      {
+        lastPidTick = xTaskGetTickCount();
+        int16_t trimmedDuty = applyFeedbackTrim((uint16_t)dutyCycle, (uint16_t)baseDuty);
+        setMotorDutyRaw((uint32_t)trimmedDuty);
+      }
+    }
+    else
+    {
+      setMotorDutyRaw(baseDuty);
+      // Keep the measured-speed/tacho readout live even when the loop is off (or
+      // feedback isn't available yet, so it can latch as soon as a signal appears).
+      if ((xTaskGetTickCount() - lastMeasTick) >= pdMS_TO_TICKS(100))
+      {
+        lastMeasTick = xTaskGetTickCount();
+        updateMeasuredFreq();
+      }
+    }
 
     // Delay before next processing
-    vTaskDelay(pdMS_TO_TICKS(1));
+    vTaskDelay(pdMS_TO_TICKS(DELAY_SPEED));
   }
 }
 
@@ -278,7 +328,7 @@ void taskProcessSpeed(void *parameter)
  */
 void taskProcessRPM(void *parameter)
 {
-  DEBUG_PRINTLN("[TASK] RPM: Starting RPM processing task");
+  DEBUG_RPM("RPM processing task started");
 
   while (1)
   {
@@ -344,27 +394,28 @@ void taskProcessRPM(void *parameter)
     // Clamp RPM so both Hall and CAN use the same configured cluster limit
     vehicleRPM = constrain(vehicleRPM, 0, clusterRPMLimit);
 
-    // Map RPM to PWM frequency and output — only drive coil when coilType is enabled
-    if (coilType)
+    // Map RPM to PWM frequency and output — only drive coil when coilType is enabled.
+    // Only reprogram the LEDC timer when the target frequency actually changes:
+    // ledc_set_freq() reconfigures the timer inside a critical section, so
+    // skipping redundant calls keeps interrupt-masking to a minimum.
+    static long lastAppliedFreqRPM = -1;
+    long targetFreqRPM = coilType ? map(vehicleRPM, 0, clusterRPMLimit, 0, maxRPM) : 0;
+    if (targetFreqRPM != lastAppliedFreqRPM)
     {
-      frequencyRPM = map(vehicleRPM, 0, clusterRPMLimit, 0, maxRPM);
-      setFrequencyRPM(frequencyRPM);
+      setFrequencyRPM(targetFreqRPM);
+      lastAppliedFreqRPM = targetFreqRPM;
     }
-    else
-    {
-      setFrequencyRPM(0);
-      frequencyRPM = 0;
-    }
+    frequencyRPM = targetFreqRPM;
 
-#if serialDebugIncoming
+#if enableDebug && debugRPM
     if (vehicleRPM > 0)
     {
-      DEBUG_PRINTF("[TASK] RPM: vehicleRPM=%d, frequencyRPM=%d\n", vehicleRPM, frequencyRPM);
+      DEBUG_RPM("vehicleRPM=%d  frequencyRPM=%ld", vehicleRPM, frequencyRPM);
     }
 #endif
 
     // Delay before next processing
-    vTaskDelay(pdMS_TO_TICKS(1));
+    vTaskDelay(pdMS_TO_TICKS(DELAY_RPM));
   }
 }
 
@@ -373,7 +424,7 @@ void taskProcessRPM(void *parameter)
  */
 void taskBroadcastSpeed(void *parameter)
 {
-  DEBUG_PRINTLN("[TASK] Broadcast: Starting speed broadcast task");
+  DEBUG_CAN("Speed broadcast task started");
 
   while (1)
   {
@@ -383,12 +434,42 @@ void taskBroadcastSpeed(void *parameter)
 }
 
 /**
+ * Task: 1 Hz diagnostics telemetry
+ * Prints one concise line per subsystem so the live system state is easy to
+ * follow on the serial monitor. Self-gated: each line only compiles when its
+ * subsystem debug flag (and enableDebug) is on, so at release (enableDebug 0)
+ * the whole loop body collapses to nothing.
+ */
+void taskDiagnostics(void *parameter)
+{
+  DEBUG("Diagnostics task started (1 Hz telemetry)");
+
+  while (1)
+  {
+    DEBUG("uptime=%lus  heap=%u  minHeap=%u",
+          (unsigned long)(millis() / 1000UL),
+          (unsigned)ESP.getFreeHeap(),
+          (unsigned)ESP.getMinFreeHeap());
+    DEBUG_SPD("vehicle=%u  hall=%u  can=%u  gps=%u  dsg=%u  duty=%ld",
+              vehicleSpeed, vehicleSpeedHall, vehicleSpeedCAN,
+              vehicleSpeedGPS, dsgSpeed, dutyCycle);
+    DEBUG_RPM("vehicleRPM=%u  hallRPM=%u  canRPM=%u  freqRPM=%ld",
+              vehicleRPM, vehicleRPMHall, vehicleRPMCAN, frequencyRPM);
+    DEBUG_FB("enable=%d  measured=%u kph  freq=%.1f Hz  correction=%d",
+             feedbackEnable ? 1 : 0, measuredSpeed, measuredFreqHz, pidCorrection);
+    DEBUG_DSG("speed=%u kph  gear=%u", dsgSpeed, gear);
+
+    vTaskDelay(pdMS_TO_TICKS(1000));
+  }
+}
+
+/**
  * Initialize all FreeRTOS tasks
  * Called from setup()
  */
 void tasksInit()
 {
-  DEBUG_PRINTLN("[TASK] Initializing FreeRTOS tasks...");
+  DEBUG("Initialising FreeRTOS tasks...");
 
   // Create EEPROM write task
   BaseType_t status = xTaskCreate(
@@ -401,7 +482,7 @@ void tasksInit()
   );
   if (status != pdPASS)
   {
-    DEBUG_PRINTLN("[TASK] ERROR: Failed to create EEPROM task");
+    DEBUG("ERROR: Failed to create EEPROM task");
   }
 
   // Create UI update task
@@ -414,7 +495,7 @@ void tasksInit()
       &taskUIUpdateHandle);
   if (status != pdPASS)
   {
-    DEBUG_PRINTLN("[TASK] ERROR: Failed to create UI update task");
+    DEBUG("ERROR: Failed to create UI update task");
   }
 
   // Create GPS parse task
@@ -427,7 +508,7 @@ void tasksInit()
       &taskGPSHandle);
   if (status != pdPASS)
   {
-    DEBUG_PRINTLN("[TASK] ERROR: Failed to create GPS task");
+    DEBUG("ERROR: Failed to create GPS task");
   }
 
   // Create DSG parse task
@@ -440,7 +521,7 @@ void tasksInit()
       &taskDSGHandle);
   if (status != pdPASS)
   {
-    DEBUG_PRINTLN("[TASK] ERROR: Failed to create DSG task");
+    DEBUG("ERROR: Failed to create DSG task");
   }
 
   // Create Speed processing task
@@ -453,7 +534,7 @@ void tasksInit()
       &taskSpeedHandle);
   if (status != pdPASS)
   {
-    DEBUG_PRINTLN("[TASK] ERROR: Failed to create Speed task");
+    DEBUG("ERROR: Failed to create Speed task");
   }
 
   // Create RPM processing task
@@ -466,7 +547,7 @@ void tasksInit()
       &taskRPMHandle);
   if (status != pdPASS)
   {
-    DEBUG_PRINTLN("[TASK] ERROR: Failed to create RPM task");
+    DEBUG("ERROR: Failed to create RPM task");
   }
 
   status = xTaskCreate(
@@ -478,10 +559,10 @@ void tasksInit()
       &taskBroadcastSpeedHandle);
   if (status != pdPASS)
   {
-    DEBUG_PRINTLN("[TASK] ERROR: Failed to create Broadcast Speed task");
+    DEBUG("ERROR: Failed to create Broadcast Speed task");
   }
 
-  DEBUG_PRINTLN("[TASK] All tasks initialized successfully");
+  DEBUG("All tasks initialised successfully");
 
   status = xTaskCreate(
       taskTP20,
@@ -492,7 +573,7 @@ void tasksInit()
       &taskTP20Handle);
   if (status != pdPASS)
   {
-    DEBUG_PRINTLN("[TASK] ERROR: Failed to create TP2.0 task");
+    DEBUG("ERROR: Failed to create TP2.0 task");
   }
 
   status = xTaskCreate(
@@ -504,7 +585,20 @@ void tasksInit()
       &taskUDSHandle);
   if (status != pdPASS)
   {
-    DEBUG_PRINTLN("[TASK] ERROR: Failed to create UDS task");
+    DEBUG("ERROR: Failed to create UDS task");
+  }
+
+  // Create 1 Hz diagnostics/telemetry task (compiles to a no-op body at release)
+  status = xTaskCreate(
+      taskDiagnostics,
+      "TaskDiag",
+      4096,
+      NULL,
+      1,
+      &taskDiagHandle);
+  if (status != pdPASS)
+  {
+    DEBUG("ERROR: Failed to create Diagnostics task");
   }
 }
 
@@ -533,7 +627,9 @@ void tasksSuspendAll()
     vTaskSuspend(taskRPMHandle);
   if (taskBroadcastSpeedHandle != NULL)
     vTaskSuspend(taskBroadcastSpeedHandle);
-  DEBUG_PRINTLN("[TASK] All tasks suspended");
+  if (taskDiagHandle != NULL)
+    vTaskSuspend(taskDiagHandle);
+  DEBUG("All tasks suspended");
 }
 
 /**
@@ -555,7 +651,9 @@ void tasksResumeAll()
     vTaskResume(taskRPMHandle);
   if (taskBroadcastSpeedHandle != NULL)
     vTaskResume(taskBroadcastSpeedHandle);
-  DEBUG_PRINTLN("[TASK] All tasks resumed");
+  if (taskDiagHandle != NULL)
+    vTaskResume(taskDiagHandle);
+  DEBUG("All tasks resumed");
 }
 
 /**
@@ -599,5 +697,10 @@ void tasksCleanup()
     vTaskDelete(taskBroadcastSpeedHandle);
     taskBroadcastSpeedHandle = NULL;
   }
-  DEBUG_PRINTLN("[TASK] All tasks cleaned up");
+  if (taskDiagHandle != NULL)
+  {
+    vTaskDelete(taskDiagHandle);
+    taskDiagHandle = NULL;
+  }
+  DEBUG("All tasks cleaned up");
 }

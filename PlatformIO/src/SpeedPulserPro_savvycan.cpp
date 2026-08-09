@@ -461,9 +461,7 @@ static void analyzerTask(void *arg) {
         Serial.begin(1000000);
         serialStarted = true;
         resetGvretParser();
-#if ChassisCANDebug
-        Serial.println("[Analyzer] Serial GVRET started at 1 Mbaud");
-#endif
+        DEBUG_SAVVY("Serial GVRET started at 1 Mbaud");
       }
       // Always GVRET for serial.
       while (Serial.available()) {
@@ -497,9 +495,7 @@ static void analyzerTask(void *arg) {
       analyzerServer.begin();
       analyzerServer.setNoDelay(true);
       analyzerServerStarted = true;
-#if ChassisCANDebug
-      Serial.printf("[Analyzer] TCP server started on port %d\n", kAnalyzerPort);
-#endif
+      DEBUG_SAVVY("TCP server started on port %d", kAnalyzerPort);
     }
 
     if (!analyzerClient || !analyzerClient.connected()) {
@@ -509,9 +505,7 @@ static void analyzerTask(void *arg) {
         analyzerClient.setNoDelay(true);
         vTaskDelay(10 / portTICK_PERIOD_MS);  // let TCP finish setup
         resetAnalyzerClientState();
-#if ChassisCANDebug
-        Serial.println("[Analyzer] Client connected");
-#endif
+        DEBUG_SAVVY("Client connected");
       } else {
         vTaskDelay(kAnalyzerPollDelayMs / portTICK_PERIOD_MS);
         continue;

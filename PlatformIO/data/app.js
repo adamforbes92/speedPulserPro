@@ -7,9 +7,12 @@ let currentCalibrationId = 1;
 function initApp() {
   initNavigation();
   initControls();
-  fetchCalibrations().then(fetchSettings);  // Load calibration list before settings
+  initOta();
+  initCalBuilder();
+  fetchCalibrations().then(fetchSettings).then(refreshCalState).then(fetchCalCurve);  // list, settings, cal builder state, then the curve
   fetchStatus();    // Initial status fetch
   setInterval(fetchStatus, 200);  // Continue fetching live data only
+  window.addEventListener('resize', scheduleCalDraw);
 }
 
 async function fetchCalibrations() {
@@ -70,6 +73,14 @@ function updateSpeedOffsetStatus(mode, offsetValue) {
   }
 }
 
+// Show the global offset slider OR the 5-point curve, never both.
+function applyOffsetCurveVisibility(enabled) {
+  const globalSec = document.getElementById('globalOffsetSection');
+  const curveSec = document.getElementById('offsetCurveSection');
+  if (globalSec) globalSec.style.display = enabled ? 'none' : '';
+  if (curveSec) curveSec.style.display = enabled ? '' : 'none';
+}
+
 function initNavigation() {
   const tabs = document.querySelectorAll(".nav-tab");
   const pages = document.querySelectorAll(".page");
@@ -83,6 +94,10 @@ function initNavigation() {
 
       pages.forEach((p) => p.classList.remove("active"));
       document.getElementById(`${page}-page`).classList.add("active");
+
+      // The curve canvas can't measure itself while its tab is hidden, so
+      // redraw once the Dashboard page becomes visible.
+      if (page === 'dashboard') scheduleCalDraw();
     });
   });
 }
@@ -129,16 +144,6 @@ function initControls() {
   const testBtn = document.getElementById('testNeedleSweep');
   if (testBtn) {
     testBtn.addEventListener('click', () => pushAction('needleSweep'));
-  }
-
-  const otaUploadBtn = document.getElementById('otaUploadBtn');
-  if (otaUploadBtn) {
-    otaUploadBtn.addEventListener('click', uploadFirmware);
-  }
-
-  const otaFsUploadBtn = document.getElementById('otaFsUploadBtn');
-  if (otaFsUploadBtn) {
-    otaFsUploadBtn.addEventListener('click', uploadFilesystem);
   }
 
   const resetMaxRPMBtn = document.getElementById('resetMaxRPM');
@@ -188,10 +193,9 @@ function initControls() {
   // Configuration controls
   const configInputs = [
     'hasNeedleSweep',
-    'linearSpeedSweep',
     'sweepSpeed',
-    'stepRPM',
     'stepSpeed',
+    'stepRPM',
     'coilType',
     'convertToMPH',
     'motorCalibration',
@@ -206,7 +210,7 @@ function initControls() {
     if (el) {
       el.addEventListener('change', () => {
         const value = el.type === 'checkbox' ? el.checked : el.value;
-        pushControl(id, value);
+        const ctrlPromise = pushControl(id, value);
 
         if (id === 'motorCalibration') {
           const selectedOption = el.options[el.selectedIndex];
@@ -214,10 +218,12 @@ function initControls() {
           if (selectedOption && calibrationStatusEl) {
             calibrationStatusEl.textContent = `Cal: ${selectedOption.textContent}`;
           }
+          // Refresh the curve only after the device has applied the new cal.
+          if (ctrlPromise && ctrlPromise.then) ctrlPromise.then(fetchCalCurve); else fetchCalCurve();
         }
 
         if (id === 'convertToMPH') {
-          applySpeedUnitLabels(el.checked);
+          applyMphState(el.checked);
         }
       });
 
@@ -274,6 +280,9 @@ function initControls() {
     el.addEventListener('change', () => {
       const value = el.type === 'checkbox' ? el.checked : el.value;
       pushControl(id, value);
+      if (id === 'useSpeedOffsetCurve') {
+        applyOffsetCurveVisibility(el.checked);
+      }
     });
 
     if (el.type === 'range') {
@@ -392,120 +401,238 @@ function initControls() {
       pushControl('rpmType', rpmSourceEl.value);
     });
   }
-}
 
-async function uploadFirmware() {
-  const fileInput = document.getElementById('otaBinFile');
-  const statusEl = document.getElementById('otaStatus');
-  const progressEl = document.getElementById('otaProgress');
-  const uploadBtn = document.getElementById('otaUploadBtn');
-
-  if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
-    if (statusEl) statusEl.textContent = 'Please select a .bin file first';
-    return;
+  // Closed-loop feedback (PID) controls
+  const feedbackEnableEl = document.getElementById('feedbackEnable');
+  if (feedbackEnableEl) {
+    feedbackEnableEl.addEventListener('change', () => {
+      pushControl('feedbackEnable', feedbackEnableEl.checked);
+    });
   }
 
-  const file = fileInput.files[0];
-  const formData = new FormData();
-  formData.append('firmware', file, file.name);
+  const reverseDirectionEl = document.getElementById('reverseDirection');
+  if (reverseDirectionEl) {
+    reverseDirectionEl.addEventListener('change', () => {
+      pushControl('reverseDirection', reverseDirectionEl.checked);
+    });
+  }
 
-  return new Promise((resolve) => {
+  const feedbackMinSpeedEl = document.getElementById('feedbackMinSpeed');
+  if (feedbackMinSpeedEl) {
+    feedbackMinSpeedEl.addEventListener('input', () => {
+      const displayEl = document.getElementById('feedbackMinSpeed-display');
+      if (displayEl) displayEl.textContent = feedbackMinSpeedEl.value;
+      pushControl('feedbackMinSpeed', feedbackMinSpeedEl.value);
+    });
+  }
+
+  ['pidKp', 'pidKi', 'pidKd'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) {
+      el.addEventListener('change', () => pushControl(id, el.value));
+    }
+  });
+
+  const feedbackDeadbandEl = document.getElementById('feedbackDeadband');
+  if (feedbackDeadbandEl) {
+    feedbackDeadbandEl.addEventListener('input', () => {
+      const displayEl = document.getElementById('feedbackDeadband-display');
+      if (displayEl) displayEl.textContent = feedbackDeadbandEl.value;
+      pushControl('feedbackDeadband', feedbackDeadbandEl.value);
+    });
+  }
+
+  const pidDefaults = { pidKp: 0.15, pidKi: 1.3, pidKd: 0, feedbackDeadband: 1.5, feedbackMinSpeed: 40 };
+  const resetPidBtn = document.getElementById('resetPidDefaults');
+  if (resetPidBtn) {
+    resetPidBtn.addEventListener('click', () => {
+      Object.entries(pidDefaults).forEach(([id, val]) => {
+        const el = document.getElementById(id);
+        if (el) el.value = val;
+        const displayEl = document.getElementById(id + '-display');
+        if (displayEl) displayEl.textContent = val;
+        pushControl(id, val);
+      });
+    });
+  }
+
+  initCollapsibleCards();
+}
+
+// Turn every settings page into a scannable accordion: each card header
+// collapses/expands its body, and ALL cards start collapsed for a clean UI.
+// The Dashboard is left open so live data + the curve are always visible.
+function initCollapsibleCards() {
+  // OTA is intentionally excluded — its card stays open (matches SpeedPulser).
+  const pages = ['configuration', 'advanced', 'calibration', 'diag'];
+  pages.forEach(pageId => {
+    document.querySelectorAll(`#${pageId}-page .card`).forEach(card => {
+      const header = card.querySelector('h2');
+      if (!header) return;
+      card.classList.add('collapsible', 'collapsed');
+      header.addEventListener('click', () => card.classList.toggle('collapsed'));
+    });
+  });
+}
+
+// ===== OTA UPDATE (dropdown + drag/drop) =====
+function initOta() {
+  const dropZone     = document.getElementById('otaDropZone');
+  const fileInput    = document.getElementById('otaFile');
+  const fileNameEl   = document.getElementById('otaFileName');
+  const uploadBtn    = document.getElementById('otaUploadBtn');
+  const progressWrap = document.getElementById('otaProgressWrap');
+  const progressBar  = document.getElementById('otaProgressBar');
+  const progressLbl  = document.getElementById('otaProgressLabel');
+  const statusEl     = document.getElementById('otaStatus');
+  const chooseBtn    = document.getElementById('otaChooseBtn');
+  const typeSelect   = document.getElementById('otaType');
+
+  if (!dropZone) return;
+
+  // Populate the Firmware Info card from the shared /api/version endpoint.
+  fetch('/api/version')
+    .then((r) => r.json())
+    .then((info) => {
+      const set = (id, val) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = val || '--';
+      };
+      set('otaFwVersion', info.version);
+      set('otaHardware', info.hardware);
+      set('otaBoard', info.board);
+    })
+    .catch(() => {});
+
+  function currentType() {
+    return typeSelect && typeSelect.value === 'filesystem' ? 'filesystem' : 'firmware';
+  }
+
+  function updateUploadLabel() {
+    uploadBtn.textContent = currentType() === 'filesystem' ? 'Upload Filesystem' : 'Upload Firmware';
+  }
+
+  if (typeSelect) {
+    typeSelect.addEventListener('change', updateUploadLabel);
+    updateUploadLabel();
+  }
+
+  chooseBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    fileInput.click();
+  });
+
+  dropZone.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    dropZone.classList.add('drag-over');
+  });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+  dropZone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dropZone.classList.remove('drag-over');
+    const file = e.dataTransfer.files[0];
+    if (file) selectFile(file);
+  });
+
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files[0]) selectFile(fileInput.files[0]);
+  });
+
+  function selectFile(file) {
+    if (!file.name.endsWith('.bin')) {
+      setOtaStatus('Please select a .bin file.', 'error');
+      return;
+    }
+    fileInput._selectedFile = file;
+    fileNameEl.textContent = file.name + ' (' + (file.size / 1024).toFixed(1) + ' KB)';
+    dropZone.classList.add('file-selected');
+    uploadBtn.disabled = false;
+    setOtaStatus('');
+  }
+
+  uploadBtn.addEventListener('click', () => {
+    const file = fileInput._selectedFile;
+    if (!file) return;
+
+    const uploadType = currentType();
+    // Single endpoint for both; ?mode= selects the app or LittleFS partition.
+    const formData = new FormData();
+    formData.append('firmware', file, file.name);
+
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/ota');
-
-    if (uploadBtn) uploadBtn.disabled = true;
-    if (progressEl) { progressEl.style.display = 'block'; progressEl.value = 0; }
 
     xhr.upload.addEventListener('progress', (e) => {
       if (e.lengthComputable) {
         const pct = Math.round((e.loaded / e.total) * 100);
-        if (statusEl) statusEl.textContent = `Uploading... ${pct}%`;
-        if (progressEl) progressEl.value = pct;
+        progressBar.style.width = pct + '%';
+        progressLbl.textContent = pct + '%';
       }
     });
 
     xhr.addEventListener('load', () => {
-      if (xhr.status === 200) {
-        if (statusEl) statusEl.textContent = 'Upload complete. Device rebooting...';
-        if (progressEl) progressEl.value = 100;
-      } else {
-        if (statusEl) statusEl.textContent = 'Upload failed. Please try again.';
-        if (progressEl) progressEl.style.display = 'none';
-        if (uploadBtn) uploadBtn.disabled = false;
+      try {
+        const resp = JSON.parse(xhr.responseText);
+        if (resp.status === 'ok') {
+          setOtaStatus(resp.message || 'Update complete. Device is rebooting...', 'success');
+          uploadBtn.disabled = true;
+        } else {
+          setOtaStatus('Update failed: ' + (resp.message || 'Unknown error'), 'error');
+          resetProgress();
+        }
+      } catch (_) {
+        setOtaStatus('Unexpected response from device.', 'error');
+        resetProgress();
       }
-      resolve();
     });
 
     xhr.addEventListener('error', () => {
-      if (statusEl) statusEl.textContent = 'Upload failed. Check connection and retry.';
-      if (progressEl) progressEl.style.display = 'none';
-      if (uploadBtn) uploadBtn.disabled = false;
-      resolve();
+      // A network error here is expected if the device reboots before replying.
+      setOtaStatus('Update sent. Device may be rebooting — please wait and reconnect.', 'success');
     });
 
+    progressWrap.style.display = 'block';
+    progressBar.style.width = '0%';
+    progressLbl.textContent = '0%';
+    uploadBtn.disabled = true;
+    setOtaStatus('Uploading...');
+
+    xhr.open('POST', '/api/ota-update?mode=' + uploadType);
     xhr.send(formData);
   });
-}
 
-async function uploadFilesystem() {
-  const fileInput = document.getElementById('otaFsBinFile');
-  const statusEl = document.getElementById('otaFsStatus');
-  const progressEl = document.getElementById('otaFsProgress');
-  const uploadBtn = document.getElementById('otaFsUploadBtn');
-
-  if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
-    if (statusEl) statusEl.textContent = 'Please select a .bin file first';
-    return;
+  function setOtaStatus(msg, type) {
+    statusEl.textContent = msg;
+    statusEl.className = 'ota-status' + (type ? ' ' + type : '');
   }
 
-  const file = fileInput.files[0];
-  const formData = new FormData();
-  formData.append('filesystem', file, file.name);
-
-  return new Promise((resolve) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/ota/fs');
-
-    if (uploadBtn) uploadBtn.disabled = true;
-    if (progressEl) { progressEl.style.display = 'block'; progressEl.value = 0; }
-
-    xhr.upload.addEventListener('progress', (e) => {
-      if (e.lengthComputable) {
-        const pct = Math.round((e.loaded / e.total) * 100);
-        if (statusEl) statusEl.textContent = `Uploading... ${pct}%`;
-        if (progressEl) progressEl.value = pct;
-      }
-    });
-
-    xhr.addEventListener('load', () => {
-      if (xhr.status === 200) {
-        if (statusEl) statusEl.textContent = 'Upload complete. Device rebooting...';
-        if (progressEl) progressEl.value = 100;
-      } else {
-        if (statusEl) statusEl.textContent = 'Upload failed. Please try again.';
-        if (progressEl) progressEl.style.display = 'none';
-        if (uploadBtn) uploadBtn.disabled = false;
-      }
-      resolve();
-    });
-
-    xhr.addEventListener('error', () => {
-      if (statusEl) statusEl.textContent = 'Upload failed. Check connection and retry.';
-      if (progressEl) progressEl.style.display = 'none';
-      if (uploadBtn) uploadBtn.disabled = false;
-      resolve();
-    });
-
-    xhr.send(formData);
-  });
+  function resetProgress() {
+    progressBar.style.width = '0%';
+    progressLbl.textContent = '0%';
+    progressWrap.style.display = 'none';
+    uploadBtn.disabled = false;
+  }
 }
 
 function applySpeedUnitLabels(useMPH) {
   const label = useMPH ? 'MPH' : 'KMH';
-  ['speedUnit', 'speedOffsetUnit'].forEach(id => {
+  ['speedUnit', 'speedOffsetUnit', 'measuredSpeedUnit'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.textContent = label;
   });
+}
+
+// Single source of truth for the cluster unit: keeps the Configuration toggle,
+// the Calibration Builder toggle, all unit labels and the cal-builder unit text
+// in lock-step so the two "Cluster in MPH" switches can never disagree.
+function applyMphState(useMPH) {
+  useMPH = !!useMPH;
+  applySpeedUnitLabels(useMPH);
+  const cfg = document.getElementById('convertToMPH');
+  if (cfg) cfg.checked = useMPH;
+  const calMph = document.getElementById('calConvertToMPH');
+  if (calMph) calMph.checked = useMPH;
+  const calUnitEl = document.getElementById('calUnitLabel');
+  if (calUnitEl) calUnitEl.textContent = useMPH ? 'mph' : 'km/h';
 }
 
 async function fetchSettings() {
@@ -515,8 +642,6 @@ async function fetchSettings() {
 
     // Load all settings from API once
     document.getElementById('hasNeedleSweep').checked = data.hasNeedleSweep || false;
-    const linearSweepEl = document.getElementById('linearSpeedSweep');
-    if (linearSweepEl) linearSweepEl.checked = data.linearSpeedSweep !== false;
     document.getElementById('broadcastSpeedEnabled').checked = data.broadcastSpeedEnabled || false;
     document.getElementById('broadcastSpeedID').value = (data.broadcastSpeedID || 0).toString(16).toUpperCase();
     document.getElementById('broadcastSpeedDLC').value = data.broadcastSpeedDLC ?? 8;
@@ -529,12 +654,15 @@ async function fetchSettings() {
       const dataEl = document.getElementById(`broadcastSpeedData${i}`);
       if (dataEl) dataEl.value = data[`broadcastSpeedData${i}`] ?? 0;
     }
-    document.getElementById('sweepSpeed').value = data.sweepSpeed || 0;
-    document.getElementById('stepRPM').value = data.stepRPM || 100;
-    document.getElementById('stepSpeed').value = data.stepSpeed || 100;
+    document.getElementById('sweepSpeed').value = data.sweepSpeed ?? 18;
+    document.getElementById('sweepSpeed-display').textContent = data.sweepSpeed ?? 18;
+    document.getElementById('stepSpeed').value = data.stepSpeed ?? 17;
+    document.getElementById('stepSpeed-display').textContent = data.stepSpeed ?? 17;
+    document.getElementById('stepRPM').value = data.stepRPM ?? 14;
+    document.getElementById('stepRPM-display').textContent = data.stepRPM ?? 14;
     document.getElementById('coilType').checked = data.coilType || false;
     document.getElementById('convertToMPH').checked = data.convertToMPH || false;
-    applySpeedUnitLabels(!!data.convertToMPH);
+    applyMphState(!!data.convertToMPH);
     currentCalibrationId = parseInt(data.motorCalibration || currentCalibrationId || 1, 10) || 1;
     document.getElementById('motorCalibration').value = String(currentCalibrationId);
     document.getElementById('maxSpeed').value = data.maxSpeed || 200;
@@ -546,6 +674,7 @@ async function fetchSettings() {
     document.getElementById('speedOffset').value = data.speedOffset || 0;
     document.getElementById('speedOffset-display').textContent = data.speedOffset || 0;
     document.getElementById('useSpeedOffsetCurve').checked = data.useSpeedOffsetCurve || false;
+    applyOffsetCurveVisibility(!!data.useSpeedOffsetCurve);
 
     const curveOffsets = Array.isArray(data.speedOffsetCurveOffsets) ? data.speedOffsetCurveOffsets : [0, 0, 0, 0, 0];
     for (let i = 0; i < 5; i++) {
@@ -588,7 +717,8 @@ async function fetchSettings() {
     document.getElementById('tempSpeed').value = data.tempSpeed || 0;
     document.getElementById('tempSpeed-display').textContent = data.tempSpeed || 0;
     document.getElementById('testCal').checked = data.testCal || false;
-    document.getElementById('tempDutyCycle-display').textContent = data.tempDutyCycle || 0;
+    const tempDutyDisp = document.getElementById('tempDutyCycle-display');
+    if (tempDutyDisp) tempDutyDisp.textContent = data.tempDutyCycle || 0;
     document.getElementById('maxRPM').value = data.maxRPM || 230;
     document.getElementById('maxRPM-display').textContent = data.maxRPM || 230;
     document.getElementById('clusterRPMLimit').value = data.clusterRPMLimit || 7000;
@@ -597,6 +727,30 @@ async function fetchSettings() {
     if (analyzerModeEl) analyzerModeEl.checked = data.analyzerMode || false;
     const analyzerSerialEl = document.getElementById('analyzerSerial');
     if (analyzerSerialEl) analyzerSerialEl.checked = data.analyzerSerial || false;
+
+    // Closed-loop feedback (PID) settings
+    const feedbackEnableEl = document.getElementById('feedbackEnable');
+    if (feedbackEnableEl) feedbackEnableEl.checked = data.feedbackEnable || false;
+    const reverseDirectionEl = document.getElementById('reverseDirection');
+    if (reverseDirectionEl) reverseDirectionEl.checked = data.reverseDirection || false;
+    const feedbackMinSpeedEl = document.getElementById('feedbackMinSpeed');
+    if (feedbackMinSpeedEl) {
+      feedbackMinSpeedEl.value = data.feedbackMinSpeed ?? 40;
+      const disp = document.getElementById('feedbackMinSpeed-display');
+      if (disp) disp.textContent = data.feedbackMinSpeed ?? 40;
+    }
+    const pidKpEl = document.getElementById('pidKp');
+    if (pidKpEl) pidKpEl.value = data.pidKp ?? 0.15;
+    const pidKiEl = document.getElementById('pidKi');
+    if (pidKiEl) pidKiEl.value = data.pidKi ?? 1.3;
+    const pidKdEl = document.getElementById('pidKd');
+    if (pidKdEl) pidKdEl.value = data.pidKd ?? 0;
+    const feedbackDeadbandEl = document.getElementById('feedbackDeadband');
+    if (feedbackDeadbandEl) {
+      feedbackDeadbandEl.value = data.feedbackDeadband ?? 1.5;
+      const disp = document.getElementById('feedbackDeadband-display');
+      if (disp) disp.textContent = data.feedbackDeadband ?? 1.5;
+    }
 
     // Speed type dropdown - map speedType to dropdown options
     let speedTypeValue = 'Hall';  // default
@@ -622,11 +776,6 @@ async function fetchSettings() {
     // RPM source dropdown
     document.getElementById('rpmSource').value = (data.rpmType === 'CAN') ? 'CAN' : 'Hall';
 
-    // Update FW version
-    const fwResponse = await fetch('/api/settings');
-    const fwData = await fwResponse.json();
-    document.getElementById('fwVersion').textContent = 'FW: ' + (fwData.FW_VERSION || '--');
-
     settingsLoaded = true;
   } catch (error) {
     console.log('Error fetching settings:', error);
@@ -641,8 +790,10 @@ async function fetchStatus() {
     // Update dashboard live data
     document.getElementById('speed').textContent = data.vehicleSpeed || '--';
     document.getElementById('rpm').textContent = data.vehicleRPM || '--';
+    const motorDutyEl = document.getElementById('motorDuty');
+    if (motorDutyEl) motorDutyEl.textContent = data.appliedDutyCycle ?? '--';
     if (data.convertToMPH !== undefined) {
-      applySpeedUnitLabels(!!data.convertToMPH);
+      applyMphState(!!data.convertToMPH);
     }
     
     // Add test mode indicators
@@ -704,12 +855,13 @@ async function fetchStatus() {
     if (document.getElementById('tempDutyCycle-display')) {
       document.getElementById('tempDutyCycle-display').textContent = data.tempDutyCycle || 0;
     }
+    updateCalDutyReadout(data.tempDutyCycle);
 
     if (document.getElementById('liveGPSStatus')) {
       if (data.hasGPS) {
-        document.getElementById('liveGPSStatus').textContent = `Connected, ${data.gpsSatellites} satellites`;
+        document.getElementById('liveGPSStatus').textContent = `Connected (${data.gpsSatellites} sats)`;
       } else if (data.gpsUnavailable) {
-        document.getElementById('liveGPSStatus').textContent = 'Unavailable';
+        document.getElementById('liveGPSStatus').textContent = 'Not Available';
       } else {
         document.getElementById('liveGPSStatus').textContent = 'Not Connected';
       }
@@ -742,9 +894,14 @@ async function fetchStatus() {
 
     updateSpeedOffsetStatus(data.speedOffsetType, data.currentSpeedOffset);
 
-    // System status (read-only, not settings)
-    document.getElementById('canStatus').textContent = data.hasCAN ? 'CAN: Healthy' : 'CAN: Not Healthy';
-    document.getElementById('broadcastStatus').textContent = data.broadcastSpeedEnabled ? 'Broadcast: Active' : 'Broadcast: Off';
+    // System status (read-only, not settings) — tick/cross text only, neutral
+    // badge (OpenHaldex style: never colour the whole badge red/green).
+    const canEl = document.getElementById('canStatus');
+    canEl.textContent = data.hasCAN ? 'CAN: ✓' : 'CAN: ✗';
+    canEl.classList.remove('connected', 'error');
+    const broadcastEl = document.getElementById('broadcastStatus');
+    broadcastEl.textContent = data.broadcastSpeedEnabled ? 'Broadcast: ✓' : 'Broadcast: ✗';
+    broadcastEl.classList.remove('connected', 'error');
     document.getElementById('canPresent').textContent = data.hasCAN ? 'Healthy' : 'Not Healthy';
 
     if (document.getElementById('liveBroadcastSpeedValue')) {
@@ -755,12 +912,24 @@ async function fetchStatus() {
     // GPS status in dashboard
     if (document.getElementById('gpsPresent')) {
       if (data.hasGPS) {
-        document.getElementById('gpsPresent').textContent = `Connected (${data.gpsSatellites} sat)`;
+        document.getElementById('gpsPresent').textContent = `Connected (${data.gpsSatellites} sats)`;
       } else if (data.gpsUnavailable) {
-        document.getElementById('gpsPresent').textContent = 'Unavailable';
+        document.getElementById('gpsPresent').textContent = 'Not Available';
       } else {
         document.getElementById('gpsPresent').textContent = 'Not Connected';
       }
+    }
+
+    // Closed-loop feedback (PID) live status
+    updateFeedbackStatus(data);
+
+    // Live calibration-curve marker. In cal mode the achieved speed is on the
+    // needle (unknown here), so ride the curve at the jogged duty; otherwise use
+    // the incoming vehicle speed against the applied duty.
+    if (data.testCal) {
+      setCalCurrentPoint(data.tempDutyCycle, curveSpeedAt(data.tempDutyCycle));
+    } else {
+      setCalCurrentPoint(data.appliedDutyCycle, data.vehicleSpeed);
     }
 
   } catch (error) {
@@ -768,8 +937,48 @@ async function fetchStatus() {
   }
 }
 
+function updateFeedbackStatus(data) {
+  const fbOn = !!data.feedbackEnable;
+
+  // Feedback readouts have three states:
+  //   available -> show the measured value / PID trim
+  //   missing   -> motor running but no feedback signal (legacy PCB): show "N/A"
+  //   unknown   -> not seen yet and motor idle: leave "--"
+  const fbValue = (numeric) => {
+    if (data.feedbackAvailable) return numeric;
+    if (data.feedbackMissing) return 'N/A';
+    return '--';
+  };
+
+  const speedNumeric = data.measuredSpeed !== undefined ? String(data.measuredSpeed) : '--';
+  const trimNumeric = (data.pidCorrection !== undefined && data.pidCorrection !== null)
+    ? ((data.pidCorrection > 0 ? '+' : '') + data.pidCorrection)
+    : '--';
+  const speedTxt = fbValue(speedNumeric);
+  const trimTxt = fbValue(trimNumeric);
+  const freqTxt = (typeof data.measuredFreqHz === 'number')
+    ? data.measuredFreqHz.toFixed(1)
+    : '--';
+
+  const setTxt = (id, txt) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = txt;
+  };
+
+  // Dashboard gauges (mirror the base: always show the measured values)
+  setTxt('feedbackState', fbOn ? 'Enabled' : 'Off');
+  setTxt('measuredSpeed', speedTxt);
+  setTxt('pidCorrection', trimTxt);
+  setTxt('measuredFreqHz', freqTxt);
+
+  // Advanced feedback card live readout
+  setTxt('liveMeasuredSpeed', fbOn ? speedTxt : '--');
+  setTxt('livePidCorrection', fbOn ? trimTxt : '--');
+  setTxt('liveMeasuredFreqHz', freqTxt);
+}
+
 function pushControl(key, value) {
-  fetch('/api/control', {
+  return fetch('/api/control', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ key, value })
@@ -828,4 +1037,469 @@ function showNotification(message, type = "success") {
     notification.style.opacity = "0";
     setTimeout(() => notification.remove(), 300);
   }, 3000);
+}
+
+// ===== CALIBRATION BUILDER =====
+const CAL_PWM_MAX = 4095;
+const CAL_CHIP_MAX = 300;   // capture targets available up to 300 km/h
+let calSelectedSpeed = 0;
+let calChipsMaxSpeed = -1;
+let lastCalPointCount = 0;  // points in the current builder state (save guard)
+
+function initCalBuilder() {
+  // Jog steppers with press-and-hold repeat + acceleration
+  document.querySelectorAll('.stepper-btn[data-jog]').forEach((btn) => {
+    const delta = parseInt(btn.dataset.jog, 10);
+    attachHold(btn, () => calJog(delta));
+  });
+
+  const targetInput = document.getElementById('calTargetSpeed');
+  if (targetInput) {
+    targetInput.addEventListener('input', () => setCalTarget(parseInt(targetInput.value, 10) || 0, false));
+  }
+
+  const captureBtn = document.getElementById('calCaptureBtn');
+  if (captureBtn) captureBtn.addEventListener('click', calCapture);
+
+  const nameEl = document.getElementById('calName');
+  if (nameEl) {
+    nameEl.addEventListener('change', () => calPost({ op: 'setName', name: nameEl.value }).catch(() => {}));
+  }
+
+  // Cal-page "Cluster in MPH" toggle — mirrors and drives the Configuration one.
+  const calMphEl = document.getElementById('calConvertToMPH');
+  if (calMphEl) {
+    calMphEl.addEventListener('change', () => {
+      applyMphState(calMphEl.checked);
+      pushControl('convertToMPH', calMphEl.checked);
+    });
+  }
+
+  bindCal('calApplyBtn', () => calPost({ op: 'apply' }).then((s) => {
+    applyCalState(s);
+    refreshCalibrationsSelect();
+    fetchCalCurve();
+    showNotification('Calibration generated and applied');
+  }));
+
+  bindCal('calSaveBtn', () => {
+    if (lastCalPointCount < 2) {
+      showNotification('Capture at least 2 points before saving', 'error');
+      return;
+    }
+    // A saved custom cal shows up as the value=200 option; warn before clobbering it.
+    const sel = document.getElementById('motorCalibration');
+    const exists = sel && [...sel.options].some((o) => o.value === '200');
+    if (exists && !confirm('A custom calibration is already saved on the device. Overwrite it?')) {
+      return;
+    }
+    calPost({ op: 'save' }).then((s) => {
+      applyCalState(s);
+      refreshCalibrationsSelect();
+      fetchCalCurve();
+      showNotification('Calibration saved to device');
+    });
+  });
+
+  bindCal('calClearBtn', () => {
+    if (!confirm('Clear all captured calibration points?')) return;
+    calPost({ op: 'clearPoints' }).then(applyCalState).then(() => showNotification('Points cleared'));
+  });
+
+  bindCal('calExportTextBtn', () => calPost({ op: 'export' }).then((r) => {
+    const text = r.json || '';
+    document.getElementById('calText').value = text;
+    const nm = document.getElementById('calName');
+    const base = (nm && nm.value.trim()) || 'calibration';
+    const fname = base.replace(/[^a-z0-9._-]+/gi, '_') + '.txt';
+    downloadTextFile(fname, text);
+    showNotification('Exported to text file');
+  }));
+
+  bindCal('calImportBtn', () => {
+    const fileEl = document.getElementById('calImportFile');
+    if (fileEl) fileEl.click();
+  });
+
+  const importFileEl = document.getElementById('calImportFile');
+  if (importFileEl) {
+    importFileEl.addEventListener('change', () => {
+      const file = importFileEl.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        const text = String(reader.result || '').trim();
+        document.getElementById('calText').value = text;
+        if (text) calImportText(text);
+      };
+      reader.readAsText(file);
+      importFileEl.value = '';   // allow re-picking the same file
+    });
+  }
+}
+
+function calImportText(text) {
+  calPost({ op: 'import', json: text }).then((s) => {
+    applyCalState(s);
+    refreshCalibrationsSelect();
+    fetchCalCurve();
+    showNotification('Calibration imported');
+  });
+}
+
+// Trigger a browser download of the given text as a file.
+function downloadTextFile(filename, text) {
+  const blob = new Blob([text], { type: 'text/plain' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function bindCal(id, fn) {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener('click', () => { try { fn(); } catch (e) { console.log(e); } });
+}
+
+// Press-and-hold helper: fires immediately, then repeats faster while held.
+function attachHold(el, fn) {
+  let timer = null;
+  let delay = 320;
+  const stop = () => { if (timer) { clearTimeout(timer); timer = null; } };
+  const start = (e) => {
+    e.preventDefault();
+    fn();
+    delay = 320;
+    const tick = () => { fn(); delay = Math.max(60, delay * 0.8); timer = setTimeout(tick, delay); };
+    timer = setTimeout(tick, delay);
+  };
+  el.addEventListener('pointerdown', start);
+  el.addEventListener('pointerup', stop);
+  el.addEventListener('pointerleave', stop);
+  el.addEventListener('pointercancel', stop);
+}
+
+async function calPost(body) {
+  const r = await fetch('/api/cal', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    showNotification('Cal error: ' + (err.error || ('HTTP ' + r.status)), 'error');
+    throw new Error(err.error || r.status);
+  }
+  return r.json();
+}
+
+async function refreshCalState() {
+  try {
+    const r = await fetch('/api/cal');
+    applyCalState(await r.json());
+  } catch (e) {
+    console.log('Error fetching cal state:', e);
+  }
+}
+
+async function calJog(delta) {
+  try {
+    const s = await calPost({ op: 'jog', delta });
+    updateCalDutyReadout(s.duty);
+  } catch (e) { /* already notified */ }
+}
+
+async function calCapture() {
+  try {
+    const s = await calPost({ op: 'addPoint', speed: calSelectedSpeed });
+    applyCalState(s);
+    showNotification('Captured ' + calSelectedSpeed + ' @ duty ' + s.duty);
+  } catch (e) { /* already notified */ }
+}
+
+function updateCalDutyReadout(duty) {
+  duty = duty || 0;
+  const nowEl = document.getElementById('calDutyNow');
+  if (!nowEl) return;
+  nowEl.textContent = duty;
+  const pctEl = document.getElementById('calDutyPct');
+  const capDutyEl = document.getElementById('calCaptureDuty');
+  if (pctEl) pctEl.textContent = (duty / CAL_PWM_MAX * 100).toFixed(1);
+  if (capDutyEl) capDutyEl.textContent = duty;
+}
+
+function applyCalState(state) {
+  if (!state) return;
+  updateCalDutyReadout(state.duty);
+
+  const unit = state.unit === 'mph' ? 'mph' : 'km/h';
+  const unitEl = document.getElementById('calUnitLabel');
+  if (unitEl) unitEl.textContent = unit;
+
+  // Mirror the firmware's runtime cluster unit onto both MPH toggles.
+  if (typeof state.convertToMPH === 'boolean') applyMphState(state.convertToMPH);
+
+  // Name (don't clobber while the user is editing it)
+  const nameEl = document.getElementById('calName');
+  if (nameEl && document.activeElement !== nameEl) nameEl.value = state.name || '';
+
+  buildCalChips(state.maxSpeed || 200);
+  renderCalPoints(state.points || []);
+  lastCalPointCount = state.count ?? (state.points || []).length;
+  scheduleCalDraw();
+}
+
+function buildCalChips(maxSpeed) {
+  const chipMax = Math.max(maxSpeed || 0, CAL_CHIP_MAX);
+  if (chipMax === calChipsMaxSpeed) return;
+  calChipsMaxSpeed = chipMax;
+  const grid = document.getElementById('calTargetChips');
+  if (!grid) return;
+  grid.innerHTML = '';
+  for (let s = 0; s <= chipMax; s += 10) {
+    const chip = document.createElement('button');
+    chip.className = 'chip';
+    chip.textContent = s;
+    chip.dataset.speed = s;
+    chip.addEventListener('click', () => setCalTarget(s, true));
+    grid.appendChild(chip);
+  }
+  highlightCalChip();
+}
+
+function setCalTarget(speed, fromChip) {
+  calSelectedSpeed = speed;
+  const capEl = document.getElementById('calCaptureSpeed');
+  if (capEl) capEl.textContent = speed;
+  const input = document.getElementById('calTargetSpeed');
+  if (input && fromChip) input.value = speed;
+  highlightCalChip();
+}
+
+function highlightCalChip() {
+  document.querySelectorAll('#calTargetChips .chip').forEach((c) => {
+    c.classList.toggle('active', parseInt(c.dataset.speed, 10) === calSelectedSpeed);
+  });
+}
+
+function renderCalPoints(points) {
+  const list = document.getElementById('calPointsList');
+  if (!list) return;
+  if (!points.length) {
+    list.innerHTML = '<p class="hint">No points captured yet.</p>';
+    return;
+  }
+  let html = '<div class="cal-point-head"><span>Speed</span><span>Duty</span><span></span></div>';
+  points.forEach((p, i) => {
+    html += '<div class="cal-point-row">' +
+              '<span>' + p.speed + '</span>' +
+              '<span>' + p.duty + '</span>' +
+              '<button class="cal-del" data-index="' + i + '">✕</button>' +
+            '</div>';
+  });
+  list.innerHTML = html;
+  list.querySelectorAll('.cal-del').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const index = parseInt(btn.dataset.index, 10);
+      calPost({ op: 'deletePoint', index }).then(applyCalState).catch(() => {});
+    });
+  });
+}
+
+// Refresh the Configuration dropdown so the custom slot appears/updates,
+// then select it so the user can see it is active.
+function refreshCalibrationsSelect() {
+  fetchCalibrations().then(() => {
+    const sel = document.getElementById('motorCalibration');
+    if (sel && [...sel.options].some((o) => o.value === '200')) {
+      sel.value = '200';
+    }
+  });
+}
+
+// ===== CALIBRATION CURVE GRAPH =====
+let calCurveData = null;          // { speed:[], duty:[], pwmMax, maxSpeed } from /api/calcurve
+let calCurrentPoint = null;       // { duty, speed } live operating point
+let calDrawPending = false;
+
+async function fetchCalCurve() {
+  try {
+    const r = await fetch('/api/calcurve');
+    calCurveData = await r.json();
+  } catch (e) {
+    console.log('Error fetching cal curve:', e);
+  }
+  scheduleCalDraw();
+}
+
+function setCalCurrentPoint(duty, speed) {
+  calCurrentPoint = { duty: Number(duty) || 0, speed: Number(speed) || 0 };
+  scheduleCalDraw();
+}
+
+// Interpolate the curve's speed at a given hardware duty (used in cal mode,
+// where the true achieved speed isn't reported by the firmware).
+function curveSpeedAt(duty) {
+  if (!calCurveData || !Array.isArray(calCurveData.duty) || calCurveData.duty.length < 2) return 0;
+  const d = calCurveData.duty, s = calCurveData.speed;
+  if (duty <= d[0]) return s[0];
+  for (let i = 1; i < d.length; i++) {
+    if (duty <= d[i]) {
+      const span = d[i] - d[i - 1];
+      const frac = span > 0 ? (duty - d[i - 1]) / span : 0;
+      return Math.round(s[i - 1] + frac * (s[i] - s[i - 1]));
+    }
+  }
+  return s[s.length - 1];
+}
+
+// Coalesce redraws to one per animation frame (the status poll fires often).
+function scheduleCalDraw() {
+  if (calDrawPending) return;
+  calDrawPending = true;
+  requestAnimationFrame(() => { calDrawPending = false; drawCalCurve(); });
+}
+
+function drawCalCurve() {
+  const canvas = document.getElementById('calCurveCanvas');
+  if (!canvas || !canvas.clientWidth) return;   // not laid out yet (hidden tab)
+
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = canvas.clientWidth;
+  const cssH = Math.round(cssW * 0.6);
+  canvas.style.height = cssH + 'px';
+  if (canvas.width !== Math.round(cssW * dpr) || canvas.height !== Math.round(cssH * dpr)) {
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+  }
+
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+
+  const style = getComputedStyle(document.documentElement);
+  const col = (name, fallback) => (style.getPropertyValue(name).trim() || fallback);
+  const primary = col('--primary', '#00D9FF');
+  const secondary = col('--secondary', '#FF6B35');
+  const border = col('--border', '#30363D');
+  const textDim = col('--text-dim', '#8B949E');
+
+  const padL = 44, padR = 12, padT = 12, padB = 30;
+  const plotW = cssW - padL - padR;
+  const plotH = cssH - padT - padB;
+
+  const pwmMax = (calCurveData && calCurveData.pwmMax) || 384;
+  // Stretch the x-axis across only the duty range the calibration actually uses
+  // (the curve tops out well below full-scale), so the trace fills the width.
+  let dutyMax = 1;
+  if (calCurveData && Array.isArray(calCurveData.duty) && calCurveData.duty.length) {
+    dutyMax = calCurveData.duty[calCurveData.duty.length - 1] || 1;
+  }
+  if (calCurrentPoint && calCurrentPoint.duty > dutyMax) dutyMax = calCurrentPoint.duty;
+  dutyMax = Math.max(1, Math.ceil(dutyMax / 100) * 100);
+
+  let speedMax = (calCurveData && calCurveData.maxSpeed) || 200;
+  if (calCurrentPoint && calCurrentPoint.speed > speedMax) {
+    speedMax = Math.ceil(calCurrentPoint.speed / 20) * 20;   // grow if the live point overshoots
+  }
+  if (speedMax < 1) speedMax = 1;
+
+  const xOf = (duty) => padL + (Math.max(0, Math.min(duty, dutyMax)) / dutyMax) * plotW;
+  const yOf = (speed) => padT + plotH - (Math.max(0, Math.min(speed, speedMax)) / speedMax) * plotH;
+
+  ctx.font = '10px -apple-system, "Segoe UI", Arial, sans-serif';
+  ctx.strokeStyle = border;
+  ctx.lineWidth = 1;
+
+  // Horizontal grid (speed) + Y labels
+  ctx.fillStyle = textDim;
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  const ySteps = 4;
+  for (let i = 0; i <= ySteps; i++) {
+    const sp = (speedMax / ySteps) * i;
+    const y = yOf(sp);
+    ctx.globalAlpha = 0.35;
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(cssW - padR, y); ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.fillText(String(Math.round(sp)), padL - 6, y);
+  }
+
+  // Vertical grid (duty %) + X labels
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  const xSteps = 5;
+  for (let i = 0; i <= xSteps; i++) {
+    const x = padL + (plotW / xSteps) * i;
+    ctx.globalAlpha = 0.35;
+    ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, padT + plotH); ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.fillText(String(Math.round((i / xSteps) * dutyMax)), x, padT + plotH + 6);
+  }
+
+  // Axis title
+  ctx.fillStyle = textDim;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  ctx.fillText('Motor duty', padL + plotW / 2, cssH);
+
+  // Faint calibration curve
+  if (calCurveData && Array.isArray(calCurveData.duty) && calCurveData.duty.length > 1) {
+    ctx.strokeStyle = primary;
+    ctx.globalAlpha = 0.5;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (let i = 0; i < calCurveData.duty.length; i++) {
+      const x = xOf(calCurveData.duty[i]);
+      const y = yOf(calCurveData.speed[i]);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  // Anchor marks of the ACTIVE calibration — always sit on the blue curve.
+  if (calCurveData && Array.isArray(calCurveData.anchorDuty) && calCurveData.anchorDuty.length) {
+    ctx.fillStyle = col('--success', '#2EA043');
+    for (let i = 0; i < calCurveData.anchorDuty.length; i++) {
+      ctx.beginPath();
+      ctx.arc(xOf(calCurveData.anchorDuty[i]), yOf(calCurveData.anchorSpeed[i]), 3.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // Current operating point + crosshair
+  if (calCurrentPoint) {
+    const x = xOf(calCurrentPoint.duty);
+    const y = yOf(calCurrentPoint.speed);
+
+    ctx.strokeStyle = secondary;
+    ctx.globalAlpha = 0.5;
+    ctx.setLineDash([4, 4]);
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(x, y); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x, padT + plotH); ctx.lineTo(x, y); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+
+    ctx.fillStyle = secondary;
+    ctx.beginPath();
+    ctx.arc(x, y, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    const label = calCurrentPoint.speed + ' @ ' + Math.round(calCurrentPoint.duty) + ' duty';
+    ctx.font = '11px -apple-system, "Segoe UI", Arial, sans-serif';
+    ctx.fillStyle = secondary;
+    ctx.textBaseline = 'bottom';
+    const rightSide = x > padL + plotW * 0.7;
+    ctx.textAlign = rightSide ? 'right' : 'left';
+    ctx.fillText(label, rightSide ? x - 8 : x + 8, y - 6);
+  }
 }

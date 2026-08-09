@@ -12,19 +12,11 @@ According to VW documentation, 1Hz = 1km/h. Other marques may have different cal
 
 Motor performance plotted with Duty Cycle & Resulting Speed.
 Basic Excel located in GitHub for reference - the motor isn't linear so it cannot be assumed that x*y duty = z speed(!)
-LED PWM can use various 'bits' for resolution.
+LEDc PWM can use various 'bits' for resolution.
 8 bit results in a poorer resolution, therefore the speed can be 'jumpy'.
 Default is 10 bit which makes it smoother. Both are available.
 
-Uses 'ESP32_FastPWM' for easier PWM control compared to LEDc
 Uses 'RunningMedian' for capturing multiple input pulses to compare against. Used to ignore 'outliers'
-
-To calibrate or adapt to other models:
-> Set 'testSpeed' to 1 & confirm tempSpeed = 0. This will allow the motor to run through EVERY duty cycle from 0 to 385 (10-bit)
-> Monitor Serial Monitor and record in the Excel (under Resulting Speed) the running speed of the cluster at each duty cycle
-  > Note: duty cycle is >'100%' due to default 10 bit resolution 
-> Copy each resulting speed into 'motorPerformance' 
-> Done!
 
 All main adjustable variables are in 'config.h'.
 
@@ -45,6 +37,27 @@ V2.01 - added GPS support for speed reading. Added CAN speed broadcasting. Added
 
 V2.10 - added Linearise Speed for Needle Sweep & Tara 120mph calibration
 V2.20 - added SavvyCAN and Cluster in MPH
+V2.30 - changed rpm/speed update rate to ensure GPS has a chance to update
+V2.40 - moved GPS to HardwareSerial to improve response
+
+V3.00 - closed-loop motor feedback (PID): measures the motor feedback and trims PWM duty so the needle holds under load.
+V3.01 - added a live calibration-curve graph on the Dashboard (duty-vs-speed trace + a marker for the point currently achieved from the hall input, Speed Test or Calibration Mode).
+      - graph now zooms to the duty range actually used, labels the axis and marker in raw duty (matching the Motor Duty gauge), and redraws when the calibration is changed.
+      - Dashboard layout mirrors the standard SpeedPulser (Motor Duty, Measured Speed and PID Trim gauges) so both share common cards and diagnostics.
+      - confirmed Calibration duty rolls over or under
+V3.02 - Sweep Speed (ms) is now a live slider (0-50), matching SpeedPulser; dragging it retimes an in-progress sweep smoothly.
+      - rewrote the needle sweep: it now drives BOTH needles to full mechanical deflection and back over a bounded duration. Previously the speed needle only reached the calibration ceiling (~37% of the 12-bit range) and a large Max RPM made the sweep run for minutes; it now ramps the full 12-bit PWM range and the full RPM output. The two needles (BLDC motor vs air-core tach coil) ramp at INDEPENDENT rates set by the Speed Ramp Rate / RPM Ramp Rate sliders, so the slower tach needle can be ramped gently enough to physically reach full scale.
+      - removed the redundant Linearise Speed Array control (superseded by the new sweep); the per-needle ramp-rate controls are retained.
+      - shared, project-agnostic OTA module (ota_manager, used like power_manager): POST /api/ota-update?mode=firmware|filesystem + GET /api/version; OTA tab reworked to match SpeedPulser (Firmware Info + single OTA Update card).
+      - GPS status is now three-state: Connected (n sats) / Not Connected / Not Available (no module fitted).
+      - moved Speed Test Mode onto the Diagnostics tab.
+
+V3.03 - custom calibrations now remember the cluster unit they were captured in and the device auto-enables "Cluster in MPH" whenever an MPH cal becomes the active calibration (boot, dropdown selection, apply/save/import). /api/cal now returns convertToMPH so the UI mirrors it, and a "Cluster in MPH" toggle was added directly on the Calibration Builder page (kept in lock-step with the Configuration page toggle).
+V3.04 - closed-loop feedback is now presence-aware and safer on legacy PCBs without the motor-feedback tacho:
+      - the tacho input is monitored so Measured Speed / PID Trim now have three states: "--" (not seen yet, motor idle), a live value (feedback present), or "N/A" (motor running >1.5s with no feedback signal, e.g. legacy PCB). The PID loop only engages once a feedback signal is actually detected, so it stays safely open-loop (feed-forward) otherwise.
+      - the gearbox hall input is now ignored while Speed Test or Calibration Mode is active, so an incoming hall signal can no longer disturb a test/cal (gated in the ISR).
+      - PID steady-state accuracy improved: the deadband now only silences the P/D terms; the integral keeps trimming inside the band so the needle settles ON target instead of a fixed offset.
+      - new user-configurable "PID Deadband (Hz)" slider (0-5 Hz, persisted) exposes that band; 0 = always full PID.
 */
 
 #endif // VERSION_H

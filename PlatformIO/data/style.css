@@ -124,6 +124,34 @@ header h1 {
     color: var(--primary);
 }
 
+/* Collapsible cards (Advanced page accordion) */
+.card.collapsible > h2 {
+    cursor: pointer;
+    user-select: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.card.collapsible > h2::after {
+    content: "\25BE"; /* down chevron */
+    font-size: 0.9rem;
+    color: var(--text-dim);
+    transition: transform 0.15s ease;
+}
+
+.card.collapsible.collapsed > h2 {
+    margin-bottom: 0;
+}
+
+.card.collapsible.collapsed > h2::after {
+    transform: rotate(-90deg);
+}
+
+.card.collapsible.collapsed > *:not(h2) {
+    display: none;
+}
+
 .hint {
     color: var(--text-dim);
     font-size: 0.9rem;
@@ -398,32 +426,19 @@ header h1 {
 }
 
 .ota-progress {
-    display: none;
-    width: 100%;
-    height: 8px;
-    margin-top: 0.75rem;
-    appearance: none;
-    -webkit-appearance: none;
-    border: none;
-    border-radius: 4px;
+    margin-top: 1rem;
+    position: relative;
+}
+
+.ota-progress::before {
+    content: '';
+    display: block;
+    height: 12px;
     background: var(--surface-light);
-    overflow: hidden;
-}
-
-.ota-progress::-webkit-progress-bar {
-    background: var(--surface-light);
-    border-radius: 4px;
-}
-
-.ota-progress::-webkit-progress-value {
-    background: var(--primary);
-    border-radius: 4px;
-    transition: width 0.2s ease;
-}
-
-.ota-progress::-moz-progress-bar {
-    background: var(--primary);
-    border-radius: 4px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    position: absolute;
+    inset: 0;
 }
 
 .map-container {
@@ -691,4 +706,346 @@ header h1 {
 .info-item strong {
     color: var(--primary);
     font-weight: 600;
+}
+
+/* ===== Calibration curve graph ===== */
+.cal-graph-wrap {
+    position: relative;
+    width: 100%;
+    background: var(--surface-light);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.5rem;
+}
+
+.cal-graph {
+    display: block;
+    width: 100%;
+    height: auto;
+    touch-action: none;
+}
+
+.cal-graph-legend {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 1rem;
+    margin-top: 0.75rem;
+    font-size: 0.85rem;
+    color: var(--text-dim);
+}
+
+.cal-graph-legend .legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.cal-graph-legend .legend-swatch {
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+    display: inline-block;
+}
+
+.cal-graph-legend .legend-swatch.curve {
+    background: var(--primary);
+    opacity: 0.45;
+}
+
+.cal-graph-legend .legend-swatch.point {
+    background: var(--secondary);
+    border-radius: 50%;
+}
+
+.cal-graph-legend .legend-swatch.capture {
+    background: var(--success);
+    border-radius: 50%;
+}
+
+/* ===== CALIBRATION BUILDER ===== */
+.cal-duty-readout {
+    text-align: center;
+    padding: 1rem;
+    background: var(--surface-light);
+    border-radius: 8px;
+    margin: 1rem 0;
+}
+
+.cal-duty-value {
+    font-size: 2.75rem;
+    font-weight: 800;
+    color: var(--primary);
+    line-height: 1;
+}
+
+.cal-duty-value small {
+    font-size: 1.1rem;
+    color: var(--text-dim);
+    font-weight: 600;
+}
+
+.cal-duty-sub {
+    color: var(--text-dim);
+    font-size: 0.95rem;
+    margin-top: 0.4rem;
+}
+
+.stepper-row {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 0.4rem;
+}
+
+.stepper-btn {
+    padding: 1.1rem 0.25rem;
+    background: var(--surface-light);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-size: 1.05rem;
+    font-weight: 700;
+    cursor: pointer;
+    user-select: none;
+    touch-action: manipulation;
+    transition: background 0.12s, border-color 0.12s;
+}
+
+.stepper-btn:hover {
+    border-color: var(--primary);
+}
+
+.stepper-btn:active {
+    background: var(--primary);
+    color: var(--background);
+    border-color: var(--primary);
+}
+
+.stepper-btn.coarse {
+    background: #2a313a;
+}
+
+.stepper-btn.fine {
+    border-color: var(--primary);
+}
+
+.chip-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(56px, 1fr));
+    gap: 0.4rem;
+}
+
+.chip {
+    padding: 0.75rem 0.25rem;
+    background: var(--surface-light);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.12s;
+}
+
+.chip:hover {
+    border-color: var(--primary);
+}
+
+.chip.active {
+    background: var(--primary);
+    color: var(--background);
+    border-color: var(--primary);
+}
+
+.cal-subhead {
+    font-size: 1rem;
+    color: var(--text-dim);
+    margin: 1.25rem 0 0.5rem;
+}
+
+.cal-points {
+    background: var(--surface-light);
+    border-radius: 8px;
+    padding: 0.5rem 0.75rem;
+}
+
+.cal-point-head,
+.cal-point-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr 2.5rem;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0;
+}
+
+.cal-point-head {
+    color: var(--text-dim);
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    border-bottom: 1px solid var(--border);
+}
+
+.cal-point-row {
+    border-bottom: 1px solid var(--border);
+    font-weight: 600;
+}
+
+.cal-point-row:last-child {
+    border-bottom: none;
+}
+
+.cal-point-row span:first-child {
+    color: var(--primary);
+}
+
+.cal-del {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--danger);
+    border-radius: 6px;
+    padding: 0.3rem;
+    cursor: pointer;
+    font-weight: 700;
+}
+
+.cal-del:hover {
+    background: var(--danger);
+    color: white;
+    border-color: var(--danger);
+}
+
+.cal-action-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.6rem;
+    margin-top: 1rem;
+}
+
+.cal-textarea {
+    width: 100%;
+    margin-top: 0.75rem;
+    padding: 0.75rem;
+    background: var(--background);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+    font-size: 0.8rem;
+    resize: vertical;
+}
+
+.cal-textarea:focus {
+    outline: none;
+    border-color: var(--primary);
+}
+
+/* ===== OTA UPDATE ===== */
+.info-box {
+    padding: 1rem;
+    background: var(--surface-light);
+    border-left: 4px solid var(--primary);
+    border-radius: 4px;
+}
+
+.info-box p {
+    color: var(--text-dim);
+    font-size: 0.95rem;
+    margin-bottom: 0.5rem;
+}
+
+.info-box p:last-child {
+    margin-bottom: 0;
+}
+
+.centered-card .form-group,
+.centered-card .button-group,
+.centered-card .status-grid,
+.centered-card .info-box {
+    max-width: 560px;
+    margin-left: auto;
+    margin-right: auto;
+}
+
+.centered-card h2 {
+    text-align: center;
+}
+
+.ota-upload-area {
+    border: 2px dashed var(--border);
+    border-radius: 8px;
+    padding: 2rem 1rem;
+    text-align: center;
+    cursor: pointer;
+    color: var(--text-dim);
+    transition: border-color 0.2s, background 0.2s;
+    user-select: none;
+}
+
+.ota-upload-area:hover,
+.ota-upload-area.drag-over {
+    border-color: var(--primary);
+    background: rgba(0, 217, 255, 0.05);
+    color: var(--text);
+}
+
+.ota-upload-area svg {
+    display: block;
+    margin: 0 auto 0.75rem;
+    opacity: 0.6;
+}
+
+.ota-upload-area.file-selected {
+    border-color: var(--success);
+    color: var(--success);
+}
+
+.ota-file-name {
+    margin-top: 0.5rem;
+    font-size: 0.85rem;
+    min-height: 1.2rem;
+}
+
+.ota-progress-wrap {
+    margin-top: 1rem;
+    position: relative;
+}
+
+.ota-progress-bar {
+    position: relative;
+    z-index: 1;
+    height: 12px;
+    background: var(--primary);
+    border-radius: 6px;
+    width: 0%;
+    transition: width 0.2s;
+}
+
+.ota-progress-label {
+    text-align: center;
+    margin-top: 0.4rem;
+    font-size: 0.9rem;
+    color: var(--text-dim);
+}
+
+.ota-status {
+    margin-top: 0.75rem;
+    text-align: center;
+    font-size: 0.95rem;
+    min-height: 1.5rem;
+}
+
+.ota-status.success {
+    color: var(--success);
+}
+
+.ota-status.error {
+    color: var(--danger);
+}
+
+@media (max-width: 480px) {
+    .stepper-btn {
+        font-size: 0.9rem;
+        padding: 1rem 0.15rem;
+    }
 }
