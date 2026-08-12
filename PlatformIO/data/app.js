@@ -819,6 +819,9 @@ async function fetchStatus() {
     if (document.getElementById('liveRPM')) {
       document.getElementById('liveRPM').textContent = data.vehicleRPM || '--';
     }
+    if (document.getElementById('liveSpeed')) {
+      document.getElementById('liveSpeed').textContent = data.vehicleSpeed || '--';
+    }
     if (document.getElementById('liveHallRPM')) {
       document.getElementById('liveHallRPM').textContent = data.hallRPM || '--';
     }
@@ -923,6 +926,9 @@ async function fetchStatus() {
     // Closed-loop feedback (PID) live status
     updateFeedbackStatus(data);
 
+    // Diagnostics: colour the active outputs and the input driving them.
+    updateDiagHighlights(data);
+
     // Live calibration-curve marker. In cal mode the achieved speed is on the
     // needle (unknown here), so ride the curve at the jogged duty; otherwise use
     // the incoming vehicle speed against the applied duty.
@@ -975,6 +981,54 @@ function updateFeedbackStatus(data) {
   setTxt('liveMeasuredSpeed', fbOn ? speedTxt : '--');
   setTxt('livePidCorrection', fbOn ? trimTxt : '--');
   setTxt('liveMeasuredFreqHz', freqTxt);
+
+  // Live Data - All Inputs (motor feedback details)
+  setTxt('liveAllMotorSpeed', speedTxt);
+  setTxt('liveAllPidTrim', fbOn ? trimTxt : '--');
+  setTxt('liveAllMotorFreq', freqTxt);
+}
+
+// Colour the Diagnostics live-data so it's obvious which outputs are active and
+// what is driving them: the Final RPM / Final Speed light up orange when driven,
+// together with the input actually feeding them (or nothing extra in Test Mode).
+function updateDiagHighlights(data) {
+  const speedSourceMap = {
+    'Hall': 'liveHallSpeed', 'ECU': 'liveECUSpeed', 'ABS': 'liveABSSpeed',
+    'DSG': 'liveDSGSpeed', 'TP2.0': 'liveTP20Speed', 'UDS': 'liveUDSSpeed',
+    'GPS': 'liveGPSSpeed', 'Custom CAN': 'liveAftermarketSpeed'
+  };
+  const rpmSourceMap = { 'CAN': 'liveCANRPM', 'Hall': 'liveHallRPM' };
+
+  const setActive = (id, on) => {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle('live-active', !!on);
+  };
+
+  // Clear every candidate first so stale highlights don't linger.
+  ['liveSpeed', 'liveRPM', 'liveHallRPM', 'liveCANRPM',
+    'liveHallSpeed', 'liveECUSpeed', 'liveABSSpeed', 'liveDSGSpeed',
+    'liveTP20Speed', 'liveUDSSpeed', 'liveGPSSpeed', 'liveAftermarketSpeed']
+    .forEach(id => setActive(id, false));
+
+  // Speed channel
+  const speedDriven = !!data.testSpeedo || Number(data.vehicleSpeed) > 0;
+  if (speedDriven) {
+    setActive('liveSpeed', true);
+    if (!data.testSpeedo) {
+      const src = speedSourceMap[data.activeSpeedSource];
+      if (src) setActive(src, true);
+    }
+  }
+
+  // RPM channel
+  const rpmDriven = !!data.testRPM || Number(data.vehicleRPM) > 0;
+  if (rpmDriven) {
+    setActive('liveRPM', true);
+    if (!data.testRPM) {
+      const src = rpmSourceMap[data.activeRpmSource];
+      if (src) setActive(src, true);
+    }
+  }
 }
 
 function pushControl(key, value) {

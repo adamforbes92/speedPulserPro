@@ -120,12 +120,31 @@ void taskProcessSpeed(void *parameter)
   DEBUG_SPD("Speed processing task started");
   unsigned long lastIncomingHallHz = 0;
   uint16_t lastValidVehicleSpeed = 0;
+  bool prevTestSpeedo = false;                    // Speed Test edge detect (global on/off gate)
   TickType_t lastPidTick = xTaskGetTickCount();  // closed-loop PID cadence
   TickType_t lastMeasTick = xTaskGetTickCount(); // open-loop tacho readout cadence
   TickType_t motorRunSince = 0;                  // when the motor started running with no feedback yet
 
   while (1)
   {
+    // Speed Test acts as a global on/off: the instant it is switched OFF, drop the
+    // held test speed and clear the hall state so the needle returns to rest (or the
+    // live source) instead of sitting at the last test value.
+    if (prevTestSpeedo && !testSpeedo)
+    {
+      lastValidVehicleSpeed = 0;
+      vehicleSpeed = 0;
+      dutyCycle = 0;
+      dutyCycleIncoming = 0;
+      vehicleSpeedHall = 0;
+      hallSpeed = 0;
+      currentSpeedOffset = 0;
+      lastIncomingHallHz = 0;
+      resetHallMedianFilter();
+      setMotorDutyRaw(0);
+    }
+    prevTestSpeedo = testSpeedo;
+
     // PID may only run when feedback is actually available. If the user enables it
     // but the PCB has no feedback trace (legacy board) the loop stays open-loop, so
     // an unaware user can't accidentally drive a closed loop with no measurement.
@@ -290,7 +309,10 @@ void taskProcessSpeed(void *parameter)
 
     // Feed-forward base duty: interpolate the requested speed to a 12-bit hardware
     // duty (finer than the raw calibration grid), mirroring SpeedPulser.
-    uint32_t baseDuty = speedToPwmDuty((uint16_t)dutyCycle);
+    // A resolved speed of 0 must park the needle at rest: applyConfiguredSpeedOffset()
+    // adds a positive offset even at 0, so gate on vehicleSpeed to keep the motor off
+    // when Speed Test is disabled (or the slider/source reads 0).
+    uint32_t baseDuty = (vehicleSpeed == 0) ? 0 : speedToPwmDuty((uint16_t)dutyCycle);
 
     // Closed-loop PID trim, or plain open-loop write.
     // The PID and the tacho readout run on a fixed 100 ms cadence regardless of the

@@ -233,6 +233,11 @@ header h1 {
     line-height: 1.15;
 }
 
+/* Highlight an output and its driving input when the channel is active */
+.live-data-value.live-active {
+    color: orange;
+}
+
 .gauge {
     text-align: center;
     padding: 1rem;

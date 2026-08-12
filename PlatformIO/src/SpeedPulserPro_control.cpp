@@ -78,8 +78,10 @@ void resetRPMMedianFilter()
   samplesRPM.clear();
 }
 
-// Interrupt handler for incoming frequency (RPM) reading
-void incomingHz()
+// Interrupt handler for incoming frequency (RPM) reading.
+// IRAM_ATTR is required so a pulse arriving while the flash cache is disabled
+// (EEPROM/LittleFS write) doesn't crash the chip.
+void IRAM_ATTR incomingHz()
 {
   // Ignore the vehicle hall input entirely while bench-testing or calibrating —
   // the motor is driven from the Speed Test / Cal controls, so an incoming signal
@@ -99,8 +101,10 @@ void incomingHz()
   ledCounter++;
 }
 
-// Interrupt handler for motor speed feedback reading
-void incomingMotorSpeed()
+// Interrupt handler for motor speed feedback reading.
+// IRAM_ATTR is required so a pulse arriving while the flash cache is disabled
+// (EEPROM/LittleFS write) doesn't crash the chip.
+void IRAM_ATTR incomingMotorSpeed()
 {
   static unsigned long previousMicros = micros();
   unsigned long presentMicros = micros();

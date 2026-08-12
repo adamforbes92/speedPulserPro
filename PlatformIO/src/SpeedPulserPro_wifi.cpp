@@ -148,6 +148,19 @@ void handleGetStatus(AsyncWebServerRequest *request)
   doc["udsSpeed"] = udsSpeed;
   doc["tp20Speed"] = tp20Speed;
 
+  // Active source identifiers so the Diagnostics live-data can highlight which
+  // input is currently driving the Speed / RPM outputs.
+  const char *activeSpeedSource = "Hall";
+  if (useECU) activeSpeedSource = "ECU";
+  else if (useABS) activeSpeedSource = "ABS";
+  else if (useDSG) activeSpeedSource = "DSG";
+  else if (useTP20) activeSpeedSource = "TP2.0";
+  else if (useUDS) activeSpeedSource = "UDS";
+  else if (useGPS) activeSpeedSource = "GPS";
+  else if (useAftermarket) activeSpeedSource = "Custom CAN";
+  doc["activeSpeedSource"] = activeSpeedSource;
+  doc["activeRpmSource"] = useRPMCAN ? "CAN" : "Hall";
+
   // Test mode status
   doc["testSpeedo"] = testSpeedo;
   doc["tempSpeed"] = tempSpeed;
