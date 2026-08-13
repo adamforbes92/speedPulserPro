@@ -531,13 +531,15 @@
                 <h2>Export / Import</h2>
                 <div class="cal-action-grid">
                     <button class="btn-secondary" id="calExportTextBtn">Export Text</button>
+                    <button class="btn-secondary" id="calExportCArrayBtn">Export C Array</button>
                     <button class="btn-secondary" id="calImportBtn">Import Text</button>
                 </div>
                 <input type="file" id="calImportFile" accept=".txt,text/plain" hidden>
                 <textarea id="calText" class="cal-textarea" rows="8" readonly
                           placeholder="Exported / imported calibration text appears here."></textarea>
                 <p class="hint">Export Text saves the active calibration to a .txt file you can share
-                   or back up. Import Text opens a .txt file, shows it here, and applies it.</p>
+                   or back up. Export C Array saves the legacy motorPerformance[] C source block.
+                   Import Text opens a .txt file, shows it here, and applies it.</p>
             </section>
         </div>
 

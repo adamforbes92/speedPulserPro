@@ -1170,6 +1170,16 @@ function initCalBuilder() {
     showNotification('Exported to text file');
   }));
 
+  bindCal('calExportCArrayBtn', () => calPost({ op: 'export' }).then((r) => {
+    const text = r.carray || '';
+    document.getElementById('calText').value = text;
+    const nm = document.getElementById('calName');
+    const base = (nm && nm.value.trim()) || 'calibration';
+    const fname = base.replace(/[^a-z0-9._-]+/gi, '_') + '.h';
+    downloadTextFile(fname, text);
+    showNotification('Exported to C array file');
+  }));
+
   bindCal('calImportBtn', () => {
     const fileEl = document.getElementById('calImportFile');
     if (fileEl) fileEl.click();
