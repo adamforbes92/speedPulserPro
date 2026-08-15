@@ -78,6 +78,12 @@ void resetRPMMedianFilter()
   samplesRPM.clear();
 }
 
+// File-scope (not a function-local static): a function-local static with a
+// runtime initializer would emit a __cxa_guard_acquire on first use, which takes
+// a FreeRTOS mutex with a timeout — illegal in an ISR and asserts in queue.c.
+static volatile unsigned long incomingPreviousMicros = 0;   // hall input, seeded on first pulse
+static volatile unsigned long motorSpeedPreviousMicros = 0; // rpm input, seeded on first pulse
+
 // Interrupt handler for incoming frequency (RPM) reading.
 // IRAM_ATTR is required so a pulse arriving while the flash cache is disabled
 // (EEPROM/LittleFS write) doesn't crash the chip.
@@ -90,13 +96,18 @@ void IRAM_ATTR incomingHz()
   if (testSpeedo || testCal)
     return;
 
-  static unsigned long previousMicros = micros();
   unsigned long presentMicros = micros();
+  unsigned long previousMicros = incomingPreviousMicros;
+  if (previousMicros == 0)
+  {
+    incomingPreviousMicros = presentMicros; // seed on the first pulse only
+    return;
+  }
   unsigned long revolutionTime = presentMicros - previousMicros;
   if (revolutionTime < 1000UL)
     return;
   dutyCycleIncoming = (60000000UL / revolutionTime) / 60;
-  previousMicros = presentMicros;
+  incomingPreviousMicros = presentMicros;
   lastPulse = millis();
   ledCounter++;
 }
@@ -106,13 +117,18 @@ void IRAM_ATTR incomingHz()
 // (EEPROM/LittleFS write) doesn't crash the chip.
 void IRAM_ATTR incomingMotorSpeed()
 {
-  static unsigned long previousMicros = micros();
   unsigned long presentMicros = micros();
+  unsigned long previousMicros = motorSpeedPreviousMicros;
+  if (previousMicros == 0)
+  {
+    motorSpeedPreviousMicros = presentMicros; // seed on the first pulse only
+    return;
+  }
   unsigned long revolutionTime = presentMicros - previousMicros;
   if (revolutionTime < 1000UL)
     return;
   dutyCycleMotor = (60000000UL / revolutionTime) / 60;
-  previousMicros = presentMicros;
+  motorSpeedPreviousMicros = presentMicros;
   lastPulseRPM = millis();
 }
 

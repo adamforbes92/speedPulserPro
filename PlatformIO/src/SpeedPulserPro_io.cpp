@@ -52,13 +52,20 @@ void basicInit()
   DEBUG_IO("Set up PWM (LEDC)!");
 
   DEBUG_IO("Setting up Speed Interrupt...");
+  // INPUT_PULLUP holds a disconnected/idle input steady so stray noise can't fake pulses.
+  pinMode(pinGearboxHall, INPUT_PULLUP);
+  pinMode(pinEngineRPMInput, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(pinGearboxHall), incomingHz, FALLING);
   attachInterrupt(digitalPinToInterrupt(pinEngineRPMInput), incomingMotorSpeed, FALLING);
   DEBUG_IO("Set up Speed Interrupt!");
 
   // Motor tacho feedback for the closed-loop PID.
+  // INPUT_PULLUP (not plain INPUT): on a legacy PCB with no feedback trace the pin
+  // floats and picks up noise, faking a tacho signal that latches feedbackAvailable
+  // and lets the PID wind up and peg the motor to full scale. The pull-up holds a
+  // disconnected pin steady so feedback stays correctly "missing" (open-loop, UI N/A).
   DEBUG_IO("Setting up Feedback Interrupt (GPIO%d)...", pinMotorFeedback);
-  pinMode(pinMotorFeedback, INPUT);
+  pinMode(pinMotorFeedback, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(pinMotorFeedback), feedbackPulse, FALLING);
   DEBUG_IO("Set up Feedback Interrupt!");
 
