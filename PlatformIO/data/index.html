@@ -9,12 +9,12 @@
     <meta http-equiv="Expires" content="0">
 
     <title>SpeedPulserPro</title>
-    <link rel="stylesheet" href="style.css?v=2.50">
+    <link rel="stylesheet" href="style.css?v=speedpulserpro-4.01.0">
 </head>
 
 <body>
     <div class="container">
-        <header>
+        <header class="topbar">
             <h1>SpeedPulserPro</h1>
             <div class="status-bar">
                 <span class="status-badge" id="canStatus">CAN: --</span>
@@ -97,6 +97,12 @@
                     </div>
                 </div>
             </section>
+
+            <section class="card">
+                <h2>Display Options</h2>
+                <p class="hint">Choose which readouts show as dial gauges instead of numbers. Saved in this browser.</p>
+                <div class="tile-opt-grid" id="gaugeCustomizer"></div>
+            </section>
         </div>
 
         <div class="page" id="configuration-page">
@@ -156,6 +162,11 @@
                     <input type="range" id="maxFreqHall" min="10" max="500" step="5" value="200" class="slider">
                 </div>
                 <button class="btn-secondary" id="resetMaxFreqHall">Reset Hall Frequency</button>
+                <div class="input-group">
+                    <label>Maximum VR Frequency (Hz): <span id="maxFreqVR-display">200</span></label>
+                    <input type="range" id="maxFreqVR" min="10" max="500" step="5" value="200" class="slider">
+                    <p class="hint">Variable-reluctance input frequency (Hz) that maps to Maximum Speed — the VR equivalent of the Hall setting.</p>
+                </div>
             </section>
 
             <section class="card">
@@ -276,6 +287,79 @@
                     </div>
                 </div>
             </section>
+
+            <section class="card" id="voltageControlCard" style="display:none;">
+                <h2>Motor Voltage Control (V4)</h2>
+                <p style="margin-top:0;">
+                    V4 boards drive the motor through a buck converter (voltage rail) plus a PWM
+                    "throttle". Mid-ranging holds the throttle near its nominal duty and trims the
+                    buck voltage so the motor tracks the target speed with maximum torque headroom.
+                </p>
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="voltageControlEnable">
+                        Enable Voltage Control (mid-ranging)
+                    </label>
+                    <p style="margin:0.25rem 0 0;font-size:0.85rem;opacity:0.8;">
+                        When off, the buck rail is held at maximum and the motor is driven by PWM only
+                        (legacy behaviour).
+                    </p>
+                </div>
+                <div class="input-group">
+                    <label>Nominal Throttle PWM: <span id="vcPwmNominal-display">0.70</span></label>
+                    <input type="range" id="vcPwmNominal" min="0.30" max="0.95" step="0.01" value="0.70" class="slider">
+                </div>
+                <div class="input-group">
+                    <label>Min Throttle PWM: <span id="vcPwmMin-display">0.15</span></label>
+                    <input type="range" id="vcPwmMin" min="0" max="0.50" step="0.01" value="0.15" class="slider">
+                </div>
+                <div class="input-group">
+                    <label>Min Motor Voltage: <span id="vcVoltMin-display">0.15</span></label>
+                    <input type="range" id="vcVoltMin" min="0" max="1" step="0.01" value="0.15" class="slider">
+                </div>
+                <div class="input-group">
+                    <label>Max Motor Voltage: <span id="vcVoltMax-display">1.00</span></label>
+                    <input type="range" id="vcVoltMax" min="0" max="1" step="0.01" value="1.00" class="slider">
+                </div>
+                <div class="input-group">
+                    <label>Voltage Trim Gain (Kv): <span id="vcVoltGain-display">0.50</span></label>
+                    <input type="range" id="vcVoltGain" min="0" max="2" step="0.05" value="0.50" class="slider">
+                </div>
+                <div class="input-group">
+                    <label>Inner PID Kp</label>
+                    <input type="number" id="vcKp" min="0" max="10" step="0.01" value="1.50">
+                </div>
+                <div class="input-group">
+                    <label>Inner PID Ki</label>
+                    <input type="number" id="vcKi" min="0" max="20" step="0.01" value="2.00">
+                </div>
+                <div class="input-group">
+                    <label>Inner PID Kd</label>
+                    <input type="number" id="vcKd" min="0" max="10" step="0.01" value="0.00">
+                </div>
+                <div class="input-group">
+                    <label>Cal Voltage (manual 0-1): <span id="tempVoltageCmd-display">0.00</span></label>
+                    <input type="range" id="tempVoltageCmd" min="0" max="1" step="0.01" value="0" class="slider">
+                    <p style="margin:0.25rem 0 0;font-size:0.85rem;opacity:0.8;">
+                        Used in Calibration Mode to lift the motor rail while jogging PWM duty.
+                    </p>
+                </div>
+                <div class="live-data-grid" style="margin-top:1rem;">
+                    <div class="live-data-item">
+                        <div class="live-data-label">Buck</div>
+                        <div class="live-data-value" id="liveBuckEnabled">--</div>
+                    </div>
+                    <div class="live-data-item">
+                        <div class="live-data-label">Motor Voltage</div>
+                        <div class="live-data-value" id="liveVoltageCmd">--</div>
+                    </div>
+                    <div class="live-data-item">
+                        <div class="live-data-label">Throttle PWM</div>
+                        <div class="live-data-value" id="livePwmFrac">--</div>
+                    </div>
+                </div>
+            </section>
+
             <section class="card">
                 <h2>Broadcast Speed</h2>
                 <div class="form-group">
@@ -366,6 +450,10 @@
                     <label>RPM Filter Samples (1-10): <span id="averageFilterRPM-display">6</span></label>
                     <input type="range" id="averageFilterRPM" min="1" max="10" value="6" class="slider">
                 </div>
+                <div class="input-group">
+                    <label>VR Speed Filter Samples (1-10): <span id="averageFilterVR-display">6</span></label>
+                    <input type="range" id="averageFilterVR" min="1" max="10" value="6" class="slider">
+                </div>
             </section>
 
             <section class="card">
@@ -395,6 +483,7 @@
                     <label>Primary Speed Input</label>
                     <select id="speedSource">
                         <option value="Hall">Hall</option>
+                        <option value="VR">VR (Variable Reluctance)</option>
                         <option value="ECU">ECU</option>
                         <option value="ABS">ABS</option>
                         <option value="DSG">DSG</option>
@@ -438,6 +527,51 @@
                 <div class="live-data-item" style="margin-top: 1rem;">
                     <div class="live-data-label">Parsed Custom CAN Speed</div>
                     <div class="live-data-value" id="liveAftermarketSpeedCard">--</div>
+                </div>
+            </section>
+
+            <section class="card" id="dsgCalcCard" style="display:none;">
+                <h2>DSG Speed Calculation</h2>
+                <p class="hint">Speed = RPM &times; tire circumference &divide; (gear ratio &times; final drive &times; 60). Defaults are DQ250 02E ratios.</p>
+                <div class="input-group">
+                    <label>1st Gear Ratio</label>
+                    <input type="number" id="dsgRatio1" step="0.001" min="0.05" value="3.462">
+                </div>
+                <div class="input-group">
+                    <label>2nd Gear Ratio</label>
+                    <input type="number" id="dsgRatio2" step="0.001" min="0.05" value="2.050">
+                </div>
+                <div class="input-group">
+                    <label>3rd Gear Ratio</label>
+                    <input type="number" id="dsgRatio3" step="0.001" min="0.05" value="1.300">
+                </div>
+                <div class="input-group">
+                    <label>4th Gear Ratio</label>
+                    <input type="number" id="dsgRatio4" step="0.001" min="0.05" value="0.902">
+                </div>
+                <div class="input-group">
+                    <label>5th Gear Ratio</label>
+                    <input type="number" id="dsgRatio5" step="0.001" min="0.05" value="0.914">
+                </div>
+                <div class="input-group">
+                    <label>6th Gear Ratio</label>
+                    <input type="number" id="dsgRatio6" step="0.001" min="0.05" value="0.756">
+                </div>
+                <div class="input-group">
+                    <label>Final Drive (Gears 1-4)</label>
+                    <input type="number" id="dsgFinal14" step="0.001" min="0.05" value="4.118">
+                </div>
+                <div class="input-group">
+                    <label>Final Drive (Gears 5-6)</label>
+                    <input type="number" id="dsgFinal56" step="0.001" min="0.05" value="3.043">
+                </div>
+                <div class="input-group">
+                    <label>Tire Circumference (m)</label>
+                    <input type="number" id="dsgTireCirc" step="0.001" min="0.5" max="4" value="1.885">
+                </div>
+                <div class="live-data-item" style="margin-top: 1rem;">
+                    <div class="live-data-label">Calculated DSG Speed</div>
+                    <div class="live-data-value" id="liveDSGSpeedCard">--</div>
                 </div>
             </section>
 
@@ -568,6 +702,10 @@
                         <div class="live-data-value" id="liveHallSpeed">--</div>
                     </div>
                     <div class="live-data-item">
+                        <div class="live-data-label">VR Speed</div>
+                        <div class="live-data-value" id="liveVRSpeed">--</div>
+                    </div>
+                    <div class="live-data-item">
                         <div class="live-data-label">ECU Speed</div>
                         <div class="live-data-value" id="liveECUSpeed">--</div>
                     </div>
@@ -655,30 +793,32 @@
             <section class="card centered-card">
                 <h2>OTA Update</h2>
                 <div class="info-box" style="margin-bottom:1rem">
-                    <p><strong>Firmware</strong> updates the application (compiled <strong>firmware.bin</strong>).</p>
-                    <p><strong>Filesystem</strong> updates the web interface (<strong>littlefs.bin</strong>).</p>
-                    <p>The device reboots automatically once the upload completes.</p>
+                    <p>Update the <strong>Filesystem</strong> (web UI, <strong>littlefs.bin</strong>) first, then the
+                       <strong>Firmware</strong> (application, <strong>firmware.bin</strong>).</p>
+                    <p>The filesystem step does <strong>not</strong> reboot; the device reboots only after the firmware step.</p>
+                </div>
+                <div class="ota-steps" id="otaSteps">
+                    <div class="ota-step" data-step="filesystem"><span class="ota-step-num">1</span> Filesystem</div>
+                    <div class="ota-step" data-step="firmware"><span class="ota-step-num">2</span> Firmware</div>
                 </div>
                 <div class="input-group">
                     <label>Update Type</label>
                     <select id="otaType">
-                        <option value="firmware">Firmware (application)</option>
                         <option value="filesystem">Filesystem (web UI)</option>
+                        <option value="firmware">Firmware (application)</option>
                     </select>
                 </div>
-                <div class="ota-upload-area" id="otaDropZone">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-                    <p>Drag &amp; drop a <strong>.bin</strong> file here, or</p>
-                    <button class="btn-secondary" id="otaChooseBtn" type="button">Choose File</button>
+                <div class="input-group">
+                    <label>Firmware file (.bin)</label>
+                    <input type="file" id="otaFile" accept=".bin">
                     <p id="otaFileName" class="ota-file-name"></p>
-                    <input type="file" id="otaFile" accept=".bin" style="display:none">
                 </div>
                 <div class="ota-progress" id="otaProgressWrap" style="display:none">
                     <div class="ota-progress-bar" id="otaProgressBar"></div>
                     <div class="ota-progress-label" id="otaProgressLabel">0%</div>
                 </div>
                 <div class="button-group" style="margin-top:1rem">
-                    <button class="btn-primary" id="otaUploadBtn" disabled>Upload Firmware</button>
+                    <button class="btn-primary" id="otaUploadBtn" disabled>Upload</button>
                 </div>
                 <div class="ota-status" id="otaStatus"></div>
             </section>
@@ -687,7 +827,7 @@
 
     </div>
 
-    <script src="app.js?v=2.50"></script>
+    <script src="app.js?v=speedpulserpro-4.01.0"></script>
 </body>
 
 </html>

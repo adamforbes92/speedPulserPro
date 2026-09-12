@@ -31,6 +31,7 @@
 #define SPEED_OFFSET_CURVE_POINTS 5
 extern RunningMedian samples;
 extern RunningMedian samplesRPM;
+extern RunningMedian samplesVR;
 extern HardwareSerial ss;
 extern TinyGPSPlus gps;
 extern Preferences pref;
@@ -48,6 +49,7 @@ extern long dutyCycle;
 extern int pwmResolution;
 extern unsigned long dutyCycleIncoming;
 extern unsigned long dutyCycleMotor;
+extern volatile unsigned long dutyCycleIncomingVR; // VR input frequency (Hz), written in ISR
 extern uint16_t appliedDutyCycle; // last duty value written to the motor (for the live curve marker)
 
 // Motor direction: false = normal (pinMotorDirection LOW), true = reverse (HIGH)
@@ -83,7 +85,9 @@ extern uint16_t vehicleSpeed;
 extern uint16_t vehicleSpeedHall;
 extern uint16_t vehicleSpeedCAN;
 extern uint16_t vehicleSpeedGPS;
+extern uint16_t vehicleSpeedVR;
 extern uint16_t hallSpeed;
+extern uint16_t vrSpeed;
 extern uint16_t ecuSpeed;
 extern uint16_t dsgSpeed;
 extern uint16_t gpsSpeed;
@@ -99,6 +103,7 @@ extern bool updateMotorPerformance;
 extern uint8_t motorPerformanceVal;
 extern uint16_t maxFreqHall;
 extern uint16_t maxFreqCAN;
+extern uint16_t maxFreqVR;
 extern uint16_t maxSpeed;
 extern uint16_t maxRPM;
 extern uint16_t clusterRPMLimit;
@@ -116,6 +121,7 @@ extern float stepRPM;
 extern float stepSpeed;
 extern uint8_t averageFilterHall;
 extern uint8_t averageFilterRPM;
+extern uint8_t averageFilterVR;
 extern uint16_t filteredRPM;
 
 // ============================================================================
@@ -153,6 +159,7 @@ extern uint8_t speedType;
 // Speed Input Selection
 // ============================================================================
 extern bool useHall;                      // true = Hall sensor
+extern bool useVR;                        // true = variable-reluctance (VR) sensor
 extern bool useDSG;                       // true = DSG speed
 extern bool useGPS;                       // true = GPS speed
 extern bool useABS;                       // true = ABS speed
@@ -179,6 +186,10 @@ extern uint8_t gear;
 extern uint8_t lever;
 extern uint8_t gear_raw;
 extern uint8_t lever_raw;
+extern float dsgGearRatio[7];  // adjustable gear ratios, index 1..6 (DQ250 defaults)
+extern float dsgFinalDrive14;  // final drive for gears 1-4
+extern float dsgFinalDrive56;  // final drive for gears 5-6
+extern float dsgTireCirc;      // tire circumference in metres
 
 // ============================================================================
 // Vehicle Status Variables
@@ -196,6 +207,7 @@ extern uint32_t lastMillis2;
 extern uint32_t lastCAN;
 extern unsigned long lastPulse;
 extern unsigned long lastPulseRPM;
+extern volatile unsigned long lastPulseVR;
 
 // ============================================================================
 // SavvyCAN / Analyser Variables

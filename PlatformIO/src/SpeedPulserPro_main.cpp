@@ -13,6 +13,7 @@
 #include "SpeedPulserPro_tasks.h"
 #include "SpeedPulserPro_control.h"
 #include "SpeedPulserPro_savvycan.h"
+#include "SpeedPulserPro_voltage.h"
 #include "power_manager.h"
 
 // Forward declarations for main.cpp functions
@@ -27,10 +28,30 @@ void setup()
   Serial.setTimeout(10);
   DEBUG("SpeedPulser Pro booting  |  FW %s  |  debug=%d", FW_VERSION, enableDebug);
 
+  // Stop the motor drive IMMEDIATELY: pinMotorOutput floats at reset, so drive it
+  // low to prevent random motor movement on boot. Then sample the board-version
+  // strap (GPIO25) before anything else uses the pin.
+  pinMode(pinMotorOutput, OUTPUT);
+  digitalWrite(pinMotorOutput, LOW);
+  detectBoardVersion();
+
   basicInit();        // Initialize hardware, interrupts, CAN, GPS, etc. (also readEEP)
   setupTimer();       // Set up hardware timer for RPM output
   calBuilderInit();   // Load any user (SpeedPulser) custom calibration from NVS
   updateMotorArray(); // Load motor calibration data into array for quick lookup
+
+  // V4 board only: bring up the adjustable motor supply. The buck must be enabled
+  // for the motor to have any voltage, so enable it regardless of the control mode —
+  // starting at the minimum (safe) rail with the motor PWM already off.
+  initVoltageControl();
+  if (boardHasVoltageControl)
+  {
+    enableBuck();
+    if (!voltageControlEnable)
+    {
+      setMotorVoltageCmd(vcVoltMax); // legacy PWM behaviour: hold full motor volts
+    }
+  }
 
   if (hasNeedleSweep)
   {

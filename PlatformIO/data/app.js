@@ -8,6 +8,7 @@ function initApp() {
   initNavigation();
   initControls();
   initOta();
+  initGaugeUI();
   initCalBuilder();
   fetchCalibrations().then(fetchSettings).then(refreshCalState).then(fetchCalCurve);  // list, settings, cal builder state, then the curve
   fetchStatus();    // Initial status fetch
@@ -201,6 +202,7 @@ function initControls() {
     'motorCalibration',
     'maxSpeed',
     'maxFreqHall',
+    'maxFreqVR',
     'useGlobalSpeedOffset',
     'speedOffsetPositive',
     'speedOffset'
@@ -296,7 +298,7 @@ function initControls() {
     }
   });
 
-  const filterInputs = ['averageFilterHall', 'averageFilterRPM'];
+  const filterInputs = ['averageFilterHall', 'averageFilterRPM', 'averageFilterVR'];
   filterInputs.forEach(id => {
     const el = document.getElementById(id);
     if (!el) {
@@ -325,7 +327,9 @@ function initControls() {
     'broadcastSpeedData0', 'broadcastSpeedData1', 'broadcastSpeedData2', 'broadcastSpeedData3',
     'broadcastSpeedData4', 'broadcastSpeedData5', 'broadcastSpeedData6', 'broadcastSpeedData7',
     'aftermarketSpeedID', 'aftermarketSpeedLowByte', 'aftermarketSpeedHighByte',
-    'aftermarketSpeedLittleEndian', 'aftermarketSpeedScale', 'aftermarketSpeedOffset'
+    'aftermarketSpeedLittleEndian', 'aftermarketSpeedScale', 'aftermarketSpeedOffset',
+    'dsgRatio1', 'dsgRatio2', 'dsgRatio3', 'dsgRatio4', 'dsgRatio5', 'dsgRatio6',
+    'dsgFinal14', 'dsgFinal56', 'dsgTireCirc'
   ];
   advancedInputs.forEach(id => {
     const el = document.getElementById(id);
@@ -386,6 +390,10 @@ function initControls() {
     const card = document.getElementById('customCANInputCard');
     if (card && speedSourceEl) {
       card.style.display = speedSourceEl.value === 'Custom CAN' ? '' : 'none';
+    }
+    const dsgCard = document.getElementById('dsgCalcCard');
+    if (dsgCard && speedSourceEl) {
+      dsgCard.style.display = speedSourceEl.value === 'DSG' ? '' : 'none';
     }
   }
   if (speedSourceEl) {
@@ -456,6 +464,29 @@ function initControls() {
     });
   }
 
+  // Motor Voltage Control (V4 boards). Range sliders update their -display span
+  // live and push on input; the enable checkbox and PID number fields push on
+  // change. Keys mirror the firmware settings handler exactly.
+  const voltageControlEnableEl = document.getElementById('voltageControlEnable');
+  if (voltageControlEnableEl) {
+    voltageControlEnableEl.addEventListener('change', () => {
+      pushControl('voltageControlEnable', voltageControlEnableEl.checked);
+    });
+  }
+  ['vcPwmNominal', 'vcPwmMin', 'vcVoltMin', 'vcVoltMax', 'vcVoltGain', 'tempVoltageCmd'].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('input', () => {
+      const displayEl = document.getElementById(id + '-display');
+      if (displayEl) displayEl.textContent = el.value;
+      pushControl(id, el.value);
+    });
+  });
+  ['vcKp', 'vcKi', 'vcKd'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('change', () => pushControl(id, el.value));
+  });
+
   initCollapsibleCards();
 }
 
@@ -485,13 +516,12 @@ function initOta() {
   const progressBar  = document.getElementById('otaProgressBar');
   const progressLbl  = document.getElementById('otaProgressLabel');
   const statusEl     = document.getElementById('otaStatus');
-  const chooseBtn    = document.getElementById('otaChooseBtn');
   const typeSelect   = document.getElementById('otaType');
 
-  if (!dropZone) return;
+  if (!fileInput || !uploadBtn) return;
 
-  // Populate the Firmware Info card from the shared /api/version endpoint.
-  fetch('/api/version')
+  // Populate the Firmware Info card from the common /api/ota/info endpoint.
+  fetch('/api/ota/info')
     .then((r) => r.json())
     .then((info) => {
       const set = (id, val) => {
@@ -508,44 +538,25 @@ function initOta() {
     return typeSelect && typeSelect.value === 'filesystem' ? 'filesystem' : 'firmware';
   }
 
-  function updateUploadLabel() {
-    uploadBtn.textContent = currentType() === 'filesystem' ? 'Upload Filesystem' : 'Upload Firmware';
-  }
-
+  // OTA sequence: resume on firmware after a filesystem upload; keep steps synced.
   if (typeSelect) {
-    typeSelect.addEventListener('change', updateUploadLabel);
-    updateUploadLabel();
+    const doneInit = otaLoadDone();
+    if (doneInit.includes('filesystem') && !doneInit.includes('firmware')) typeSelect.value = 'firmware';
+    typeSelect.addEventListener('change', renderOtaSteps);
   }
-
-  chooseBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    fileInput.click();
-  });
-
-  dropZone.addEventListener('dragover', (e) => {
-    e.preventDefault();
-    dropZone.classList.add('drag-over');
-  });
-  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
-  dropZone.addEventListener('drop', (e) => {
-    e.preventDefault();
-    dropZone.classList.remove('drag-over');
-    const file = e.dataTransfer.files[0];
-    if (file) selectFile(file);
-  });
+  renderOtaSteps();
 
   fileInput.addEventListener('change', () => {
     if (fileInput.files[0]) selectFile(fileInput.files[0]);
   });
 
   function selectFile(file) {
-    if (!file.name.endsWith('.bin')) {
+    if (!file.name.toLowerCase().endsWith('.bin')) {
       setOtaStatus('Please select a .bin file.', 'error');
       return;
     }
     fileInput._selectedFile = file;
-    fileNameEl.textContent = file.name + ' (' + (file.size / 1024).toFixed(1) + ' KB)';
-    dropZone.classList.add('file-selected');
+    if (fileNameEl) fileNameEl.textContent = file.name + ' (' + (file.size / 1024).toFixed(1) + ' KB)';
     uploadBtn.disabled = false;
     setOtaStatus('');
   }
@@ -572,9 +583,22 @@ function initOta() {
     xhr.addEventListener('load', () => {
       try {
         const resp = JSON.parse(xhr.responseText);
-        if (resp.status === 'ok') {
-          setOtaStatus(resp.message || 'Update complete. Device is rebooting...', 'success');
-          uploadBtn.disabled = true;
+        if (resp.success === true) {
+          otaMarkDone(uploadType);
+          if (uploadType === 'filesystem') {
+            // filesystem does not reboot — advance to the firmware step
+            if (typeSelect) typeSelect.value = 'firmware';
+            renderOtaSteps();
+            setOtaStatus('Filesystem updated. Now upload the firmware.', 'success');
+            resetProgress();
+            fileInput._selectedFile = null;
+            fileInput.value = '';
+            if (fileNameEl) fileNameEl.textContent = '';
+            uploadBtn.disabled = true;
+          } else {
+            setOtaStatus(resp.message || 'Update complete. Device is rebooting...', 'success');
+            uploadBtn.disabled = true;
+          }
         } else {
           setOtaStatus('Update failed: ' + (resp.message || 'Unknown error'), 'error');
           resetProgress();
@@ -596,7 +620,7 @@ function initOta() {
     uploadBtn.disabled = true;
     setOtaStatus('Uploading...');
 
-    xhr.open('POST', '/api/ota-update?mode=' + uploadType);
+    xhr.open('POST', uploadType === 'filesystem' ? '/api/ota/fs' : '/api/ota');
     xhr.send(formData);
   });
 
@@ -611,6 +635,151 @@ function initOta() {
     progressWrap.style.display = 'none';
     uploadBtn.disabled = false;
   }
+}
+
+// ---- OTA two-step sequence (filesystem first, then firmware) -------------
+const OTA_STEPS_KEY = 'oh_ota_steps';
+function otaLoadDone() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(OTA_STEPS_KEY) || '{}');
+    if (!raw.ts || Date.now() - raw.ts > 15 * 60 * 1000) return [];
+    return Array.isArray(raw.done) ? raw.done : [];
+  } catch (e) { return []; }
+}
+function otaSaveDone(done) {
+  localStorage.setItem(OTA_STEPS_KEY, JSON.stringify({ done, ts: Date.now() }));
+}
+function renderOtaSteps() {
+  const sel = document.getElementById('otaType');
+  const cur = sel ? sel.value : 'filesystem';
+  const done = otaLoadDone();
+  document.querySelectorAll('#otaSteps .ota-step').forEach((el) => {
+    const s = el.dataset.step;
+    el.classList.toggle('done', done.includes(s));
+    el.classList.toggle('active', s === cur && !done.includes(s));
+  });
+}
+function otaMarkDone(type) {
+  const done = otaLoadDone();
+  if (!done.includes(type)) done.push(type);
+  otaSaveDone(done);
+  renderOtaSteps();
+}
+
+/* =======================================================================
+   Per-tile dial gauges (ported from the OpenHaldex theme). RPM and the two
+   speed readouts can render as 270 degree dials, toggled in Display Options.
+   ======================================================================= */
+const GAUGE_TILES = [
+  { id: 'rpm', label: 'RPM (Final)', min: 0, max: 8000, unit: 'RPM' },
+  { id: 'speed', label: 'Speed (Final)', min: 0, max: 300, unit: 'km/h' },
+  { id: 'measuredSpeed', label: 'Measured Speed', min: 0, max: 300, unit: 'km/h' },
+];
+const TG_R = 40;
+const TG_CIRC = 2 * Math.PI * TG_R;
+const TG_ARC = TG_CIRC * 0.75;
+const TG_GAP = TG_CIRC - TG_ARC;
+const GAUGE_PREFS_KEY = 'speedPulserProGaugePrefs';
+const GAUGE_DEFAULTS = { tiles: ['rpm', 'speed', 'measuredSpeed'] };
+let gaugePrefs = loadGaugePrefs();
+
+function loadGaugePrefs() {
+  try {
+    const raw = localStorage.getItem(GAUGE_PREFS_KEY);
+    if (raw) {
+      const p = JSON.parse(raw);
+      return { tiles: Array.isArray(p.tiles) ? p.tiles : GAUGE_DEFAULTS.tiles.slice() };
+    }
+  } catch (e) { /* defaults */ }
+  return { tiles: GAUGE_DEFAULTS.tiles.slice() };
+}
+function saveGaugePrefs() {
+  try { localStorage.setItem(GAUGE_PREFS_KEY, JSON.stringify(gaugePrefs)); } catch (e) {}
+}
+function ensureTileGauge(tile) {
+  if (tile.querySelector('.tile-gauge')) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'tile-gauge';
+  wrap.innerHTML =
+    `<svg viewBox="0 0 100 100" aria-hidden="true">` +
+    `<circle class="tg-track" cx="50" cy="50" r="${TG_R}" transform="rotate(135 50 50)" ` +
+    `stroke-dasharray="${TG_ARC.toFixed(2)} ${TG_GAP.toFixed(2)}"/>` +
+    `<circle class="tg-fill" cx="50" cy="50" r="${TG_R}" transform="rotate(135 50 50)" ` +
+    `stroke-dasharray="0 ${TG_CIRC.toFixed(2)}"/>` +
+    `<text class="tg-val" x="50" y="52" text-anchor="middle">--</text>` +
+    `<text class="tg-unit" x="50" y="66" text-anchor="middle"></text>` +
+    `<text class="tg-min" x="24" y="92" text-anchor="middle">0</text>` +
+    `<text class="tg-max" x="76" y="92" text-anchor="middle">0</text>` +
+    `</svg>`;
+  tile.appendChild(wrap);
+}
+function applyGaugePrefs() {
+  GAUGE_TILES.forEach((t) => {
+    const el = document.getElementById(t.id);
+    if (!el) return;
+    const tile = el.closest('.gauge');
+    if (!tile) return;
+    ensureTileGauge(tile);
+    const on = gaugePrefs.tiles.includes(t.id);
+    tile.classList.toggle('as-gauge', on);
+    if (on) {
+      const unitEl = tile.querySelector('.tg-unit');
+      const srcUnit = tile.querySelector('.gauge-unit');
+      if (unitEl) unitEl.textContent = srcUnit ? srcUnit.textContent.trim() : t.unit;
+      const minEl = tile.querySelector('.tg-min');
+      const maxEl = tile.querySelector('.tg-max');
+      if (minEl) minEl.textContent = t.min;
+      if (maxEl) maxEl.textContent = t.max;
+    }
+  });
+}
+function updateTileGauges() {
+  GAUGE_TILES.forEach((t) => {
+    const el = document.getElementById(t.id);
+    if (!el) return;
+    const tile = el.closest('.gauge');
+    if (!tile || !tile.classList.contains('as-gauge')) return;
+    const raw = parseFloat(el.textContent);
+    const valEl = tile.querySelector('.tg-val');
+    const fillEl = tile.querySelector('.tg-fill');
+    if (!valEl || !fillEl) return;
+    const gaugeWrap = tile.querySelector('.tile-gauge');
+    if (gaugeWrap) gaugeWrap.classList.toggle('warn', el.style.color === 'orange');
+    if (Number.isNaN(raw)) {
+      valEl.textContent = '--';
+      fillEl.style.strokeDasharray = `0 ${TG_CIRC.toFixed(2)}`;
+      return;
+    }
+    valEl.textContent = el.textContent;
+    const frac = Math.max(0, Math.min(1, (raw - t.min) / (t.max - t.min || 1)));
+    fillEl.style.strokeDasharray = `${(TG_ARC * frac).toFixed(2)} ${TG_CIRC.toFixed(2)}`;
+  });
+}
+function initGaugeUI() {
+  const host = document.getElementById('gaugeCustomizer');
+  if (host) {
+    host.innerHTML = '';
+    GAUGE_TILES.forEach((t) => {
+      const label = document.createElement('label');
+      label.className = 'tile-opt';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = gaugePrefs.tiles.includes(t.id);
+      cb.addEventListener('change', () => {
+        const set = new Set(gaugePrefs.tiles);
+        if (cb.checked) set.add(t.id); else set.delete(t.id);
+        gaugePrefs.tiles = [...set];
+        saveGaugePrefs();
+        applyGaugePrefs();
+      });
+      const span = document.createElement('span');
+      span.textContent = t.label;
+      label.appendChild(cb);
+      label.appendChild(span);
+      host.appendChild(label);
+    });
+  }
+  applyGaugePrefs();
 }
 
 function applySpeedUnitLabels(useMPH) {
@@ -669,6 +838,11 @@ async function fetchSettings() {
     document.getElementById('maxSpeed-display').textContent = data.maxSpeed || 200;
     document.getElementById('maxFreqHall').value = data.maxFreqHall || 200;
     document.getElementById('maxFreqHall-display').textContent = data.maxFreqHall || 200;
+    const maxFreqVREl = document.getElementById('maxFreqVR');
+    if (maxFreqVREl) {
+      maxFreqVREl.value = data.maxFreqVR || 200;
+      document.getElementById('maxFreqVR-display').textContent = data.maxFreqVR || 200;
+    }
     document.getElementById('useGlobalSpeedOffset').checked = data.useGlobalSpeedOffset !== false;
     document.getElementById('speedOffsetPositive').checked = data.speedOffsetPositive !== false;
     document.getElementById('speedOffset').value = data.speedOffset || 0;
@@ -694,6 +868,11 @@ async function fetchSettings() {
     document.getElementById('averageFilterHall-display').textContent = data.averageFilterHall || data.averageFilter || 6;
     document.getElementById('averageFilterRPM').value = data.averageFilterRPM || data.averageFilter || 6;
     document.getElementById('averageFilterRPM-display').textContent = data.averageFilterRPM || data.averageFilter || 6;
+    const averageFilterVREl = document.getElementById('averageFilterVR');
+    if (averageFilterVREl) {
+      averageFilterVREl.value = data.averageFilterVR || data.averageFilter || 6;
+      document.getElementById('averageFilterVR-display').textContent = data.averageFilterVR || data.averageFilter || 6;
+    }
     const gpsRateSelect = document.getElementById('gpsRateSelect');
     if (gpsRateSelect) {
       const savedGpsRate = String(data.gpsUpdateRateHz ?? 1);
@@ -754,7 +933,8 @@ async function fetchSettings() {
 
     // Speed type dropdown - map speedType to dropdown options
     let speedTypeValue = 'Hall';  // default
-    if (data.speedType === 'ECU') speedTypeValue = 'ECU';
+    if (data.speedType === 'VR') speedTypeValue = 'VR';
+    else if (data.speedType === 'ECU') speedTypeValue = 'ECU';
     else if (data.speedType === 'ABS') speedTypeValue = 'ABS';
     else if (data.speedType === 'DSG') speedTypeValue = 'DSG';
     else if (data.speedType === 'TP2.0') speedTypeValue = 'TP2.0';
@@ -764,6 +944,8 @@ async function fetchSettings() {
     document.getElementById('speedSource').value = speedTypeValue;
     const customCANCard = document.getElementById('customCANInputCard');
     if (customCANCard) customCANCard.style.display = speedTypeValue === 'Custom CAN' ? '' : 'none';
+    const dsgCalcCard = document.getElementById('dsgCalcCard');
+    if (dsgCalcCard) dsgCalcCard.style.display = speedTypeValue === 'DSG' ? '' : 'none';
 
     // Aftermarket / Custom CAN input settings
     document.getElementById('aftermarketSpeedID').value = (data.aftermarketSpeedID || 0).toString(16).toUpperCase();
@@ -773,8 +955,41 @@ async function fetchSettings() {
     document.getElementById('aftermarketSpeedScale').value = (data.aftermarketSpeedScale ?? 1.0).toFixed(3);
     document.getElementById('aftermarketSpeedOffset').value = data.aftermarketSpeedOffset ?? 0;
 
+    // DSG speed calculation settings
+    const dsgDefaults = { dsgRatio1: 3.462, dsgRatio2: 2.050, dsgRatio3: 1.300, dsgRatio4: 0.902, dsgRatio5: 0.914, dsgRatio6: 0.756, dsgFinal14: 4.118, dsgFinal56: 3.043, dsgTireCirc: 1.885 };
+    Object.keys(dsgDefaults).forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.value = Number(data[id] ?? dsgDefaults[id]).toFixed(3);
+    });
+
     // RPM source dropdown
     document.getElementById('rpmSource').value = (data.rpmType === 'CAN') ? 'CAN' : 'Hall';
+
+    // Motor Voltage Control (V4). The card is only shown when the board reports
+    // voltage-control hardware; values are seeded from the firmware defaults.
+    const voltageCard = document.getElementById('voltageControlCard');
+    if (voltageCard) {
+      voltageCard.style.display = data.boardHasVoltageControl ? '' : 'none';
+    }
+    const setVc = (id, val, digits) => {
+      const el = document.getElementById(id);
+      if (!el || val === undefined || val === null) return;
+      const num = Number(val);
+      el.value = (el.type === 'range' && digits !== undefined && Number.isFinite(num))
+        ? num.toFixed(digits) : val;
+      const disp = document.getElementById(id + '-display');
+      if (disp) disp.textContent = Number.isFinite(num) && digits !== undefined ? num.toFixed(digits) : val;
+    };
+    const vcEnableEl = document.getElementById('voltageControlEnable');
+    if (vcEnableEl) vcEnableEl.checked = !!data.voltageControlEnable;
+    setVc('vcPwmNominal', data.vcPwmNominal, 2);
+    setVc('vcPwmMin', data.vcPwmMin, 2);
+    setVc('vcVoltMin', data.vcVoltMin, 2);
+    setVc('vcVoltMax', data.vcVoltMax, 2);
+    setVc('vcVoltGain', data.vcVoltGain, 2);
+    setVc('vcKp', data.vcKp);
+    setVc('vcKi', data.vcKi);
+    setVc('vcKd', data.vcKd);
 
     settingsLoaded = true;
   } catch (error) {
@@ -831,6 +1046,9 @@ async function fetchStatus() {
     if (document.getElementById('liveHallSpeed')) {
       document.getElementById('liveHallSpeed').textContent = data.hallSpeed || '--';
     }
+    if (document.getElementById('liveVRSpeed')) {
+      document.getElementById('liveVRSpeed').textContent = data.vrSpeed || '--';
+    }
     if (document.getElementById('liveECUSpeed')) {
       document.getElementById('liveECUSpeed').textContent = data.ecuSpeed || '--';
     }
@@ -839,6 +1057,9 @@ async function fetchStatus() {
     }
     if (document.getElementById('liveDSGSpeed')) {
       document.getElementById('liveDSGSpeed').textContent = data.dsgSpeed || '--';
+    }
+    if (document.getElementById('liveDSGSpeedCard')) {
+      document.getElementById('liveDSGSpeedCard').textContent = data.dsgSpeed !== undefined ? data.dsgSpeed : '--';
     }
     if (document.getElementById('liveTP20Speed')) {
       document.getElementById('liveTP20Speed').textContent = data.tp20Speed !== undefined ? data.tp20Speed : '--';
@@ -906,6 +1127,7 @@ async function fetchStatus() {
     broadcastEl.textContent = data.broadcastSpeedEnabled ? 'Broadcast: ✓' : 'Broadcast: ✗';
     broadcastEl.classList.remove('connected', 'error');
     document.getElementById('canPresent').textContent = data.hasCAN ? 'Healthy' : 'Not Healthy';
+    document.getElementById('canPresent').className = 'status-value pill ' + (data.hasCAN ? 'ok' : 'bad');
 
     if (document.getElementById('liveBroadcastSpeedValue')) {
       const suffix = data.broadcastSpeedEnabled ? '' : ' (disabled)';
@@ -914,17 +1136,24 @@ async function fetchStatus() {
     
     // GPS status in dashboard
     if (document.getElementById('gpsPresent')) {
+      const gpsPresentEl = document.getElementById('gpsPresent');
       if (data.hasGPS) {
-        document.getElementById('gpsPresent').textContent = `Connected (${data.gpsSatellites} sats)`;
+        gpsPresentEl.textContent = `Connected (${data.gpsSatellites} sats)`;
+        gpsPresentEl.className = 'status-value pill ' + (Number(data.gpsSatellites) > 0 ? 'ok' : 'warn');
       } else if (data.gpsUnavailable) {
-        document.getElementById('gpsPresent').textContent = 'Not Available';
+        gpsPresentEl.textContent = 'Not Available';
+        gpsPresentEl.className = 'status-value pill bad';
       } else {
-        document.getElementById('gpsPresent').textContent = 'Not Connected';
+        gpsPresentEl.textContent = 'Not Connected';
+        gpsPresentEl.className = 'status-value pill bad';
       }
     }
 
     // Closed-loop feedback (PID) live status
     updateFeedbackStatus(data);
+
+    // Motor Voltage Control (V4) live status
+    updateVoltageStatus(data);
 
     // Diagnostics: colour the active outputs and the input driving them.
     updateDiagHighlights(data);
@@ -938,9 +1167,31 @@ async function fetchStatus() {
       setCalCurrentPoint(data.appliedDutyCycle, data.vehicleSpeed);
     }
 
+    updateTileGauges();
+
   } catch (error) {
     console.log('Error fetching status:', error);
   }
+}
+
+function updateVoltageStatus(data) {
+  const setTxt = (id, txt) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = txt;
+  };
+  const pct = (v) => (typeof v === 'number' && Number.isFinite(v))
+    ? Math.round(v * 100) + '%' : '--';
+
+  const buckEl = document.getElementById('liveBuckEnabled');
+  if (buckEl) {
+    if (!data.boardHasVoltageControl) {
+      buckEl.textContent = 'N/A';
+    } else {
+      buckEl.textContent = data.buckEnabled ? 'On' : 'Off';
+    }
+  }
+  setTxt('liveVoltageCmd', data.boardHasVoltageControl ? pct(data.voltageCmd) : 'N/A');
+  setTxt('livePwmFrac', data.boardHasVoltageControl ? pct(data.pwmFrac) : 'N/A');
 }
 
 function updateFeedbackStatus(data) {
@@ -993,7 +1244,7 @@ function updateFeedbackStatus(data) {
 // together with the input actually feeding them (or nothing extra in Test Mode).
 function updateDiagHighlights(data) {
   const speedSourceMap = {
-    'Hall': 'liveHallSpeed', 'ECU': 'liveECUSpeed', 'ABS': 'liveABSSpeed',
+    'Hall': 'liveHallSpeed', 'VR': 'liveVRSpeed', 'ECU': 'liveECUSpeed', 'ABS': 'liveABSSpeed',
     'DSG': 'liveDSGSpeed', 'TP2.0': 'liveTP20Speed', 'UDS': 'liveUDSSpeed',
     'GPS': 'liveGPSSpeed', 'Custom CAN': 'liveAftermarketSpeed'
   };
@@ -1006,7 +1257,7 @@ function updateDiagHighlights(data) {
 
   // Clear every candidate first so stale highlights don't linger.
   ['liveSpeed', 'liveRPM', 'liveHallRPM', 'liveCANRPM',
-    'liveHallSpeed', 'liveECUSpeed', 'liveABSSpeed', 'liveDSGSpeed',
+    'liveHallSpeed', 'liveVRSpeed', 'liveECUSpeed', 'liveABSSpeed', 'liveDSGSpeed',
     'liveTP20Speed', 'liveUDSSpeed', 'liveGPSSpeed', 'liveAftermarketSpeed']
     .forEach(id => setActive(id, false));
 

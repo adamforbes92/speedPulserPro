@@ -15,6 +15,7 @@ uint8_t analyzerProtocol = ANALYZER_PROTOCOL_GVRET;
 // LEDC PWM is configured via driver/ledc.h - no object needed
 RunningMedian samples = RunningMedian(10); // for median filtering of speed input (Hall)
 RunningMedian samplesRPM = RunningMedian(10); // for median filtering of RPM input
+RunningMedian samplesVR = RunningMedian(10); // for median filtering of speed input (VR)
 HardwareSerial ss(2);
 TinyGPSPlus gps;
 Preferences pref;
@@ -32,6 +33,7 @@ long dutyCycle = 0;
 int pwmResolution = 12;
 unsigned long dutyCycleIncoming = 0;
 unsigned long dutyCycleMotor = 0;
+volatile unsigned long dutyCycleIncomingVR = 0;
 uint16_t appliedDutyCycle = 0;
 
 // Motor direction: false = normal (pinMotorDirection LOW), true = reverse (HIGH)
@@ -66,7 +68,9 @@ uint16_t vehicleSpeed = 0;
 uint16_t vehicleSpeedHall = 0;
 uint16_t vehicleSpeedCAN = 0;
 uint16_t vehicleSpeedGPS = 0;
+uint16_t vehicleSpeedVR = 0;
 uint16_t hallSpeed = 0;
+uint16_t vrSpeed = 0;
 uint16_t ecuSpeed = 0;
 uint16_t dsgSpeed = 0;
 uint16_t gpsSpeed = 0;
@@ -82,6 +86,7 @@ bool updateMotorPerformance = false;
 uint8_t motorPerformanceVal = 1;
 uint16_t maxFreqHall = 200;
 uint16_t maxFreqCAN = 200;
+uint16_t maxFreqVR = 200;
 uint16_t maxSpeed = 200;
 uint16_t maxRPM = 230;
 uint16_t clusterRPMLimit = 7000;
@@ -99,6 +104,7 @@ float stepRPM = 14;
 float stepSpeed = 17;
 uint8_t averageFilterHall = DEFAULT_AVERAGE_FILTER_HALL;
 uint8_t averageFilterRPM = DEFAULT_AVERAGE_FILTER_RPM;
+uint8_t averageFilterVR = DEFAULT_AVERAGE_FILTER_HALL;
 uint16_t filteredRPM = 0;
 
 // ============================================================================
@@ -135,7 +141,8 @@ uint8_t speedType = 0;
 // ============================================================================
 // Speed Input Selection
 // ============================================================================
-bool useHall = false;
+bool useHall = true; // default source — matches the UI default and the first-run EEPROM write
+bool useVR = false;
 bool useDSG = false;
 bool useGPS = false;
 bool useABS = false;
@@ -160,6 +167,10 @@ uint8_t gear = 0;
 uint8_t lever = 0;
 uint8_t gear_raw = 0;
 uint8_t lever_raw = 0;
+float dsgGearRatio[7] = {1.0f, 3.462f, 2.050f, 1.300f, 0.902f, 0.914f, 0.756f}; // index 0 unused
+float dsgFinalDrive14 = 4.118f;
+float dsgFinalDrive56 = 3.043f;
+float dsgTireCirc = 1.885f; // PI * 0.6m rolling diameter
 
 // ============================================================================
 // Vehicle Status Variables
@@ -177,6 +188,7 @@ uint32_t lastMillis2 = 0;
 uint32_t lastCAN = 0;
 unsigned long lastPulse = 0;
 unsigned long lastPulseRPM = 0;
+volatile unsigned long lastPulseVR = 0;
 
 // ============================================================================
 // System Status Variables

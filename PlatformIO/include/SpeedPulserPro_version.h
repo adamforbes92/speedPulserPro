@@ -58,6 +58,17 @@ V3.04 - closed-loop feedback is now presence-aware and safer on legacy PCBs with
       - the gearbox hall input is now ignored while Speed Test or Calibration Mode is active, so an incoming hall signal can no longer disturb a test/cal (gated in the ISR).
       - PID steady-state accuracy improved: the deadband now only silences the P/D terms; the integral keeps trimming inside the band so the needle settles ON target instead of a fixed offset.
       - new user-configurable "PID Deadband (Hz)" slider (0-5 Hz, persisted) exposes that band; 0 = always full PID.
+
+V4.00 - voltage control + VR speed input (ported from SpeedPulser V4):
+      - V4 PCB adds an adjustable buck motor supply. A board-version strap (GPIO25, LOW = V4) auto-detects the new board so the same firmware still runs unchanged on legacy PWM-only boards. GPIO32 = buck enable, GPIO33 = V_ADJ PWM "DAC" (inverse-injected into the buck FB node, LEDC ch2/timer2).
+      - mid-ranging control law: a fast inner PID drives the throttle PWM to hit the target motor RPM (one-point tacho cal) while a slow integrator trims the buck voltage to keep the PWM near a nominal centre, so the motor rail self-schedules to the motor's non-linear curve with no multi-point calibration. Tunables (nominal/min PWM, min/max volts, Kv, Kp/Ki/Kd) are exposed and persisted.
+      - new variable-reluctance (VR) speed input on GPIO27 (VR conditioner C Out, external pull-up), counted on the FALLING edge exactly like the hall input with its own frequency->speed mapping (Max VR Freq), median filter (VR average) and live data. Selectable from the speed-source dropdown ("VR").
+      - NOTE: the (currently unused) coolant X9C103 pins were relocated off GPIO25/27 to GPIO4/5 to make room for the board-version strap and VR input.
+
+V4.01 - standardised Forbes Automotive UI theme (shared style.css);
+        adopted common wifi_manager (mDNS: can2rpm.local) and ota_manager
+        (firmware + filesystem OTA via /api/ota, /api/ota/fs); per-product
+        cache-busting on web assets
 */
 
 #endif // VERSION_H

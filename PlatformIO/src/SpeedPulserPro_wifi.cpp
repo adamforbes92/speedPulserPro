@@ -6,6 +6,7 @@
 #include "SpeedPulserPro_wifi.h"
 #include "power_manager.h"
 #include "ota_manager.h"
+#include "wifi_manager.h"
 #include "SpeedPulserPro_motorCal.h"
 #include "SpeedPulserPro_globals.h"
 #include "SpeedPulserPro_tasks.h"
@@ -13,6 +14,7 @@
 #include "SpeedPulserPro_gps.h"
 #include "SpeedPulserPro_savvycan.h"
 #include "SpeedPulserPro_calBuilder.h"
+#include "SpeedPulserPro_voltage.h"
 
 static uint32_t parseHexCanId(const String& text, uint32_t defaultVal) {
   String s = text;
@@ -80,6 +82,8 @@ void handleGetSettings(AsyncWebServerRequest *request)
   // Speed type mapping
   if (useHall)
     doc["speedType"] = "Hall";
+  else if (useVR)
+    doc["speedType"] = "VR";
   else if (useECU)
     doc["speedType"] = "ECU";
   else if (useABS)
@@ -104,6 +108,15 @@ void handleGetSettings(AsyncWebServerRequest *request)
   doc["aftermarketSpeedScale"] = aftermarketSpeedScale;
   doc["aftermarketSpeedOffset"] = aftermarketSpeedOffset;
 
+  // DSG speed calculation (RPM & gear -> speed)
+  for (uint8_t i = 1; i <= 6; i++) {
+    String rk = "dsgRatio" + String(i);
+    doc[rk] = dsgGearRatio[i];
+  }
+  doc["dsgFinal14"] = dsgFinalDrive14;
+  doc["dsgFinal56"] = dsgFinalDrive56;
+  doc["dsgTireCirc"] = dsgTireCirc;
+
   if (useRPMCAN)
     doc["rpmType"] = "CAN";
   else
@@ -123,6 +136,22 @@ void handleGetSettings(AsyncWebServerRequest *request)
   doc["feedbackMinSpeed"] = feedbackMinSpeed;
   doc["feedbackMaxFreq"] = feedbackMaxFreq;
 
+  // V4 buck voltage control
+  doc["boardHasVoltageControl"] = boardHasVoltageControl;
+  doc["voltageControlEnable"] = voltageControlEnable;
+  doc["vcPwmNominal"] = vcPwmNominal;
+  doc["vcPwmMin"] = vcPwmMin;
+  doc["vcVoltMin"] = vcVoltMin;
+  doc["vcVoltMax"] = vcVoltMax;
+  doc["vcVoltGain"] = vcVoltGain;
+  doc["vcKp"] = vcKp;
+  doc["vcKi"] = vcKi;
+  doc["vcKd"] = vcKd;
+
+  // VR (variable-reluctance) speed input
+  doc["maxFreqVR"] = maxFreqVR;
+  doc["averageFilterVR"] = averageFilterVR;
+
   doc["FW_VERSION"] = FW_VERSION;
 
   String response;
@@ -141,6 +170,8 @@ void handleGetStatus(AsyncWebServerRequest *request)
   doc["vehicleSpeed"] = vehicleSpeed;
   doc["hallSpeed"] = hallSpeed;
   doc["vehicleSpeedHall"] = vehicleSpeedHall;
+  doc["vrSpeed"] = vrSpeed;
+  doc["vehicleSpeedVR"] = vehicleSpeedVR;
   doc["ecuSpeed"] = ecuSpeed;
   doc["absSpeed"] = absSpeed;
   doc["dsgSpeed"] = dsgSpeed;
@@ -151,7 +182,8 @@ void handleGetStatus(AsyncWebServerRequest *request)
   // Active source identifiers so the Diagnostics live-data can highlight which
   // input is currently driving the Speed / RPM outputs.
   const char *activeSpeedSource = "Hall";
-  if (useECU) activeSpeedSource = "ECU";
+  if (useVR) activeSpeedSource = "VR";
+  else if (useECU) activeSpeedSource = "ECU";
   else if (useABS) activeSpeedSource = "ABS";
   else if (useDSG) activeSpeedSource = "DSG";
   else if (useTP20) activeSpeedSource = "TP2.0";
@@ -195,6 +227,14 @@ void handleGetStatus(AsyncWebServerRequest *request)
   doc["measuredFreqHz"] = measuredFreqHz;
   doc["feedbackAvailable"] = feedbackAvailable;
   doc["feedbackMissing"] = feedbackMissing;
+
+  // V4 buck voltage control (live)
+  doc["boardHasVoltageControl"] = boardHasVoltageControl;
+  doc["voltageControlEnable"] = voltageControlEnable;
+  doc["buckEnabled"] = buckEnabled;
+  doc["voltageCmd"] = lastVoltageCmd;   // 0..1 (1 = max motor volts)
+  doc["pwmFrac"] = lastPwmFrac;         // 0..1 throttle fraction
+  doc["tempVoltageCmd"] = tempVoltageCmd;
 
   String response;
   serializeJson(doc, response);
@@ -552,6 +592,33 @@ void handlePostControl(AsyncWebServerRequest *request, uint8_t *data, size_t len
     aftermarketSpeedOffset = (int16_t)constrain(value.toInt(), -32768, 32767);
   }
 
+  for (uint8_t i = 1; i <= 6; i++)
+  {
+    if (key == "dsgRatio" + String(i))
+    {
+      float v = value.toFloat();
+      if (v > 0.0f) dsgGearRatio[i] = v;
+    }
+  }
+
+  if (key == "dsgFinal14")
+  {
+    float v = value.toFloat();
+    if (v > 0.0f) dsgFinalDrive14 = v;
+  }
+
+  if (key == "dsgFinal56")
+  {
+    float v = value.toFloat();
+    if (v > 0.0f) dsgFinalDrive56 = v;
+  }
+
+  if (key == "dsgTireCirc")
+  {
+    float v = value.toFloat();
+    if (v > 0.0f) dsgTireCirc = v;
+  }
+
   if (key == "sweepSpeed")
   {
     sweepSpeed = value.toInt();
@@ -710,9 +777,23 @@ void handlePostControl(AsyncWebServerRequest *request, uint8_t *data, size_t len
   if (key == "speedType")
   {
     // Handle speed source selection
+    useVR = false; // cleared by default; only the VR branch re-enables it
     if (value == "Hall")
     {
       useHall = true;
+      useDSG = false;
+      useECU = false;
+      useABS = false;
+      useGPS = false;
+      useUDS = false;
+      useTP20 = false;
+      useAftermarket = false;
+    }
+
+    if (value == "VR")
+    {
+      useHall = false;
+      useVR = true;
       useDSG = false;
       useECU = false;
       useABS = false;
@@ -875,6 +956,77 @@ void handlePostControl(AsyncWebServerRequest *request, uint8_t *data, size_t len
     feedbackMaxFreq = (uint16_t)constrain(value.toInt(), 1, 2000);
   }
 
+  // ---- VR (variable-reluctance) speed input ----
+  if (key == "maxFreqVR")
+  {
+    maxFreqVR = value.toInt();
+  }
+
+  if (key == "averageFilterVR")
+  {
+    long requestedSamples = value.toInt();
+    averageFilterVR = (uint8_t)constrain(requestedSamples, 1, 10);
+    samplesVR.clear();
+  }
+
+  // ---- V4 buck voltage control ----
+  if (key == "voltageControlEnable")
+  {
+    voltageControlEnable = (value == "true" || value == "1");
+    // On a V4 board, disabling voltage control reverts to legacy PWM behaviour at
+    // full motor volts; the buck stays enabled so the rail is present.
+    if (boardHasVoltageControl && !voltageControlEnable)
+    {
+      setMotorVoltageCmd(vcVoltMax);
+    }
+  }
+
+  if (key == "vcPwmNominal")
+  {
+    vcPwmNominal = constrain(value.toFloat(), 0.0f, 1.0f);
+  }
+
+  if (key == "vcPwmMin")
+  {
+    vcPwmMin = constrain(value.toFloat(), 0.0f, 1.0f);
+  }
+
+  if (key == "vcVoltMin")
+  {
+    vcVoltMin = constrain(value.toFloat(), 0.0f, 1.0f);
+  }
+
+  if (key == "vcVoltMax")
+  {
+    vcVoltMax = constrain(value.toFloat(), 0.0f, 1.0f);
+  }
+
+  if (key == "vcVoltGain")
+  {
+    vcVoltGain = constrain(value.toFloat(), 0.0f, 5.0f);
+  }
+
+  if (key == "vcKp")
+  {
+    vcKp = constrain(value.toFloat(), 0.0f, 10.0f);
+  }
+
+  if (key == "vcKi")
+  {
+    vcKi = constrain(value.toFloat(), 0.0f, 20.0f);
+  }
+
+  if (key == "vcKd")
+  {
+    vcKd = constrain(value.toFloat(), 0.0f, 10.0f);
+  }
+
+  if (key == "tempVoltageCmd")
+  {
+    // 0..1 motor-voltage command applied live in calibration mode by the speed task.
+    tempVoltageCmd = constrain(value.toFloat(), 0.0f, 1.0f);
+  }
+
   request->send(200);
 }
 
@@ -949,10 +1101,7 @@ void setupUI()
     DEBUG_WIFI("LittleFS successfully mounted");
   }
 
-  // Serve static files from LittleFS
-  server.serveStatic("/", LittleFS, "/").setDefaultFile("index.html");
-  server.serveStatic("/style.css", LittleFS, "/style.css");
-  server.serveStatic("/app.js", LittleFS, "/app.js");
+  // Static files are served by wifiManagerAttachStatic() below (with cache-busting).
 
   // API routes for getting data
   server.on("/api/settings", HTTP_GET, handleGetSettings);
@@ -979,13 +1128,11 @@ void setupUI()
   server.on("/api/testSpeed", HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr, [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
             { handlePostTestSpeed(request, data, len, index, total); });
 
-  // OTA (firmware + LittleFS web UI) via the shared, project-agnostic module.
-  // Registers POST /api/ota-update?mode=firmware|filesystem and GET /api/version.
-  OtaInfo otaInfo;
-  otaInfo.version = FW_VERSION;
-  otaInfo.hardware = "ESP32";
-  otaInfo.board = "DOIT ESP32 DEVKIT V1";
-  otaBegin(server, otaInfo, (enableDebug && debugWifi));
+  // OTA (firmware + filesystem) via the common module: /api/ota, /api/ota/fs, /api/ota/info.
+  ota_config_t ocfg = otaDefaultConfig();
+  ocfg.fwVersion = FW_VERSION;
+  otaManagerInit(&ocfg);
+  otaManagerAttach(server);
 
     // New endpoint: Set GPS update rate
     server.on("/api/gpsRate", HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr, [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
@@ -1003,6 +1150,9 @@ void setupUI()
       request->send(ok ? 200 : 400, "application/json", response);
     });
 
+  // Static web UI with firmware cache-busting.
+  wifiManagerAttachStatic(server);
+
   // Catch-all for 404
   server.onNotFound([](AsyncWebServerRequest *request)
                     { request->send(404, "text/plain", "Not Found"); });
@@ -1017,13 +1167,14 @@ void setupUI()
 
 void connectWifi()
 {
-  WiFi.setHostname(wifiHostName);
   DEBUG_WIFI("Beginning WiFi / creating Access Point...");
 
-  WiFi.mode(WIFI_AP);
-  WiFi.setSleep(false);
-  WiFi.softAPConfig(IPAddress(192, 168, 1, 1), IPAddress(192, 168, 1, 1), IPAddress(255, 255, 255, 0));
-  WiFi.softAP(wifiHostName);
+  // Common SoftAP + mDNS + LittleFS front-end (reachable at speedpulserpro.local).
+  wifimgr_config_t wcfg = wifiDefaultConfig();
+  wcfg.hostName  = wifiHostName;
+  wcfg.mdnsName  = "speedpulserpro"; // -> http://speedpulserpro.local
+  wcfg.fwVersion = FW_VERSION;       // injected into index.html for cache-busting
+  wifiManagerInit(&wcfg);
 
 #if enableDebug && debugWifi
   DEBUG_WIFI("AP SSID: %s", wifiHostName);
@@ -1073,13 +1224,14 @@ void updateLabels()
 
 bool powerIsBusy()
 {
-  return WiFi.softAPgetStationNum() > 0;
+  return WiFi.softAPgetStationNum() > 0 || otaInProgress();
 }
 
 // ACTIVE -> REDUCED: close the web server cleanly before the radio drops.
 void powerOnEnterReduced()
 {
   server.end();
+  wifiManagerStopAP();
 }
 
 // REDUCED -> ACTIVE: bring the AP and web server back. Routes are already
@@ -1087,6 +1239,6 @@ void powerOnEnterReduced()
 // and the listener.
 void powerOnExitReduced()
 {
-  connectWifi();
+  wifiManagerStartAP();
   server.begin();
 }

@@ -1,5 +1,6 @@
 #include "SpeedPulserPro_eep.h"
 #include "SpeedPulserPro_control.h"
+#include "SpeedPulserPro_voltage.h"
 #include "SpeedPulserPro_gps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -163,6 +164,15 @@ void readEEP()
     pref.putFloat("amSpeedScale", aftermarketSpeedScale);
     pref.putShort("amSpeedOffset", aftermarketSpeedOffset);
 
+    for (uint8_t i = 1; i <= 6; i++)
+    {
+      String rk = "dsgRatio" + String(i);
+      pref.putFloat(rk.c_str(), dsgGearRatio[i]);
+    }
+    pref.putFloat("dsgFinal14", dsgFinalDrive14);
+    pref.putFloat("dsgFinal56", dsgFinalDrive56);
+    pref.putFloat("dsgTireCirc", dsgTireCirc);
+
     pref.putBool("reverseDir", reverseDirection);
 
     pref.putBool("fbEnable", feedbackEnable);
@@ -172,6 +182,22 @@ void readEEP()
     pref.putFloat("fbDeadband", feedbackDeadband);
     pref.putUShort("fbMinSpd", feedbackMinSpeed);
     pref.putUShort("fbMaxFreq", feedbackMaxFreq);
+
+    // V4 buck voltage control
+    pref.putBool("vcEnable", voltageControlEnable);
+    pref.putFloat("vcPwmNom", vcPwmNominal);
+    pref.putFloat("vcPwmMin", vcPwmMin);
+    pref.putFloat("vcVoltMin", vcVoltMin);
+    pref.putFloat("vcVoltMax", vcVoltMax);
+    pref.putFloat("vcVoltGain", vcVoltGain);
+    pref.putFloat("vcKp", vcKp);
+    pref.putFloat("vcKi", vcKi);
+    pref.putFloat("vcKd", vcKd);
+
+    // VR (variable-reluctance) speed input
+    pref.putBool("useVR", useVR);
+    pref.putUShort("maxFreqVR", maxFreqVR);
+    pref.putUChar("avgFilterVR", averageFilterVR);
   }
   else
   {
@@ -236,6 +262,16 @@ void readEEP()
     aftermarketSpeedScale = pref.getFloat("amSpeedScale", 1.0f);
     aftermarketSpeedOffset = pref.getShort("amSpeedOffset", 0);
 
+    for (uint8_t i = 1; i <= 6; i++)
+    {
+      String rk = "dsgRatio" + String(i);
+      float loaded = pref.getFloat(rk.c_str(), dsgGearRatio[i]);
+      if (loaded > 0.0f) dsgGearRatio[i] = loaded;
+    }
+    dsgFinalDrive14 = pref.getFloat("dsgFinal14", dsgFinalDrive14);
+    dsgFinalDrive56 = pref.getFloat("dsgFinal56", dsgFinalDrive56);
+    dsgTireCirc = pref.getFloat("dsgTireCirc", dsgTireCirc);
+
     reverseDirection = pref.getBool("reverseDir", false);
 
     feedbackEnable = pref.getBool("fbEnable", false);
@@ -245,10 +281,27 @@ void readEEP()
     feedbackDeadband = pref.getFloat("fbDeadband", 1.5f);
     feedbackMinSpeed = pref.getUShort("fbMinSpd", 40);
     feedbackMaxFreq = pref.getUShort("fbMaxFreq", 254);
+
+    // V4 buck voltage control
+    voltageControlEnable = pref.getBool("vcEnable", true);
+    vcPwmNominal = pref.getFloat("vcPwmNom", 0.70f);
+    vcPwmMin = pref.getFloat("vcPwmMin", 0.15f);
+    vcVoltMin = pref.getFloat("vcVoltMin", 0.15f);
+    vcVoltMax = pref.getFloat("vcVoltMax", 1.00f);
+    vcVoltGain = pref.getFloat("vcVoltGain", 0.50f);
+    vcKp = pref.getFloat("vcKp", 1.50f);
+    vcKi = pref.getFloat("vcKi", 2.00f);
+    vcKd = pref.getFloat("vcKd", 0.00f);
+
+    // VR (variable-reluctance) speed input
+    useVR = pref.getBool("useVR", false);
+    maxFreqVR = pref.getUShort("maxFreqVR", 200);
+    averageFilterVR = pref.getUChar("avgFilterVR", legacyAverage);
   }
 
   averageFilterHall = constrain(averageFilterHall, 1, 10);
   averageFilterRPM = constrain(averageFilterRPM, 1, 10);
+  averageFilterVR = constrain(averageFilterVR, 1, 10);
   broadcastSpeedLowByte = constrain(broadcastSpeedLowByte, 0, 7);
   broadcastSpeedHighByte = constrain(broadcastSpeedHighByte, 0, 7);
   broadcastSpeedDLC = constrain(broadcastSpeedDLC, 0, 8);
@@ -353,6 +406,15 @@ void writeEEP()
   pref.putFloat("amSpeedScale", aftermarketSpeedScale);
   pref.putShort("amSpeedOffset", aftermarketSpeedOffset);
 
+  for (uint8_t i = 1; i <= 6; i++)
+  {
+    String rk = "dsgRatio" + String(i);
+    pref.putFloat(rk.c_str(), dsgGearRatio[i]);
+  }
+  pref.putFloat("dsgFinal14", dsgFinalDrive14);
+  pref.putFloat("dsgFinal56", dsgFinalDrive56);
+  pref.putFloat("dsgTireCirc", dsgTireCirc);
+
   pref.putBool("reverseDir", reverseDirection);
 
   pref.putBool("fbEnable", feedbackEnable);
@@ -362,6 +424,22 @@ void writeEEP()
   pref.putFloat("fbDeadband", feedbackDeadband);
   pref.putUShort("fbMinSpd", feedbackMinSpeed);
   pref.putUShort("fbMaxFreq", feedbackMaxFreq);
+
+  // V4 buck voltage control
+  pref.putBool("vcEnable", voltageControlEnable);
+  pref.putFloat("vcPwmNom", vcPwmNominal);
+  pref.putFloat("vcPwmMin", vcPwmMin);
+  pref.putFloat("vcVoltMin", vcVoltMin);
+  pref.putFloat("vcVoltMax", vcVoltMax);
+  pref.putFloat("vcVoltGain", vcVoltGain);
+  pref.putFloat("vcKp", vcKp);
+  pref.putFloat("vcKi", vcKi);
+  pref.putFloat("vcKd", vcKd);
+
+  // VR (variable-reluctance) speed input
+  pref.putBool("useVR", useVR);
+  pref.putUShort("maxFreqVR", maxFreqVR);
+  pref.putUChar("avgFilterVR", averageFilterVR);
 
 #if serialDebugEEP
   Serial.println("[EEP] Written EEPROM with data:...");

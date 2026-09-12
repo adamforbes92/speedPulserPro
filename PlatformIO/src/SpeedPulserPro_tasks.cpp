@@ -8,6 +8,7 @@
 #include "SpeedPulserPro_can.h"
 #include "SpeedPulserPro_uds.h"
 #include "SpeedPulserPro_io.h"
+#include "SpeedPulserPro_voltage.h"
 
 // Task handles
 TaskHandle_t taskEEPHandle = NULL;
@@ -118,7 +119,7 @@ void taskParseDSG(void *parameter)
 void taskProcessSpeed(void *parameter)
 {
   DEBUG_SPD("Speed processing task started");
-  unsigned long lastIncomingHallHz = 0;
+  int rawCountVR = 0;                              // VR median-filter fill counter
   uint16_t lastValidVehicleSpeed = 0;
   bool prevTestSpeedo = false;                    // Speed Test edge detect (global on/off gate)
   TickType_t lastPidTick = xTaskGetTickCount();  // closed-loop PID cadence
@@ -127,6 +128,10 @@ void taskProcessSpeed(void *parameter)
 
   while (1)
   {
+    // V4 board with voltage control engaged: the buck rail + PWM are driven by the
+    // mid-ranging law instead of the legacy feed-forward / PID-trim path.
+    const bool voltageMode = boardHasVoltageControl && voltageControlEnable;
+
     // Speed Test acts as a global on/off: the instant it is switched OFF, drop the
     // held test speed and clear the hall state so the needle returns to rest (or the
     // live source) instead of sitting at the last test value.
@@ -138,10 +143,21 @@ void taskProcessSpeed(void *parameter)
       dutyCycleIncoming = 0;
       vehicleSpeedHall = 0;
       hallSpeed = 0;
+      vehicleSpeedVR = 0;
+      vrSpeed = 0;
+      dutyCycleIncomingVR = 0;
+      rawCountVR = 0;
+      samplesVR.clear();
       currentSpeedOffset = 0;
-      lastIncomingHallHz = 0;
       resetHallMedianFilter();
+      resetHallPulseCounter();
+      resetVRPulseCounter();
       setMotorDutyRaw(0);
+      if (voltageMode)
+      {
+        resetMidRanging();
+        setMotorVoltageCmd(vcVoltMin); // drop the rail back to minimum when idle
+      }
     }
     prevTestSpeedo = testSpeedo;
 
@@ -171,6 +187,11 @@ void taskProcessSpeed(void *parameter)
     // Handle Hall sensor pulse processing and averaging
     if (!testSpeedo && !testCal)
     {
+      // Windowed frequency: read-and-clear the accumulator once per loop so the
+      // reading is a true average over the window instead of one jittery edge-to-edge
+      // period. Returns <0 when no fresh edges arrived — hold the last value then.
+      float hallHz = readHallHz();
+
       if ((millis() + 10 - lastPulse) > durationReset)
       {
         dutyCycle = 0;
@@ -178,12 +199,12 @@ void taskProcessSpeed(void *parameter)
         vehicleSpeedHall = 0;
         hallSpeed = 0;
         currentSpeedOffset = 0;
-        lastIncomingHallHz = 0;
         resetHallMedianFilter();
+        resetHallPulseCounter();
       }
-
-      if (lastIncomingHallHz != dutyCycleIncoming)
+      else if (hallHz >= 0.0f)
       {
+        dutyCycleIncoming = (unsigned long)(hallHz + 0.5f);
         uint16_t mappedSpeed = map(dutyCycleIncoming, 0, maxFreqHall, 0, maxSpeed);
 
         if (averageFilterHall <= 1)
@@ -207,8 +228,52 @@ void taskProcessSpeed(void *parameter)
             resetHallMedianFilter();
           }
         }
+      }
+    }
 
-        lastIncomingHallHz = dutyCycleIncoming;
+    // Handle VR (variable-reluctance) pulse processing and averaging — counted and
+    // mapped exactly like the hall input, but with its own frequency/filter state.
+    if (!testSpeedo && !testCal)
+    {
+      float vrHz = readVRHz();
+
+      if ((millis() + 10 - lastPulseVR) > durationReset)
+      {
+        vehicleSpeedVR = 0;
+        vrSpeed = 0;
+        dutyCycleIncomingVR = 0;
+        rawCountVR = 0;
+        samplesVR.clear();
+        resetVRPulseCounter();
+      }
+      else if (vrHz >= 0.0f)
+      {
+        dutyCycleIncomingVR = (unsigned long)(vrHz + 0.5f);
+        uint16_t mappedSpeed = map(dutyCycleIncomingVR, 0, maxFreqVR, 0, maxSpeed);
+
+        if (averageFilterVR <= 1)
+        {
+          vrSpeed = mappedSpeed;
+          vehicleSpeedVR = vrSpeed;
+          rawCountVR = 0;
+          samplesVR.clear();
+        }
+        else
+        {
+          if (rawCountVR < averageFilterVR)
+          {
+            samplesVR.add(mappedSpeed);
+            rawCountVR++;
+          }
+
+          if (rawCountVR >= averageFilterVR)
+          {
+            vrSpeed = (uint16_t)samplesVR.getMedian();
+            vehicleSpeedVR = vrSpeed;
+            rawCountVR = 0;
+            samplesVR.clear();
+          }
+        }
       }
     }
 
@@ -216,6 +281,13 @@ void taskProcessSpeed(void *parameter)
     if (testCal)
     {
       dutyCycle = constrain(tempDutyCycle, 0, (long)PWM_DUTY_MAX);
+      // V4 calibration is manual: the user lifts VOLTAGE and/or PWM until the needle
+      // pegs the top mark, then captures the measured RPM as feedbackMaxFreq. Drive
+      // both actuators straight from the UI.
+      if (voltageMode)
+      {
+        setMotorVoltageCmd(dutyCycle == 0 ? vcVoltMin : tempVoltageCmd);
+      }
       setMotorDutyRaw((uint32_t)dutyCycle);
       // Keep the tacho readout live so measured speed shows and feedbackAvailable
       // can latch while jogging the motor to build a calibration.
@@ -253,6 +325,10 @@ void taskProcessSpeed(void *parameter)
       if (useHall)
       {
         rawVehicleSpeed = hallSpeed;
+      }
+      if (useVR)
+      {
+        rawVehicleSpeed = vrSpeed;
       }
       if (useECU)
       {
@@ -317,7 +393,19 @@ void taskProcessSpeed(void *parameter)
     // Closed-loop PID trim, or plain open-loop write.
     // The PID and the tacho readout run on a fixed 100 ms cadence regardless of the
     // 50 ms task period, so the derivative/integral maths stay time-consistent.
-    if (pidActive)
+    if (voltageMode)
+    {
+      // V4 mid-ranging: the fast PWM loop tracks target RPM while the slow loop
+      // schedules the buck voltage. Runs even at target 0 so the rail parks at min.
+      if ((xTaskGetTickCount() - lastPidTick) >= pdMS_TO_TICKS(100))
+      {
+        lastPidTick = xTaskGetTickCount();
+        uint16_t vcTarget = (vehicleSpeed == 0) ? 0 : (uint16_t)dutyCycle;
+        int16_t d = applyMidRangingControl(vcTarget);
+        setMotorDutyRaw((uint32_t)d);
+      }
+    }
+    else if (pidActive)
     {
       if ((xTaskGetTickCount() - lastPidTick) >= pdMS_TO_TICKS(100))
       {
@@ -354,11 +442,18 @@ void taskProcessRPM(void *parameter)
 
   while (1)
   {
+    // Windowed frequency: read-and-clear the RPM accumulator once per loop so the
+    // reading is a true average over the window rather than one jittery period.
+    float rpmHz = readRPMHz();
+    if (rpmHz >= 0.0f)
+      dutyCycleMotor = (unsigned long)(rpmHz + 0.5f);
+
     // Always compute Hall RPM for live display, but clear stale data after timeout
     if ((millis() + 10 - lastPulseRPM) > durationReset)
     {
       dutyCycleMotor = 0;
       vehicleRPMHall = 0;
+      resetRPMPulseCounter();
     }
     else
     {
@@ -389,11 +484,15 @@ void taskProcessRPM(void *parameter)
           if (averageFilterRPM <= 1)
           {
             filteredRPM = vehicleRPMHall;
-            rawCountRPM = 0;
-            samplesRPM.clear();
+            resetRPMMedianFilter();
           }
-          else
+          else if (rpmHz >= 0.0f)
           {
+            // Window-driven median top-up: feed one averaged sample per capture
+            // window. The windowed frequency has already averaged out tooth-spacing
+            // jitter, so the median just trims the occasional outlier — unlike the old
+            // single-period path where one latched glitch filled several median slots
+            // and slipped through (10k, 2k, ...).
             if (rawCountRPM < averageFilterRPM)
             {
               samplesRPM.add(vehicleRPMHall);

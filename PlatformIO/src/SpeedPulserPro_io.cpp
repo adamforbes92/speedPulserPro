@@ -59,6 +59,14 @@ void basicInit()
   attachInterrupt(digitalPinToInterrupt(pinEngineRPMInput), incomingMotorSpeed, FALLING);
   DEBUG_IO("Set up Speed Interrupt!");
 
+  // Variable-reluctance (VR) speed input — counted like the hall input. The VR
+  // conditioner drives a clean digital edge (C Out) with an external pull-up to
+  // 3.3V, so INPUT (no internal pull) is used and we count the FALLING edge.
+  DEBUG_IO("Setting up VR Speed Interrupt (GPIO%d)...", pinVRInput);
+  pinMode(pinVRInput, INPUT);
+  attachInterrupt(digitalPinToInterrupt(pinVRInput), incomingVR, FALLING);
+  DEBUG_IO("Set up VR Speed Interrupt!");
+
   // Motor tacho feedback for the closed-loop PID.
   // INPUT_PULLUP (not plain INPUT): on a legacy PCB with no feedback trace the pin
   // floats and picks up noise, faking a tacho signal that latches feedbackAvailable

@@ -54,7 +54,8 @@
 #define labelRefresh 200
 #define wifiDisable 60000
 #define wifiHostName "SpeedPulserPro"
-#define FW_VERSION "3.04"
+// V4.01.0 - shared UI theme; common wifi/ota managers (speedpulserpro.local, /api/ota); cache-busting
+#define FW_VERSION "4.01"
 
 // Speed Input Configuration
 #define incomingType 0
@@ -78,9 +79,20 @@
 #define pinMotorFeedback 23     // Motor Feedback Input
 #define pinMotorDirection 19    // Motor Direction (HIGH = reverse)
 
-// Coolant temperature emulation — X9C103 digital potentiometer (as used in the MFSW)
-#define pinCoolantUD 25         // Coolant Resistance (U/D — up/down direction)
-#define pinCoolantINC 27        // Coolant Resistance (INC — increment clock)
+// --- V4 board: buck voltage control + board-version strap (mirrors SpeedPulser) ---
+#define pinBoardVersion 25      // Board version strap: V4 ties 1k to GND -> reads LOW (INPUT_PULLUP)
+#define pinVoltageAdjust 33     // V_ADJ PWM "DAC" into the buck FB node (LEDC, inverse mapping)
+#define pinBuckEnable 32        // Buck enable (HIGH = supply on)
+
+// --- Variable-reluctance (VR) speed input — counted like the hall input ---
+#define pinVRInput 27           // VR conditioner digital output (C Out on MAXX), ext pull-up to 3.3V
+
+// Coolant temperature emulation — X9C103 digital potentiometer (as used in the MFSW).
+// NB: relocated off GPIO25/27 on the V4 board (now board-version + VR). These pins are
+// currently DEFINE-ONLY (the coolant feature isn't wired up yet) — re-check against the
+// PCB before implementing it.
+#define pinCoolantUD 4          // Coolant Resistance (U/D — up/down direction)
+#define pinCoolantINC 5         // Coolant Resistance (INC — increment clock)
 #define pinCoolantCS 12         // Coolant Resistance (CS — chip select)
 
 #define pinOnboardLED 2 // onboard LED
@@ -104,6 +116,11 @@
 #define LEVER_TIPTRONIC_DOWN 0xB
 #define gearPause 20
 #define rpmPause 50
+
+// DSG speed smoothing: gear and RPM arrive on separate CAN frames, so during a
+// shift they are momentarily inconsistent and the calculated speed spikes/bucks.
+#define dsgGearSettleMs 300       // hold last DSG speed for this long after a gear change (real road speed barely moves during a shift)
+#define dsgSpeedSmoothing 0.35    // low-pass factor 0..1 (1 = no smoothing) applied to DSG speed to remove residual RPM jitter
 
 // CAN IDs
 #define MOTOR1_ID 0x280

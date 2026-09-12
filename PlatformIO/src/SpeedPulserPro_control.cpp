@@ -2,6 +2,7 @@
 #include "SpeedPulserPro_globals.h"
 #include "SpeedPulserPro_motorCal.h"
 #include "SpeedPulserPro_calBuilder.h"
+#include "SpeedPulserPro_voltage.h"
 #include "Arduino.h"
 
 void normaliseSpeedOffsetCurve()
@@ -81,55 +82,127 @@ void resetRPMMedianFilter()
 // File-scope (not a function-local static): a function-local static with a
 // runtime initializer would emit a __cxa_guard_acquire on first use, which takes
 // a FreeRTOS mutex with a timeout — illegal in an ISR and asserts in queue.c.
-static volatile unsigned long incomingPreviousMicros = 0;   // hall input, seeded on first pulse
-static volatile unsigned long motorSpeedPreviousMicros = 0; // rpm input, seeded on first pulse
+//
+// Windowed frequency capture — shared by the hall, VR and RPM inputs. Deriving Hz
+// from a single edge-to-edge period turns tone-wheel / tooth-spacing jitter straight
+// into a jumpy reading, so instead each ISR accumulates the summed edge intervals
+// and the interval count. The task reads-and-clears the pair once per window, so
+// freq = count / summedInterval is a true average over the window — exactly how the
+// closed-loop tacho (feedbackPulse) already works.
+struct PulseWindow
+{
+  volatile uint32_t accumUs;    // summed edge-to-edge intervals (us) this window
+  volatile uint32_t count;      // number of intervals summed into accumUs
+  volatile uint32_t lastEdgeUs; // micros() of the previous accepted edge (kept across windows)
+};
 
-// Interrupt handler for incoming frequency (RPM) reading.
+static PulseWindow hallPulse = {0, 0, 0}; // vehicle hall speed input
+static PulseWindow vrPulse = {0, 0, 0};   // variable-reluctance speed input
+static PulseWindow rpmPulse = {0, 0, 0};  // engine RPM input
+
+// Reject edges closer together than this. Ignition-coil EMI couples in as
+// sub-millisecond bursts, while a real input edge tops out around 230 Hz (~4.3 ms),
+// so anything faster than ~3 ms (333 Hz) can't be a genuine pulse and is dropped.
+static const uint32_t PULSE_MIN_INTERVAL_US = 3000;
+
+// Guards the read-and-clear of the pulse windows against the ISRs. portMUX is the
+// FreeRTOS/ESP32 safe primitive; a global noInterrupts() would starve the WiFi radio.
+static portMUX_TYPE pulseMux = portMUX_INITIALIZER_UNLOCKED;
+
+// Accumulate one edge into a window. Returns true when the edge was accepted (it
+// advanced the average), false when it merely seeded the window or was rejected as
+// a glitch/bounce. lastEdgeUs is kept on a glitch so the next real edge still
+// measures from the last good edge.
+static inline bool IRAM_ATTR pulseEdge(PulseWindow &w, uint32_t now)
+{
+  uint32_t last = w.lastEdgeUs;
+  if (last == 0)
+  {
+    w.lastEdgeUs = now; // seed on the first pulse only
+    return false;
+  }
+  uint32_t interval = now - last;
+  if (interval < PULSE_MIN_INTERVAL_US)
+    return false; // coil EMI / bounce: ignore, keep the last good edge
+  w.accumUs += interval;
+  w.count++;
+  w.lastEdgeUs = now;
+  return true;
+}
+
+// Read-and-clear a window, returning its averaged frequency in Hz, or -1 when no
+// fresh edges arrived (caller should hold the previous value). lastEdgeUs is left
+// intact so the next window's first interval bridges from this window's last edge.
+static float readPulseHz(PulseWindow &w)
+{
+  portENTER_CRITICAL(&pulseMux);
+  uint32_t count = w.count;
+  uint32_t accum = w.accumUs;
+  w.count = 0;
+  w.accumUs = 0;
+  portEXIT_CRITICAL(&pulseMux);
+  if (count >= 1 && accum > 0)
+    return (float)count * 1000000.0f / (float)accum;
+  return -1.0f;
+}
+
+// Full reset (including the edge reference) — used on timeout / test transitions so
+// a stale lastEdgeUs can't inject one bogus huge-interval reading when input resumes.
+static void resetPulseWindow(PulseWindow &w)
+{
+  portENTER_CRITICAL(&pulseMux);
+  w.accumUs = 0;
+  w.count = 0;
+  w.lastEdgeUs = 0;
+  portEXIT_CRITICAL(&pulseMux);
+}
+
+float readHallHz() { return readPulseHz(hallPulse); }
+float readVRHz() { return readPulseHz(vrPulse); }
+float readRPMHz() { return readPulseHz(rpmPulse); }
+void resetHallPulseCounter() { resetPulseWindow(hallPulse); }
+void resetVRPulseCounter() { resetPulseWindow(vrPulse); }
+void resetRPMPulseCounter() { resetPulseWindow(rpmPulse); }
+
+// Interrupt handler for the vehicle hall speed input.
 // IRAM_ATTR is required so a pulse arriving while the flash cache is disabled
 // (EEPROM/LittleFS write) doesn't crash the chip.
 void IRAM_ATTR incomingHz()
 {
   // Ignore the vehicle hall input entirely while bench-testing or calibrating —
   // the motor is driven from the Speed Test / Cal controls, so an incoming signal
-  // must not touch dutyCycleIncoming, lastPulse or the LED counter until the test
+  // must not touch the counter, lastPulse or the LED counter until the test
   // (or cal) is turned off.
   if (testSpeedo || testCal)
     return;
-
-  unsigned long presentMicros = micros();
-  unsigned long previousMicros = incomingPreviousMicros;
-  if (previousMicros == 0)
+  if (pulseEdge(hallPulse, micros()))
   {
-    incomingPreviousMicros = presentMicros; // seed on the first pulse only
-    return;
+    lastPulse = millis();
+    ledCounter++;
   }
-  unsigned long revolutionTime = presentMicros - previousMicros;
-  if (revolutionTime < 1000UL)
-    return;
-  dutyCycleIncoming = (60000000UL / revolutionTime) / 60;
-  incomingPreviousMicros = presentMicros;
-  lastPulse = millis();
-  ledCounter++;
 }
 
-// Interrupt handler for motor speed feedback reading.
+// Interrupt handler for the variable-reluctance (VR) speed input. Counted exactly
+// like the hall input — one clean digital edge per zero-crossing from the VR
+// conditioner (C Out) — feeding the same windowed period->frequency->speed pipeline.
+// IRAM_ATTR is required so a pulse arriving while the flash cache is disabled
+// (EEPROM/LittleFS write) doesn't crash the chip.
+void IRAM_ATTR incomingVR()
+{
+  // Ignore the VR input while bench-testing or calibrating (same rule as the hall).
+  if (testSpeedo || testCal)
+    return;
+  if (pulseEdge(vrPulse, micros()))
+    lastPulseVR = millis();
+}
+
+// Interrupt handler for the engine RPM input.
 // IRAM_ATTR is required so a pulse arriving while the flash cache is disabled
 // (EEPROM/LittleFS write) doesn't crash the chip.
 void IRAM_ATTR incomingMotorSpeed()
 {
-  unsigned long presentMicros = micros();
-  unsigned long previousMicros = motorSpeedPreviousMicros;
-  if (previousMicros == 0)
-  {
-    motorSpeedPreviousMicros = presentMicros; // seed on the first pulse only
-    return;
-  }
-  unsigned long revolutionTime = presentMicros - previousMicros;
-  if (revolutionTime < 1000UL)
-    return;
-  dutyCycleMotor = (60000000UL / revolutionTime) / 60;
-  motorSpeedPreviousMicros = presentMicros;
-  lastPulseRPM = millis();
+  if (pulseEdge(rpmPulse, micros()))
+    lastPulseRPM = millis();
 }
 
 // ============================================================================
@@ -296,6 +369,111 @@ int16_t applyFeedbackTrim(uint16_t targetSpeed, uint16_t baseDuty)
 #endif
 
   return (int16_t)corrected;
+}
+
+// ===== V4 mid-ranging voltage control =====
+// On the V4 board the motor rail is adjustable. A FAST inner PID drives the throttle
+// PWM to hit the target motor RPM (from the one-point tacho cal); a SLOW integrator
+// trims the buck voltage to keep that PWM near a nominal centre, so the voltage
+// self-schedules to whatever the motor's non-linear curve needs at every speed — no
+// multi-point calibration. See SpeedPulserPro_voltage.cpp for the hardware layer.
+static float midPidIntegral = 0.0f; // inner-loop integral (normalised freq·s)
+static float midPidPrevErr = 0.0f;  // inner-loop previous error (normalised)
+static float voltTrim = 0.0f;       // slow voltage-trim integrator output (0..1 offset)
+
+void resetMidRanging()
+{
+  midPidIntegral = 0.0f;
+  midPidPrevErr = 0.0f;
+  voltTrim = 0.0f;
+  lastPwmFrac = 0.0f;
+}
+
+// Feed-forward voltage seed: linear from vMin at 0 to vMax at top speed.
+static float voltFeedForward(uint16_t targetSpeed)
+{
+  const uint16_t top = maxSpeed > 0 ? maxSpeed : 1;
+  float frac = (float)targetSpeed / (float)top;
+  if (frac < 0.0f) frac = 0.0f;
+  if (frac > 1.0f) frac = 1.0f;
+  return vcVoltMin + (vcVoltMax - vcVoltMin) * frac;
+}
+
+// Motor tacho frequency (Hz) expected at a road speed, from the one-point cal.
+static float targetFreqFor(uint16_t targetSpeed, uint16_t scaleFreq)
+{
+  const uint16_t spdSpan = maxSpeed > 0 ? maxSpeed : 1;
+  return (float)targetSpeed * (float)scaleFreq / (float)spdSpan;
+}
+
+// Called on the 100 ms control cadence. Returns the applied raw 12-bit motor duty.
+int16_t applyMidRangingControl(uint16_t targetSpeed)
+{
+  const float PID_PERIOD_S = 0.1f;
+
+  // Target off -> motor off, rail back to minimum, loop state cleared.
+  if (targetSpeed == 0)
+  {
+    resetMidRanging();
+    setMotorVoltageCmd(vcVoltMin);
+    pidCorrection = 0;
+    return 0;
+  }
+
+  const float measFreq = updateMeasuredFreq();
+  const uint16_t scaleFreq = feedbackMaxFreq > 0 ? feedbackMaxFreq : 1;
+
+  // No tacho yet: run open-loop on the voltage schedule + nominal PWM. Keeps
+  // measuring so feedbackAvailable can latch and we upgrade to closed loop.
+  if (!feedbackAvailable)
+  {
+    setMotorVoltageCmd(voltFeedForward(targetSpeed));
+    lastPwmFrac = vcPwmNominal;
+    pidCorrection = 0;
+    return (int16_t)(vcPwmNominal * (float)PWM_DUTY_MAX + 0.5f);
+  }
+
+  // Normalised frequency error (dimensionless) keeps the gains scale-independent.
+  const float err = (targetFreqFor(targetSpeed, scaleFreq) - measFreq) / (float)scaleFreq;
+
+  midPidIntegral += err * PID_PERIOD_S;
+  midPidIntegral = constrain(midPidIntegral, -1.0f, 1.0f); // ±100% authority cap
+  const float deriv = (err - midPidPrevErr) / PID_PERIOD_S;
+  midPidPrevErr = err;
+
+  // Inner output is an ABSOLUTE throttle fraction centred on the nominal.
+  float pwmFrac = vcPwmNominal + vcKp * err + vcKi * midPidIntegral + vcKd * deriv;
+  if (pwmFrac < vcPwmMin) pwmFrac = vcPwmMin;
+  if (pwmFrac > 1.0f)     pwmFrac = 1.0f;
+  lastPwmFrac = pwmFrac;
+
+  // Slow outer loop @ ~500 ms: trim the voltage to pull the PWM back to nominal.
+  static uint8_t outerDiv = 0;
+  if (++outerDiv >= 5)
+  {
+    const float OUTER_PERIOD_S = 0.5f;
+    outerDiv = 0;
+    voltTrim += vcVoltGain * (pwmFrac - vcPwmNominal) * OUTER_PERIOD_S;
+    voltTrim = constrain(voltTrim, -1.0f, 1.0f);
+    setMotorVoltageCmd(voltFeedForward(targetSpeed) + voltTrim); // clamps internally
+  }
+
+  uint32_t duty = (uint32_t)(pwmFrac * (float)PWM_DUTY_MAX + 0.5f);
+  if (duty > PWM_DUTY_MAX) duty = PWM_DUTY_MAX;
+  pidCorrection = (int16_t)((pwmFrac - vcPwmNominal) * (float)PWM_DUTY_MAX); // reuse for UI/diag
+
+#if enableDebug && debugFB
+  static uint8_t midLogDiv = 0;
+  if (++midLogDiv >= 10)
+  {
+    midLogDiv = 0;
+    DEBUG_FB("mid: tgtF=%.1f measF=%.1f/%u err=%+.3f | pwm=%.0f%% volt=%.0f%% (ff=%.0f%% trim=%+.2f)",
+             targetFreqFor(targetSpeed, scaleFreq), measFreq, scaleFreq, err,
+             pwmFrac * 100.0f, lastVoltageCmd * 100.0f,
+             voltFeedForward(targetSpeed) * 100.0f, voltTrim);
+  }
+#endif
+  return (int16_t)duty;
 }
 
 // ===== Speed -> PWM duty (interpolated, 12-bit) =====
