@@ -4,7 +4,9 @@ The SpeedPulser Pro converts a vehicle speed signal — from a gearbox hall sens
 
 It is based on an **ESP32 DevKit V1 (WROOM-32)** and uses a **TY3816B** BLDC motor driven via a native LEDC hardware PWM channel. The PCB is an upgrade for the original SpeedPulser board, with the addition of CAN, GPS and a coil-type RPM output.
 
-![SpeedPulser Pro Web UI](/Images/speedPulserProUI.png)
+![SpeedPulser Pro Web UI — dashboard, configuration, sources, PID feedback, status, calibration builder, diagnostics and OTA](/Images/speedPulserProUI.png)
+
+![SpeedPulser Pro Web UI — limits & offset, voltage control, GPS & broadcast, filters & analyser, custom CAN, DSG speed, output tests and export / import](/Images/speedPulserProUI-2.png)
 
 ---
 
@@ -194,9 +196,9 @@ The interface is a single-page app served from the ESP32's LittleFS flash partit
 ### Dashboard Tab
 
 <p align="center">
-  <img src="Images/ui-dashboard.png" alt="Dashboard tab — live gauges" width="300">
+  <img src="Images/ui-dashboard.png" alt="Dashboard tab — live data tiles and the calibration curve graph" width="300">
   &nbsp;&nbsp;
-  <img src="Images/ui-system-status.png" alt="Dashboard tab — system status and display options" width="300">
+  <img src="Images/ui-system-status.png" alt="Dashboard tab — system status pills (CAN, GPS, feedback) and display options" width="300">
 </p>
 
 Live read-outs updated automatically:
@@ -221,7 +223,11 @@ Header status badges also show **CAN**, **Broadcast** and the active **Calibrati
 
 ### Configuration Tab
 
-<p align="center"><img src="Images/ui-configuration.png" alt="Configuration tab — needle sweep and cluster output" width="300"></p>
+<p align="center">
+  <img src="Images/ui-configuration.png" alt="Configuration tab — needle sweep and cluster output cards" width="300">
+  &nbsp;&nbsp;
+  <img src="Images/ui-speed-limits.png" alt="Configuration tab — speed limits (max speed, hall and VR frequency) and the speed offset card with the 5-point curve" width="300">
+</p>
 
 | Card | Setting | Description |
 |---|---|---|
@@ -244,22 +250,42 @@ Header status badges also show **CAN**, **Broadcast** and the active **Calibrati
 
 Source selection, tuning and diagnostics:
 
-<p align="center"><img src="Images/ui-advanced.png" alt="Advanced tab — speed and RPM source selection" width="300"></p>
+<p align="center">
+  <img src="Images/ui-advanced.png" alt="Advanced tab — speed and RPM source selection" width="300">
+  &nbsp;&nbsp;
+  <img src="Images/ui-gps.png" alt="Advanced tab — Broadcast Speed (CAN ID, DLC, byte layout, scale, template bytes) and GPS Update Rate" width="300">
+</p>
 
 | Card | Purpose |
 |---|---|
 | Closed-Loop Feedback (PID) | Enable motor feedback and tune Kp / Ki / Kd |
+| Motor Voltage Control (V4) | On V4 boards, enable the mid-ranging buck-voltage loop and set its throttle PWM range, voltage range, trim gain and loop gains |
 | Broadcast Speed | Send the final speed onto CAN with user-defined ID, DLC, byte layout, scale & offset bytes |
 | GPS Update Rate | Select **1 / 5 / 10 / 16 Hz** and view the live updates-per-second figure |
-| Signal Filters | Hall speed and RPM running-median sample counts (1–10) |
+| Signal Filters | Hall speed, VR speed and RPM running-median sample counts (1–10) |
 | CAN Analyser | Forward all received CAN frames to **SavvyCAN** via WiFi (GVRET on `192.168.4.1:23`) or Serial (GVRET) |
 | Speed Selection | Primary speed source: Hall / ECU / ABS / DSG / TP2.0 / UDS / GPS / Custom CAN |
 | Custom CAN Input | When *Custom CAN* is selected, define ID, byte indices, endianness, scale & offset |
+| DSG Speed Calculation | When *DSG* is selected, the gear ratios, final drives and tyre circumference used to derive speed from RPM and gear |
 | RPM Selection | Primary RPM source (Hall or CAN), cluster frequency limit and RPM ceiling |
+
+<p align="center">
+  <img src="Images/ui-filters-analyser.png" alt="Advanced tab — Signal Filters (hall, RPM and VR sample counts) and the CAN Analyser SavvyCAN toggles" width="300">
+  &nbsp;&nbsp;
+  <img src="Images/ui-custom-can.png" alt="Advanced tab — Custom CAN Input: CAN ID, byte indexes, byte order, scale and offset" width="300">
+  &nbsp;&nbsp;
+  <img src="Images/ui-dsg-speed.png" alt="Advanced tab — DSG Speed Calculation: gear ratios, final drives and tyre circumference" width="300">
+</p>
+
+*Advanced: the source selectors (top left), speed broadcast and GPS rate (top right); the filter and analyser cards, and the two cards that appear when Custom CAN or DSG is chosen as the speed source (bottom row).*
 
 #### Closed-Loop Feedback (PID) & Reverse Direction
 
-<img src="Images/ui-feedback-pid.png" alt="Advanced tab — closed-loop feedback (PID) and motor voltage control" width="300">
+<p align="center">
+  <img src="Images/ui-feedback-pid.png" alt="Advanced tab — Closed-Loop Feedback (PID): enable, reverse direction, min feedback speed, gains and live read-outs" width="300">
+  &nbsp;&nbsp;
+  <img src="Images/ui-voltage-control.png" alt="Advanced tab — Motor Voltage Control (V4): enable, nominal / min throttle PWM, min / max motor voltage, trim gain and inner PID gains" width="300">
+</p>
 
 The TY3816B motor is normally driven **open-loop** — a calibration table maps speed to a
 PWM duty. Closed-loop feedback adds a correction on top of that table: the motor's own
@@ -284,9 +310,20 @@ voltage, temperature or coupler friction drift.
 > otherwise leave the needle a few km/h low. Leave *Min Feedback Speed* around 40 km/h so
 > the loop only engages once the motor is comfortably out of its dead-band.
 
+**Motor Voltage Control (V4 boards)** — V4 PCBs drive the motor through a buck converter
+(voltage rail) as well as the PWM "throttle". With **Enable Voltage Control (mid-ranging)**
+on, the fast loop above trims the throttle PWM to hit the target speed while a slow loop
+nudges the buck voltage to hold the throttle near its **Nominal Throttle PWM**, keeping
+maximum torque headroom. Turn it off and the rail is held at maximum with PWM-only drive
+(legacy behaviour).
+
 ### Calibration Tab
 
-<p align="center"><img src="Images/ui-calibration.png" alt="Calibration tab — the Calibration Builder" width="300"></p>
+<p align="center">
+  <img src="Images/ui-calibration.png" alt="Calibration tab — the Calibration Builder: calibration mode, duty jog buttons, target speed, capture point, name, Generate & Apply, Save to Device" width="300">
+  &nbsp;&nbsp;
+  <img src="Images/ui-export-import.png" alt="Calibration tab — Export Text, Export C Array and Import Text" width="300">
+</p>
 
 | Card | Purpose |
 |---|---|
@@ -311,7 +348,11 @@ value. Bands are fixed at 0–50 / 51–100 / 101–150 / 151–200 / 201+ km/h,
 
 ### Diagnostics Tab
 
-<p align="center"><img src="Images/ui-diagnostics.png" alt="Diagnostics tab — every input read separately" width="300"></p>
+<p align="center">
+  <img src="Images/ui-diagnostics.png" alt="Diagnostics tab — Live Data: every speed and RPM input read separately" width="300">
+  &nbsp;&nbsp;
+  <img src="Images/ui-output-tests.png" alt="Diagnostics tab — Speed Test Mode and RPM Output Test sliders" width="300">
+</p>
 
 | Card | Purpose |
 |---|---|
