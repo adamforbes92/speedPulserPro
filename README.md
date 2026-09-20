@@ -4,8 +4,6 @@ The SpeedPulser Pro converts a vehicle speed signal — from a gearbox hall sens
 
 It is based on an **ESP32 DevKit V1 (WROOM-32)** and uses a **TY3816B** BLDC motor driven via a native LEDC hardware PWM channel. The PCB is an upgrade for the original SpeedPulser board, with the addition of CAN, GPS and a coil-type RPM output.
 
-![SpeedPulser Pro Web UI — dashboard, configuration, sources, PID feedback, status, calibration builder, diagnostics and OTA](/Images/speedPulserProUI.png)
-
 ![SpeedPulser Pro Web UI — limits & offset, voltage control, GPS & broadcast, filters & analyser, custom CAN, DSG speed, output tests and export / import](/Images/speedPulserProUI-2.png)
 
 ---
