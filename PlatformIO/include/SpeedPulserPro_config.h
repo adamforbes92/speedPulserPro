@@ -54,8 +54,8 @@
 #define labelRefresh 200
 #define wifiDisable 60000
 #define wifiHostName "SpeedPulserPro"
-// V4.01.0 - shared UI theme; common wifi/ota managers (speedpulserpro.local, /api/ota); cache-busting
-#define FW_VERSION "4.01"
+// V4.02 - OTA overhaul: shared ota_manager/wifi_manager v2 + ota.js (guided GitHub update, bridge mode, recovery page)
+#define FW_VERSION "4.02"
 
 // Speed Input Configuration
 #define incomingType 0

@@ -15,6 +15,7 @@
 #include "SpeedPulserPro_savvycan.h"
 #include "SpeedPulserPro_voltage.h"
 #include "power_manager.h"
+#include "wifi_manager.h"
 
 // Forward declarations for main.cpp functions
 void setup();
@@ -104,4 +105,6 @@ void loop()
     digitalWrite(pinOnboardLED, ledOnboard);
     ledCounter = 0;
   }
+
+  wifiManagerTick(); // Home WiFi (bridge mode): connection tracking + retry back-off
 }

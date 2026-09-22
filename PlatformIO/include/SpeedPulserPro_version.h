@@ -69,6 +69,18 @@ V4.01 - standardised Forbes Automotive UI theme (shared style.css);
         adopted common wifi_manager (mDNS: can2rpm.local) and ota_manager
         (firmware + filesystem OTA via /api/ota, /api/ota/fs); per-product
         cache-busting on web assets
+V4.02 - OTA overhaul (shared ota_manager / wifi_manager v2 + data/ota.js, ported
+        from OpenHaldex 9.00): upload callbacks no longer answer mid-body (the
+        old per-chunk "200 OK" made the browser drop the connection after the
+        first 1.4 kB - a crash in AsyncTCP and a half-written partition, so no
+        OTA through the UI had ever completed); filesystem updates unmount
+        first, check the announced size, verify the mount and wipe on failure;
+        boot only mounts a sane superblock and the web server always starts -
+        with no usable UI "/" is a recovery page with the two uploads.
+        "Update from GitHub" on the OTA tab (Releases/releases.json via
+        tools/make_release.py) plus a Home WiFi (bridge mode) card; power_manager
+        holds WiFi up while any browser is active. Assets served no-cache (ETag)
+        instead of the hand-bumped ?v=.
 */
 
 #endif // VERSION_H

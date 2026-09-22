@@ -1091,17 +1091,19 @@ void setupUI()
 {
   DEBUG_WIFI("Setting up web server...");
 
-  // Initialize LittleFS filesystem
-  if (!LittleFS.begin(false))
-  { // true = format if mount failed
-    DEBUG_WIFI("LittleFS mount failed");
-  }
-  else
-  {
-    DEBUG_WIFI("LittleFS successfully mounted");
-  }
+  // The web UI filesystem was mounted (guarded) by wifiManagerInit(); if it is
+  // missing or broken, wifiManagerAttachStatic() serves a recovery page at "/".
 
-  // Static files are served by wifiManagerAttachStatic() below (with cache-busting).
+  // Shared OTA + Home WiFi routes FIRST: ota_manager's first route carries the
+  // filter that notes web activity for every request (otaWebClientActive()),
+  // and /api/wifi/sta must precede any /api/wifi... route of our own.
+  ota_config_t ocfg = otaDefaultConfig();
+  ocfg.fwVersion  = FW_VERSION;
+  ocfg.product    = "SpeedPulser Pro";
+  ocfg.githubRepo = "adamforbes92/speedPulserPro"; // Releases/ + releases.json for "Check for updates"
+  otaManagerInit(&ocfg);
+  otaManagerAttach(server);
+  wifiManagerAttachSta(server);
 
   // API routes for getting data
   server.on("/api/settings", HTTP_GET, handleGetSettings);
@@ -1128,12 +1130,6 @@ void setupUI()
   server.on("/api/testSpeed", HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr, [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
             { handlePostTestSpeed(request, data, len, index, total); });
 
-  // OTA (firmware + filesystem) via the common module: /api/ota, /api/ota/fs, /api/ota/info.
-  ota_config_t ocfg = otaDefaultConfig();
-  ocfg.fwVersion = FW_VERSION;
-  otaManagerInit(&ocfg);
-  otaManagerAttach(server);
-
     // New endpoint: Set GPS update rate
     server.on("/api/gpsRate", HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr, [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
       if (index + len != total) return;
@@ -1150,7 +1146,8 @@ void setupUI()
       request->send(ok ? 200 : 400, "application/json", response);
     });
 
-  // Static web UI with firmware cache-busting.
+  // "/" (the UI, or the recovery page when the filesystem holds no usable UI)
+  // + static files with no-cache revalidation.
   wifiManagerAttachStatic(server);
 
   // Catch-all for 404
@@ -1224,7 +1221,9 @@ void updateLabels()
 
 bool powerIsBusy()
 {
-  return WiFi.softAPgetStationNum() > 0 || otaInProgress();
+  // ... or a browser has hit us in the last 30 s (a phone on the home router
+  // in bridge mode is not an AP station).
+  return WiFi.softAPgetStationNum() > 0 || otaInProgress() || otaWebClientActive();
 }
 
 // ACTIVE -> REDUCED: close the web server cleanly before the radio drops.
