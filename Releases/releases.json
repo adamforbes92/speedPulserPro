@@ -10,13 +10,13 @@
       "notes": "OTA overhaul: update from GitHub, Home WiFi bridge mode, recovery page; shared ota_manager/wifi_manager v2.",
       "firmware": {
         "path": "V4.02/firmware.bin",
-        "size": 1267424,
-        "sha256": "c83b20c4447d88dbf5ed1583c0dcc9f227dde835c36fd9d2a94fb9a7de80ff6b"
+        "size": 1268176,
+        "sha256": "89bb70b038f38305d673dd139963bedaafcd20c3867b1d2d17dcdaf1e886270a"
       },
       "filesystem": {
         "path": "V4.02/littlefs.bin",
-        "size": 1441792,
-        "sha256": "8ab5d25461afa339350599fc5d5215b037dfad8cd1d3e122cd3b26fea7e1d434"
+        "size": 720896,
+        "sha256": "0785068cbe66d96c005eaee5367c6c477a6ff1d74645225a48b3450454401c3c"
       }
     },
     {
