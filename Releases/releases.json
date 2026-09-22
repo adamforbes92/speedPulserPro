@@ -1,0 +1,159 @@
+{
+  "product": "SpeedPulserPro",
+  "latest": "4.02",
+  "releases": [
+    {
+      "version": "4.02",
+      "channel": "stable",
+      "date": "2026-09-21",
+      "ota": true,
+      "notes": "OTA overhaul: update from GitHub, Home WiFi bridge mode, recovery page; shared ota_manager/wifi_manager v2.",
+      "firmware": {
+        "path": "V4.02/firmware.bin",
+        "size": 1267424,
+        "sha256": "c83b20c4447d88dbf5ed1583c0dcc9f227dde835c36fd9d2a94fb9a7de80ff6b"
+      },
+      "filesystem": {
+        "path": "V4.02/littlefs.bin",
+        "size": 1441792,
+        "sha256": "8ab5d25461afa339350599fc5d5215b037dfad8cd1d3e122cd3b26fea7e1d434"
+      }
+    },
+    {
+      "version": "4.01",
+      "channel": "stable",
+      "date": "2026-09-20",
+      "ota": true,
+      "notes": "Shared UI theme; common wifi_manager/ota_manager.",
+      "firmware": {
+        "path": "V4.01/firmware.bin",
+        "size": 1166272,
+        "sha256": "dfa2966cdef815f5b951e72bd4c96af6fa446a326be095cbd7f48b04bac6323a"
+      },
+      "filesystem": {
+        "path": "V4.01/littlefs.bin",
+        "size": 1441792,
+        "sha256": "70d8f17b668058791bed7e8bc909dca90cf5bd4d12e35cb3fe2db8d2c2acd12a"
+      }
+    },
+    {
+      "version": "4.00",
+      "channel": "stable",
+      "date": "2026-09-20",
+      "ota": true,
+      "notes": "",
+      "firmware": {
+        "path": "V4.00/firmware.bin",
+        "size": 1166288,
+        "sha256": "b7e523787b3b9e7d85b2d913a3bbbcbfb236dcec90b3695baad2edc0c2e3dc13"
+      },
+      "filesystem": {
+        "path": "V4.00/littlefs.bin",
+        "size": 1441792,
+        "sha256": "0960e2efd57b4dcc208b305c970106cac1635e848b0160ba93577b04f27f59f7"
+      }
+    },
+    {
+      "version": "3.04",
+      "channel": "stable",
+      "date": "2026-09-20",
+      "ota": true,
+      "notes": "",
+      "firmware": {
+        "path": "V3.04/firmware.bin",
+        "size": 1126240,
+        "sha256": "9c25e36143fb3f1576dc20aa22f9ff8f9785d81365dea15884b937f90f448105"
+      },
+      "filesystem": {
+        "path": "V3.04/littlefs.bin",
+        "size": 1441792,
+        "sha256": "6941fd45e5e9cdf4536874894c5826ad97303a60ecfcc15fe224f7445a6a591a"
+      }
+    },
+    {
+      "version": "2.50",
+      "channel": "stable",
+      "date": "2026-09-20",
+      "ota": true,
+      "notes": "",
+      "firmware": {
+        "path": "V2.50/firmware.bin",
+        "size": 1106832,
+        "sha256": "46969f798e71cda5323776c1c4601fdea6a950354543697b876ce97779799d79"
+      },
+      "filesystem": {
+        "path": "V2.50/littlefs.bin",
+        "size": 1441792,
+        "sha256": "b1d17556fac754ec91b1eb849e6ffb7eb11bb55af2366cd7ab6d3dc7243d87e1"
+      }
+    },
+    {
+      "version": "2.40",
+      "channel": "stable",
+      "date": "2026-09-20",
+      "ota": true,
+      "notes": "",
+      "firmware": {
+        "path": "V2.40/firmware.bin",
+        "size": 937360,
+        "sha256": "b6cc16d2ffcccd9a6cca9da371abb7f38db00eab703512a55bde363aa3872003"
+      },
+      "filesystem": {
+        "path": "V2.40/littlefs.bin",
+        "size": 1441792,
+        "sha256": "3ffddf8446ebe80680ad63e9fb922374fe454d8916e462d2ad5db4b1085227ef"
+      }
+    },
+    {
+      "version": "2.20",
+      "channel": "stable",
+      "date": "2026-09-20",
+      "ota": true,
+      "notes": "",
+      "firmware": {
+        "path": "V2.20/firmware.bin",
+        "size": 947744,
+        "sha256": "c32c99102a231f2d7070c5b0b817da7260a67c01099174a62629946670f1921c"
+      },
+      "filesystem": {
+        "path": "V2.20/littlefs.bin",
+        "size": 1441792,
+        "sha256": "0df2f08c97908286219c1d80e9ae409d11c6b4aa748afa22ce1fbc67fb5415c2"
+      }
+    },
+    {
+      "version": "2.10",
+      "channel": "stable",
+      "date": "2026-09-20",
+      "ota": true,
+      "notes": "",
+      "firmware": {
+        "path": "V2.10/firmware.bin",
+        "size": 947120,
+        "sha256": "e7b470bf3f9f1602756437b096b5c2f75647b1746d25dfa5d2c08c3d970289c9"
+      },
+      "filesystem": {
+        "path": "V2.10/littlefs.bin",
+        "size": 1441792,
+        "sha256": "4bd48f2a435c4eaca56e6772d7eb0ec6b3e6d4de26fcb005ce0e064dbc6e2d30"
+      }
+    },
+    {
+      "version": "2.00",
+      "channel": "stable",
+      "date": "2026-09-20",
+      "ota": true,
+      "notes": "",
+      "firmware": {
+        "path": "V2.00/firmware.bin",
+        "size": 897872,
+        "sha256": "e496c227dadb95161e2d209d484ecd6e42e960d0fbce2e1440e4c8d4de2cca0d"
+      },
+      "filesystem": {
+        "path": "V2.00/littlefs.bin",
+        "size": 1441792,
+        "sha256": "64f0e8b121794c4b634c0599d9468b048bfd3863c2350e287b81fc25a148c21d"
+      }
+    }
+  ]
+}
