@@ -543,7 +543,7 @@ void setupTimer()
   ledc_timer_config_t rpm_ledc_timer = {};
   rpm_ledc_timer.speed_mode = LEDC_MODE;
   rpm_ledc_timer.timer_num = LEDC_RPM_TIMER;
-  rpm_ledc_timer.freq_hz = 10;
+  rpm_ledc_timer.freq_hz = LEDC_RPM_LATCH_FREQ_HZ; // duty is 0 here; real rate set later
   rpm_ledc_timer.duty_resolution = LEDC_RESOLUTION;
   rpm_ledc_timer.clk_cfg = LEDC_AUTO_CLK;
   ledc_timer_config(&rpm_ledc_timer);
@@ -561,18 +561,34 @@ void setupTimer()
 }
 
 // Set RPM output frequency
+// LEDC latches a duty change on the timer's NEXT period, and IDF 5.5.2's
+// ledc_ll_set_duty_start() spins (interrupts disabled) on the previous latch:
+//   while (hw->channel_group[mode].channel[ch].conf1.duty_start);
+// At a few Hz that wait is hundreds of ms - past the 300 ms interrupt watchdog -
+// and the board panics with "Interrupt wdt timeout". It applies to BOTH high-
+// and low-speed mode on the ESP32. So: make every duty change while the timer
+// is parked fast, then set the real rate (a frequency change needs no latch),
+// and turn the output off with ledc_stop(), which applies immediately.
 void setFrequencyRPM(long frequencyHz)
 {
+  static bool outputOn = false;
+
   if (frequencyHz > 0)
   {
+    if (!outputOn)
+    {
+      // Latch 50% duty while the timer is fast, THEN drop to the real rate.
+      ledc_set_freq(LEDC_MODE, LEDC_RPM_TIMER, LEDC_RPM_LATCH_FREQ_HZ);
+      ledc_set_duty(LEDC_MODE, LEDC_RPM_CHANNEL, LEDC_RPM_DUTY_50);
+      ledc_update_duty(LEDC_MODE, LEDC_RPM_CHANNEL);
+      outputOn = true;
+    }
     ledc_set_freq(LEDC_MODE, LEDC_RPM_TIMER, (uint32_t)frequencyHz);
-    ledc_set_duty(LEDC_MODE, LEDC_RPM_CHANNEL, LEDC_RPM_DUTY_50);
-    ledc_update_duty(LEDC_MODE, LEDC_RPM_CHANNEL);
   }
-  else
+  else if (outputOn)
   {
-    ledc_set_duty(LEDC_MODE, LEDC_RPM_CHANNEL, 0);
-    ledc_update_duty(LEDC_MODE, LEDC_RPM_CHANNEL);
+    ledc_stop(LEDC_MODE, LEDC_RPM_CHANNEL, 0); // idle low, applied immediately
+    outputOn = false;
   }
 }
 

@@ -28,6 +28,7 @@
 #define LEDC_RPM_TIMER LEDC_TIMER_1
 #define LEDC_RPM_CHANNEL LEDC_CHANNEL_1
 #define LEDC_RPM_DUTY_50 (1U << ((uint32_t)LEDC_RESOLUTION - 1U))
+#define LEDC_RPM_LATCH_FREQ_HZ 5000 // duty changes are latched at this rate - see setFrequencyRPM()
 #define SPEED_OFFSET_CURVE_POINTS 5
 extern RunningMedian samples;
 extern RunningMedian samplesRPM;
