@@ -14,8 +14,9 @@
 
 // ===== V_ADJ "DAC" (buck voltage control, V4 board) =====
 // A separate LEDC timer/channel drives GPIO33 as a PWM->RC analogue setpoint into
-// the buck FB node. CH0/TIMER0 = motor and CH1/TIMER1 = RPM (see globals.h), so
-// V_ADJ takes CH2/TIMER2. 20 kHz sits far above the FB injection RC corner, so the
+// the buck FB node. CH0/TIMER0 = motor (see globals.h); the RPM output is a
+// GPTimer square wave, not LEDC. V_ADJ keeps CH2/TIMER2 so it never collides with
+// anything else. 20 kHz sits far above the FB injection RC corner, so the
 // residual ripple on the motor rail is negligible.
 #define LEDC_CHANNEL_VADJ  LEDC_CHANNEL_2
 #define LEDC_TIMER_VADJ    LEDC_TIMER_2
