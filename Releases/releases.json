@@ -1,17 +1,99 @@
 {
   "product": "SpeedPulserPro",
-  "latest": "4.02",
+  "latest": "5.02",
+  "latestByBoard": {
+    "esp32": "5.02",
+    "esp32s3": "5.02"
+  },
   "releases": [
+    {
+      "version": "5.02",
+      "channel": "stable",
+      "date": "2026-10-12",
+      "ota": true,
+      "notes": "RPM input now passes through to the tach 1:1 (was ~30 RPM low); fractional-Hz RPM output; per-input glitch filter so 6/8-cyl RPM above 333 Hz no longer reads half; RPM Filter Samples = 1 no longer outputs 0 RPM.",
+      "boards": {
+        "esp32": {
+          "firmware": {
+            "path": "V5.02/firmware.bin",
+            "size": 1282560,
+            "sha256": "1d79b4fbcf3ecc4fbd464de330b0f464df8968054ba5b383b98500f9f8d85401"
+          },
+          "filesystem": {
+            "path": "V5.02/littlefs.bin",
+            "size": 655360,
+            "sha256": "2029ff17546c72f403cc43286cbe73a7e7152bc9ee84b5edfcbed3fccdfbe192"
+          }
+        },
+        "esp32s3": {
+          "firmware": {
+            "path": "V5.02-S3/firmware.bin",
+            "size": 1293584,
+            "sha256": "25ea4e76ef344b3753f3c4aa11a6ec7c3a43ad5e7b6ca0b85451c5978dae07ff"
+          },
+          "filesystem": {
+            "path": "V5.02-S3/littlefs.bin",
+            "size": 1048576,
+            "sha256": "0271a12b1997cc3d3f16e1df36688a58333a808779fb4b8b65c420265463dd4c"
+          }
+        }
+      },
+      "firmware": {
+        "path": "V5.02/firmware.bin",
+        "size": 1282560,
+        "sha256": "1d79b4fbcf3ecc4fbd464de330b0f464df8968054ba5b383b98500f9f8d85401"
+      },
+      "filesystem": {
+        "path": "V5.02/littlefs.bin",
+        "size": 655360,
+        "sha256": "2029ff17546c72f403cc43286cbe73a7e7152bc9ee84b5edfcbed3fccdfbe192"
+      }
+    },
+    {
+      "version": "5.01",
+      "channel": "stable",
+      "date": "2026-10-09",
+      "ota": true,
+      "notes": "First ESP32-S3 board release: buck voltage injection, single DRIVE value with multi-mark calibration, MAX9924 VR input. Per-board OTA with wrong-board protection.",
+      "boards": {
+        "esp32s3": {
+          "firmware": {
+            "path": "V5.01-S3/firmware.bin",
+            "size": 1293312,
+            "sha256": "7aed7ba7af038014a80da67a0c19cea961d451b03b784fd320360fbf51b7e558"
+          },
+          "filesystem": {
+            "path": "V5.01-S3/littlefs.bin",
+            "size": 1048576,
+            "sha256": "1b9096d4cadfddb39cefaa7220cc4d6f58edff0179660434110298e3e58c53db"
+          }
+        }
+      }
+    },
     {
       "version": "4.02",
       "channel": "stable",
       "date": "2026-09-21",
       "ota": true,
       "notes": "OTA overhaul: update from GitHub, Home WiFi bridge mode, recovery page; shared ota_manager/wifi_manager v2.",
+      "boards": {
+        "esp32": {
+          "firmware": {
+            "path": "V4.02/firmware.bin",
+            "size": 1274448,
+            "sha256": "305fdac808a6c2884bd4c6e7c1bf28b95d126ce16f520803773d1f2ccb7bff5c"
+          },
+          "filesystem": {
+            "path": "V4.02/littlefs.bin",
+            "size": 655360,
+            "sha256": "3a691a17fb451dd33492213bc64db8b867ecfcdfdb6a5b8728e7097e41e42a80"
+          }
+        }
+      },
       "firmware": {
         "path": "V4.02/firmware.bin",
-        "size": 1268480,
-        "sha256": "cf5e1c9abb68a677cb2796b688fcc6edddbb4483b09b329a785fda118d083df2"
+        "size": 1274448,
+        "sha256": "305fdac808a6c2884bd4c6e7c1bf28b95d126ce16f520803773d1f2ccb7bff5c"
       },
       "filesystem": {
         "path": "V4.02/littlefs.bin",
@@ -25,6 +107,20 @@
       "date": "2026-09-20",
       "ota": true,
       "notes": "Shared UI theme; common wifi_manager/ota_manager.",
+      "boards": {
+        "esp32": {
+          "firmware": {
+            "path": "V4.01/firmware.bin",
+            "size": 1166272,
+            "sha256": "dfa2966cdef815f5b951e72bd4c96af6fa446a326be095cbd7f48b04bac6323a"
+          },
+          "filesystem": {
+            "path": "V4.01/littlefs.bin",
+            "size": 1441792,
+            "sha256": "70d8f17b668058791bed7e8bc909dca90cf5bd4d12e35cb3fe2db8d2c2acd12a"
+          }
+        }
+      },
       "firmware": {
         "path": "V4.01/firmware.bin",
         "size": 1166272,
@@ -42,6 +138,20 @@
       "date": "2026-09-20",
       "ota": true,
       "notes": "",
+      "boards": {
+        "esp32": {
+          "firmware": {
+            "path": "V4.00/firmware.bin",
+            "size": 1166288,
+            "sha256": "b7e523787b3b9e7d85b2d913a3bbbcbfb236dcec90b3695baad2edc0c2e3dc13"
+          },
+          "filesystem": {
+            "path": "V4.00/littlefs.bin",
+            "size": 1441792,
+            "sha256": "0960e2efd57b4dcc208b305c970106cac1635e848b0160ba93577b04f27f59f7"
+          }
+        }
+      },
       "firmware": {
         "path": "V4.00/firmware.bin",
         "size": 1166288,
@@ -59,6 +169,20 @@
       "date": "2026-09-20",
       "ota": true,
       "notes": "",
+      "boards": {
+        "esp32": {
+          "firmware": {
+            "path": "V3.04/firmware.bin",
+            "size": 1126240,
+            "sha256": "9c25e36143fb3f1576dc20aa22f9ff8f9785d81365dea15884b937f90f448105"
+          },
+          "filesystem": {
+            "path": "V3.04/littlefs.bin",
+            "size": 1441792,
+            "sha256": "6941fd45e5e9cdf4536874894c5826ad97303a60ecfcc15fe224f7445a6a591a"
+          }
+        }
+      },
       "firmware": {
         "path": "V3.04/firmware.bin",
         "size": 1126240,
@@ -76,6 +200,20 @@
       "date": "2026-09-20",
       "ota": true,
       "notes": "",
+      "boards": {
+        "esp32": {
+          "firmware": {
+            "path": "V2.50/firmware.bin",
+            "size": 1106832,
+            "sha256": "46969f798e71cda5323776c1c4601fdea6a950354543697b876ce97779799d79"
+          },
+          "filesystem": {
+            "path": "V2.50/littlefs.bin",
+            "size": 1441792,
+            "sha256": "b1d17556fac754ec91b1eb849e6ffb7eb11bb55af2366cd7ab6d3dc7243d87e1"
+          }
+        }
+      },
       "firmware": {
         "path": "V2.50/firmware.bin",
         "size": 1106832,
@@ -93,6 +231,20 @@
       "date": "2026-09-20",
       "ota": true,
       "notes": "",
+      "boards": {
+        "esp32": {
+          "firmware": {
+            "path": "V2.40/firmware.bin",
+            "size": 937360,
+            "sha256": "b6cc16d2ffcccd9a6cca9da371abb7f38db00eab703512a55bde363aa3872003"
+          },
+          "filesystem": {
+            "path": "V2.40/littlefs.bin",
+            "size": 1441792,
+            "sha256": "3ffddf8446ebe80680ad63e9fb922374fe454d8916e462d2ad5db4b1085227ef"
+          }
+        }
+      },
       "firmware": {
         "path": "V2.40/firmware.bin",
         "size": 937360,
@@ -110,6 +262,20 @@
       "date": "2026-09-20",
       "ota": true,
       "notes": "",
+      "boards": {
+        "esp32": {
+          "firmware": {
+            "path": "V2.20/firmware.bin",
+            "size": 947744,
+            "sha256": "c32c99102a231f2d7070c5b0b817da7260a67c01099174a62629946670f1921c"
+          },
+          "filesystem": {
+            "path": "V2.20/littlefs.bin",
+            "size": 1441792,
+            "sha256": "0df2f08c97908286219c1d80e9ae409d11c6b4aa748afa22ce1fbc67fb5415c2"
+          }
+        }
+      },
       "firmware": {
         "path": "V2.20/firmware.bin",
         "size": 947744,
@@ -127,6 +293,20 @@
       "date": "2026-09-20",
       "ota": true,
       "notes": "",
+      "boards": {
+        "esp32": {
+          "firmware": {
+            "path": "V2.10/firmware.bin",
+            "size": 947120,
+            "sha256": "e7b470bf3f9f1602756437b096b5c2f75647b1746d25dfa5d2c08c3d970289c9"
+          },
+          "filesystem": {
+            "path": "V2.10/littlefs.bin",
+            "size": 1441792,
+            "sha256": "4bd48f2a435c4eaca56e6772d7eb0ec6b3e6d4de26fcb005ce0e064dbc6e2d30"
+          }
+        }
+      },
       "firmware": {
         "path": "V2.10/firmware.bin",
         "size": 947120,
@@ -144,6 +324,20 @@
       "date": "2026-09-20",
       "ota": true,
       "notes": "",
+      "boards": {
+        "esp32": {
+          "firmware": {
+            "path": "V2.00/firmware.bin",
+            "size": 897872,
+            "sha256": "e496c227dadb95161e2d209d484ecd6e42e960d0fbce2e1440e4c8d4de2cca0d"
+          },
+          "filesystem": {
+            "path": "V2.00/littlefs.bin",
+            "size": 1441792,
+            "sha256": "64f0e8b121794c4b634c0599d9468b048bfd3863c2350e287b81fc25a148c21d"
+          }
+        }
+      },
       "firmware": {
         "path": "V2.00/firmware.bin",
         "size": 897872,
