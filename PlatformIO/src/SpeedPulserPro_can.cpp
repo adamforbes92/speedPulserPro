@@ -28,7 +28,7 @@ void canInit()
   esp_err_t ret = twai_driver_install(&g_config, &t_config, &f_config);
   if (ret != ESP_OK)
   {
-    DEBUG_CAN("Failed to install TWAI driver");
+    DEBUG_CAN("Failed to install TWAI driver (%s)", esp_err_to_name(ret));
     return;
   }
 
@@ -36,11 +36,11 @@ void canInit()
   ret = twai_start();
   if (ret != ESP_OK)
   {
-    DEBUG_CAN("Failed to start TWAI driver");
+    DEBUG_CAN("Failed to start TWAI driver (%s)", esp_err_to_name(ret));
     return;
   }
 
-  DEBUG_CAN("TWAI driver initialised successfully");
+  DEBUG_CAN("TWAI driver initialised successfully (TX IO%d, RX IO%d)", pinTX_CAN, pinRX_CAN);
 
   // Create CAN receive task
   xTaskCreate(
@@ -86,6 +86,38 @@ void taskCANRx(void *parameter)
         xQueueSendToBack(udsRxQueue, &frame, 0);
       }
     }
+
+#if enableDebug && debugCAN
+    // Controller health every 2 s: shows whether the driver is running and whether
+    // the RX pin sees bus activity at all (bus errors / RX error counter climbing
+    // with zero frames = wrong bitrate or a corrupted RX signal; all zero = RX idle).
+    static uint32_t lastStatusMs = 0;
+    if (millis() - lastStatusMs > 2000)
+    {
+      lastStatusMs = millis();
+      twai_status_info_t st;
+      if (twai_get_status_info(&st) == ESP_OK)
+      {
+        static const char *stateName[] = {"STOPPED", "RUNNING", "BUS_OFF", "RECOVERING"};
+        DEBUG_CAN("status %s  rxQ:%lu txQ:%lu  rxErr:%lu txErr:%lu  busErr:%lu rxMissed:%lu rxOverrun:%lu arbLost:%lu  STB:%d RXpin:%d",
+                  st.state < 4 ? stateName[st.state] : "?",
+                  (unsigned long)st.msgs_to_rx, (unsigned long)st.msgs_to_tx,
+                  (unsigned long)st.rx_error_counter, (unsigned long)st.tx_error_counter,
+                  (unsigned long)st.bus_error_count, (unsigned long)st.rx_missed_count,
+                  (unsigned long)st.rx_overrun_count, (unsigned long)st.arb_lost_count,
+#if SPP_HAS_CAN_STANDBY
+                  digitalRead(pinCANStandby),
+#else
+                  -1,
+#endif
+                  gpio_get_level((gpio_num_t)pinRX_CAN)); // raw level: digitalRead() refuses a pin owned by TWAI
+      }
+      else
+      {
+        DEBUG_CAN("status: driver not installed");
+      }
+    }
+#endif
 
     // Give other tasks a chance to run
     vTaskDelay(pdMS_TO_TICKS(1));
@@ -185,7 +217,9 @@ void processTWAIMessage(const twai_message_t &frame)
     break;
 
   case emeraldECU1_ID:
-    vehicleRPM = ((buf[0] << 8) | buf[1]);
+    // CAN RPM source only: the RPM task decides what reaches the output (Test RPM
+    // first, then the selected source). Writing vehicleRPM here bypassed both.
+    vehicleRPMCAN = ((buf[0] << 8) | buf[1]);
     break;
 
   case emeraldECU2_ID:

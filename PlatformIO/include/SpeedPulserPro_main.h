@@ -4,7 +4,7 @@
 // Forward declarations for functions defined in main.cpp
 void incomingHz();
 void incomingMotorSpeed();
-void setFrequencyRPM(long frequencyHz);
+void setFrequencyRPM(float frequencyHz);
 uint16_t findClosestMatch(uint16_t val);
 
 #endif // MAIN_H

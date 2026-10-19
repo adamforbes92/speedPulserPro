@@ -119,18 +119,47 @@ void taskParseDSG(void *parameter)
 void taskProcessSpeed(void *parameter)
 {
   DEBUG_SPD("Speed processing task started");
+#if SPP_HAS_VR
   int rawCountVR = 0;                              // VR median-filter fill counter
+#endif
   uint16_t lastValidVehicleSpeed = 0;
+  uint8_t overRangeCount = 0;                     // loops in a row the selected source has read above Max Speed
   bool prevTestSpeedo = false;                    // Speed Test edge detect (global on/off gate)
-  TickType_t lastPidTick = xTaskGetTickCount();  // closed-loop PID cadence
-  TickType_t lastMeasTick = xTaskGetTickCount(); // open-loop tacho readout cadence
+  TickType_t lastTick = xTaskGetTickCount();     // 100 ms measure + control cadence
   TickType_t motorRunSince = 0;                  // when the motor started running with no feedback yet
 
   while (1)
   {
-    // V4 board with voltage control engaged: the buck rail + PWM are driven by the
-    // mid-ranging law instead of the legacy feed-forward / PID-trim path.
-    const bool voltageMode = boardHasVoltageControl && voltageControlEnable;
+#if SPP_HAS_VOLTAGE_CTRL
+    // Test Board owns the motor PWM and the rail while it runs — stay hands-off.
+    if (boardTestActive)
+    {
+      vTaskDelay(pdMS_TO_TICKS(DELAY_SPEED));
+      continue;
+    }
+#endif
+
+    // One 100 ms tick for everything that measures or closes a loop: the tacho
+    // (and on the S3 the rail) are read here in EVERY mode, so the read-outs never
+    // freeze, and the control laws below run on the same tick with the fresh reading.
+    const bool tick = (xTaskGetTickCount() - lastTick) >= pdMS_TO_TICKS(100);
+    if (tick)
+    {
+      lastTick = xTaskGetTickCount();
+#if SPP_HAS_VOLTAGE_CTRL
+      updateMotorRail();
+#endif
+      updateMeasuredFreq();
+    }
+
+#if SPP_HAS_VOLTAGE_CTRL
+    // S3 board with voltage control engaged: the motor is driven from the drive
+    // calibration (rail + PWM together) instead of the legacy duty tables.
+    const bool voltageMode = voltageControlEnable;
+#else
+    const bool voltageMode = false; // DevKit: PWM motor drive only
+    (void)voltageMode;
+#endif
 
     // Speed Test acts as a global on/off: the instant it is switched OFF, drop the
     // held test speed and clear the hall state so the needle returns to rest (or the
@@ -143,20 +172,27 @@ void taskProcessSpeed(void *parameter)
       dutyCycleIncoming = 0;
       vehicleSpeedHall = 0;
       hallSpeed = 0;
+#if SPP_HAS_VR
       vehicleSpeedVR = 0;
       vrSpeed = 0;
       dutyCycleIncomingVR = 0;
       rawCountVR = 0;
       samplesVR.clear();
+      resetVRPulseCounter();
+#endif
       currentSpeedOffset = 0;
       resetHallMedianFilter();
       resetHallPulseCounter();
-      resetVRPulseCounter();
-      setMotorDutyRaw(0);
+#if SPP_HAS_VOLTAGE_CTRL
       if (voltageMode)
       {
-        resetMidRanging();
-        setMotorVoltageCmd(vcVoltMin); // drop the rail back to minimum when idle
+        resetDriveControl();
+        applyMotorDrive(0.0f); // motor off, rail back to minimum
+      }
+      else
+#endif
+      {
+        setMotorDutyRaw(0);
       }
     }
     prevTestSpeedo = testSpeedo;
@@ -231,6 +267,7 @@ void taskProcessSpeed(void *parameter)
       }
     }
 
+#if SPP_HAS_VR
     // Handle VR (variable-reluctance) pulse processing and averaging — counted and
     // mapped exactly like the hall input, but with its own frequency/filter state.
     if (!testSpeedo && !testCal)
@@ -276,26 +313,32 @@ void taskProcessSpeed(void *parameter)
         }
       }
     }
+#endif // SPP_HAS_VR
 
     // Calibration mode drives the raw 12-bit hardware duty directly (0..PWM_DUTY_MAX)
     if (testCal)
     {
-      dutyCycle = constrain(tempDutyCycle, 0, (long)PWM_DUTY_MAX);
-      // V4 calibration is manual: the user lifts VOLTAGE and/or PWM until the needle
-      // pegs the top mark, then captures the measured RPM as feedbackMaxFreq. Drive
-      // both actuators straight from the UI.
+#if SPP_HAS_VOLTAGE_CTRL
       if (voltageMode)
       {
-        setMotorVoltageCmd(dutyCycle == 0 ? vcVoltMin : tempVoltageCmd);
+        // Drive calibration: the user sets the drive directly (rail first, then
+        // PWM below Minimum Rail) until the needle sits on a mark, then captures it.
+        if (tick)
+        {
+          const uint16_t d = applyMotorDrive(tempDriveV);
+          dutyCycle = d;
+          tempDutyCycle = d;
+          pidCorrection = 0;
+        }
       }
-      setMotorDutyRaw((uint32_t)dutyCycle);
-      // Keep the tacho readout live so measured speed shows and feedbackAvailable
-      // can latch while jogging the motor to build a calibration.
-      if ((xTaskGetTickCount() - lastMeasTick) >= pdMS_TO_TICKS(100))
+      else
+#endif
       {
-        lastMeasTick = xTaskGetTickCount();
-        updateMeasuredFreq();
+        dutyCycle = constrain(tempDutyCycle, 0, (long)PWM_DUTY_MAX);
+        setMotorDutyRaw((uint32_t)dutyCycle);
       }
+      // The tacho readout stays live (measured on the tick above) so measured
+      // speed shows and feedbackAvailable can latch while building a calibration.
       vTaskDelay(pdMS_TO_TICKS(DELAY_SPEED));
       continue;
     }
@@ -322,14 +365,18 @@ void taskProcessSpeed(void *parameter)
     else
     {
       uint16_t rawVehicleSpeed = 0;
+      // Only one source should be on, but if two are, the LAST one below wins.
+      // activeSpeedSourceName() in _wifi.cpp checks them in the same order so the web page agrees.
       if (useHall)
       {
         rawVehicleSpeed = hallSpeed;
       }
+#if SPP_HAS_VR
       if (useVR)
       {
         rawVehicleSpeed = vrSpeed;
       }
+#endif
       if (useECU)
       {
         rawVehicleSpeed = ecuSpeed;
@@ -363,10 +410,21 @@ void taskProcessSpeed(void *parameter)
       {
         vehicleSpeed = rawVehicleSpeed;
         lastValidVehicleSpeed = vehicleSpeed;
+        overRangeCount = 0;
+      }
+      else if (overRangeCount < SPEED_OVER_RANGE_LOOPS)
+      {
+        // Above Max Speed for a moment: treat it as a spike (CAN error value, GPS glitch)
+        // and hold the last good speed
+        overRangeCount++;
+        vehicleSpeed = constrain(lastValidVehicleSpeed, 0, maxSpeed);
       }
       else
       {
-        vehicleSpeed = constrain(lastValidVehicleSpeed, 0, maxSpeed);
+        // Still above Max Speed after 0.5 s: it's real, so park the needle at Max Speed.
+        // Up to V5.02 it held the last good speed for ever, which is 0 straight after
+        // boot, so an ECU sending more than Max Speed never moved the needle at all
+        vehicleSpeed = maxSpeed;
       }
 
       dutyCycle = applyConfiguredSpeedOffset(vehicleSpeed);
@@ -390,26 +448,26 @@ void taskProcessSpeed(void *parameter)
     // when Speed Test is disabled (or the slider/source reads 0).
     uint32_t baseDuty = (vehicleSpeed == 0) ? 0 : speedToPwmDuty((uint16_t)dutyCycle);
 
-    // Closed-loop PID trim, or plain open-loop write.
-    // The PID and the tacho readout run on a fixed 100 ms cadence regardless of the
-    // 50 ms task period, so the derivative/integral maths stay time-consistent.
+    // Drive calibration (S3, voltage control on), closed-loop PID trim, or plain
+    // open-loop write. The drive and the PID run on the fixed 100 ms tick regardless
+    // of the 50 ms task period, so the integral maths stay time-consistent.
+#if SPP_HAS_VOLTAGE_CTRL
     if (voltageMode)
     {
-      // V4 mid-ranging: the fast PWM loop tracks target RPM while the slow loop
-      // schedules the buck voltage. Runs even at target 0 so the rail parks at min.
-      if ((xTaskGetTickCount() - lastPidTick) >= pdMS_TO_TICKS(100))
+      // Open-loop drive from the calibration marks (+ the optional slow feedback
+      // trim). Runs even at target 0 so the motor stops and the rail parks at min.
+      if (tick)
       {
-        lastPidTick = xTaskGetTickCount();
         uint16_t vcTarget = (vehicleSpeed == 0) ? 0 : (uint16_t)dutyCycle;
-        int16_t d = applyMidRangingControl(vcTarget);
-        setMotorDutyRaw((uint32_t)d);
+        applyDriveControl(vcTarget);
       }
     }
-    else if (pidActive)
+    else
+#endif
+    if (pidActive)
     {
-      if ((xTaskGetTickCount() - lastPidTick) >= pdMS_TO_TICKS(100))
+      if (tick)
       {
-        lastPidTick = xTaskGetTickCount();
         int16_t trimmedDuty = applyFeedbackTrim((uint16_t)dutyCycle, (uint16_t)baseDuty);
         setMotorDutyRaw((uint32_t)trimmedDuty);
       }
@@ -417,13 +475,6 @@ void taskProcessSpeed(void *parameter)
     else
     {
       setMotorDutyRaw(baseDuty);
-      // Keep the measured-speed/tacho readout live even when the loop is off (or
-      // feedback isn't available yet, so it can latch as soon as a signal appears).
-      if ((xTaskGetTickCount() - lastMeasTick) >= pdMS_TO_TICKS(100))
-      {
-        lastMeasTick = xTaskGetTickCount();
-        updateMeasuredFreq();
-      }
     }
 
     // Delay before next processing
@@ -442,91 +493,91 @@ void taskProcessRPM(void *parameter)
 
   while (1)
   {
+    // Hz <-> RPM scale: Cluster Frequency Limit (maxRPM, Hz) = Cluster RPM Limit.
+    // Only used to show the hall RPM and to turn CAN / Test RPM into Hz. The hall
+    // input itself is passed through in Hz, so this scale can't touch it — up to
+    // V5.01 it went Hz -> RPM -> Hz through two truncating map()s and came out ~1 Hz
+    // (~30 RPM) low.
+    const float hzPerRpm = (clusterRPMLimit > 0) ? (float)maxRPM / (float)clusterRPMLimit : 0.0f;
+    const float rpmPerHz = (maxRPM > 0) ? (float)clusterRPMLimit / (float)maxRPM : 0.0f;
+
     // Windowed frequency: read-and-clear the RPM accumulator once per loop so the
     // reading is a true average over the window rather than one jittery period.
     float rpmHz = readRPMHz();
     if (rpmHz >= 0.0f)
-      dutyCycleMotor = (unsigned long)(rpmHz + 0.5f);
+      rpmInputHz = rpmHz;
 
     // Always compute Hall RPM for live display, but clear stale data after timeout
-    if ((millis() + 10 - lastPulseRPM) > durationReset)
+    bool rpmInputStale = (millis() + 10 - lastPulseRPM) > durationReset;
+    if (rpmInputStale)
     {
-      dutyCycleMotor = 0;
+      rpmInputHz = 0.0f;
       vehicleRPMHall = 0;
       resetRPMPulseCounter();
     }
     else
     {
-      vehicleRPMHall = map(dutyCycleMotor, 0, maxRPM, 0, clusterRPMLimit);
+      vehicleRPMHall = (uint16_t)constrain(lroundf(rpmInputHz * rpmPerHz), 0L, 65535L);
     }
 
-    // Handle RPM input - test mode or selected live source
+    // Handle RPM input - test mode or selected live source. Each branch sets the
+    // output frequency (Hz) and the RPM shown/broadcast.
+    float targetFreqRPM = 0.0f;
     if (testRPM)
     {
-      vehicleRPM = tempRPM;
+      vehicleRPM = (uint16_t)constrain(tempRPM, 0L, (long)clusterRPMLimit);
+      targetFreqRPM = vehicleRPM * hzPerRpm;
+    }
+    else if (useRPMCAN)
+    {
+      vehicleRPM = min(vehicleRPMCAN, clusterRPMLimit);
+      targetFreqRPM = vehicleRPM * hzPerRpm;
     }
     else
     {
-      if (useRPMCAN)
+      if (rpmInputStale)
       {
-        vehicleRPM = vehicleRPMCAN;
+        resetRPMMedianFilter();
       }
-      else
+      else if (averageFilterRPM <= 1)
       {
-        if ((millis() + 10 - lastPulseRPM) > durationReset)
+        // Reset first: it clears filteredRPMHz too (up to V5.01 the reset came
+        // second, so 1 filter sample always output 0 RPM).
+        resetRPMMedianFilter();
+        filteredRPMHz = rpmInputHz;
+      }
+      else if (rpmHz >= 0.0f)
+      {
+        // Window-driven median top-up: feed one averaged sample per capture
+        // window. The windowed frequency has already averaged out tooth-spacing
+        // jitter, so the median just trims the occasional outlier — unlike the old
+        // single-period path where one latched glitch filled several median slots
+        // and slipped through (10k, 2k, ...).
+        if (rawCountRPM < averageFilterRPM)
         {
-          vehicleRPM = 0;
-          vehicleRPMHall = 0;
-          resetRPMMedianFilter();
+          samplesRPM.add(rpmInputHz);
+          rawCountRPM++;
         }
-        else
+
+        if (rawCountRPM >= averageFilterRPM)
         {
-          if (averageFilterRPM <= 1)
-          {
-            filteredRPM = vehicleRPMHall;
-            resetRPMMedianFilter();
-          }
-          else if (rpmHz >= 0.0f)
-          {
-            // Window-driven median top-up: feed one averaged sample per capture
-            // window. The windowed frequency has already averaged out tooth-spacing
-            // jitter, so the median just trims the occasional outlier — unlike the old
-            // single-period path where one latched glitch filled several median slots
-            // and slipped through (10k, 2k, ...).
-            if (rawCountRPM < averageFilterRPM)
-            {
-              samplesRPM.add(vehicleRPMHall);
-              rawCountRPM++;
-            }
-
-            if (rawCountRPM >= averageFilterRPM)
-            {
-              filteredRPM = (uint16_t)samplesRPM.getMedian();
-              rawCountRPM = 0;
-              samplesRPM.clear();
-            }
-          }
-
-          vehicleRPM = filteredRPM;
+          filteredRPMHz = samplesRPM.getMedian();
+          rawCountRPM = 0;
+          samplesRPM.clear();
         }
       }
+
+      // Hall input -> output 1:1 in Hz, capped at the cluster limit like CAN / Test.
+      targetFreqRPM = min(filteredRPMHz, (float)maxRPM);
+      vehicleRPM = (uint16_t)constrain(lroundf(targetFreqRPM * rpmPerHz), 0L, (long)clusterRPMLimit);
     }
 
-    // Clamp RPM so both Hall and CAN use the same configured cluster limit
-    vehicleRPM = constrain(vehicleRPM, 0, clusterRPMLimit);
-
-    // Map RPM to PWM frequency and output — only drive coil when coilType is enabled.
-    // Only reprogram the LEDC timer when the target frequency actually changes:
-    // ledc_set_freq() reconfigures the timer inside a critical section, so
-    // skipping redundant calls keeps interrupt-masking to a minimum.
-    static long lastAppliedFreqRPM = -1;
-    long targetFreqRPM = coilType ? map(vehicleRPM, 0, clusterRPMLimit, 0, maxRPM) : 0;
-    if (targetFreqRPM != lastAppliedFreqRPM)
-    {
-      setFrequencyRPM(targetFreqRPM);
-      lastAppliedFreqRPM = targetFreqRPM;
-    }
-    frequencyRPM = targetFreqRPM;
+    // Drive the coil only when coilType is enabled. setFrequencyRPM() skips the
+    // timer re-arm when the period hasn't changed.
+    if (!coilType)
+      targetFreqRPM = 0.0f;
+    setFrequencyRPM(targetFreqRPM);
+    frequencyRPM = lroundf(targetFreqRPM);
 
 #if enableDebug && debugRPM
     if (vehicleRPM > 0)

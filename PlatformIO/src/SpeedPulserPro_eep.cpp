@@ -1,6 +1,7 @@
 #include "SpeedPulserPro_eep.h"
 #include "SpeedPulserPro_control.h"
 #include "SpeedPulserPro_voltage.h"
+#include "SpeedPulserPro_driveCal.h"
 #include "SpeedPulserPro_gps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -63,7 +64,7 @@ void readEEP()
   pref.begin("clusterRPMLimit", false);
 
   pref.begin("speedOffset", false);
-  pref.begin("speedOffsetPositive", false);
+  pref.begin("spdOffsetPos", false);
   pref.begin("useGlobalOffset", false);
   pref.begin("useCurve", false);
   pref.begin("curveO0", false);
@@ -95,7 +96,7 @@ void readEEP()
   pref.begin("fbDeadband", false);
   pref.begin("fbMinSpd", false);
   pref.begin("fbMaxFreq", false);
-  pref.begin("reverseDir", false);
+  pref.begin("revDir", false);
 
   if (pref.getUChar("motorPerfVal", 255) == 255)
   {
@@ -140,7 +141,7 @@ void readEEP()
     pref.putUShort("clusterRPMLimit", clusterRPMLimit);
 
     pref.putUChar("speedOffset", speedOffset);
-    pref.putBool("speedOffsetPositive", speedOffsetPositive);
+    pref.putBool("spdOffsetPos", speedOffsetPositive);
     pref.putBool("useGlobalOffset", useGlobalSpeedOffset);
     pref.putBool("useCurve", useSpeedOffsetCurve);
     pref.putShort("curveO0", speedOffsetCurveOffsets[0]);
@@ -173,7 +174,7 @@ void readEEP()
     pref.putFloat("dsgFinal56", dsgFinalDrive56);
     pref.putFloat("dsgTireCirc", dsgTireCirc);
 
-    pref.putBool("reverseDir", reverseDirection);
+    pref.putBool("revDir", reverseDirection);
 
     pref.putBool("fbEnable", feedbackEnable);
     pref.putFloat("pidKp", pidKp);
@@ -183,21 +184,21 @@ void readEEP()
     pref.putUShort("fbMinSpd", feedbackMinSpeed);
     pref.putUShort("fbMaxFreq", feedbackMaxFreq);
 
-    // V4 buck voltage control
+#if SPP_HAS_VOLTAGE_CTRL
+    // Buck voltage control (S3 board)
     pref.putBool("vcEnable", voltageControlEnable);
     pref.putFloat("vcPwmNom", vcPwmNominal);
-    pref.putFloat("vcPwmMin", vcPwmMin);
-    pref.putFloat("vcVoltMin", vcVoltMin);
-    pref.putFloat("vcVoltMax", vcVoltMax);
-    pref.putFloat("vcVoltGain", vcVoltGain);
-    pref.putFloat("vcKp", vcKp);
-    pref.putFloat("vcKi", vcKi);
-    pref.putFloat("vcKd", vcKd);
+#endif
 
+#if SPP_HAS_VR
     // VR (variable-reluctance) speed input
     pref.putBool("useVR", useVR);
     pref.putUShort("maxFreqVR", maxFreqVR);
     pref.putUChar("avgFilterVR", averageFilterVR);
+#endif
+#if SPP_HAS_SPEED_BIAS
+    pref.putUChar("spdBias", speedInputBias);
+#endif
   }
   else
   {
@@ -237,7 +238,9 @@ void readEEP()
     clusterRPMLimit = pref.getUShort("clusterRPMLimit", 7000);
 
     speedOffset = pref.getUChar("speedOffset", 0);
-    speedOffsetPositive = pref.getBool("speedOffsetPositive", 0);
+    // Saved as "spdOffsetPos" since after V5.02: the old name "speedOffsetPositive" was 19 letters,
+    // over the ESP32's 15-letter limit, so it never saved and a + offset came back as - after a restart
+    speedOffsetPositive = pref.getBool("spdOffsetPos", 0);
     useGlobalSpeedOffset = pref.getBool("useGlobalOffset", true);
     useSpeedOffsetCurve = pref.getBool("useCurve", false);
     speedOffsetCurveOffsets[0] = pref.getShort("curveO0", 0);
@@ -272,7 +275,7 @@ void readEEP()
     dsgFinalDrive56 = pref.getFloat("dsgFinal56", dsgFinalDrive56);
     dsgTireCirc = pref.getFloat("dsgTireCirc", dsgTireCirc);
 
-    reverseDirection = pref.getBool("reverseDir", false);
+    reverseDirection = pref.getBool("revDir", false);
 
     feedbackEnable = pref.getBool("fbEnable", false);
     pidKp = pref.getFloat("pidKp", 0.15f);
@@ -282,26 +285,83 @@ void readEEP()
     feedbackMinSpeed = pref.getUShort("fbMinSpd", 40);
     feedbackMaxFreq = pref.getUShort("fbMaxFreq", 254);
 
-    // V4 buck voltage control
+#if SPP_HAS_VOLTAGE_CTRL
+    // Buck voltage control (S3 board)
     voltageControlEnable = pref.getBool("vcEnable", true);
-    vcPwmNominal = pref.getFloat("vcPwmNom", 0.70f);
-    vcPwmMin = pref.getFloat("vcPwmMin", 0.15f);
-    vcVoltMin = pref.getFloat("vcVoltMin", 0.15f);
-    vcVoltMax = pref.getFloat("vcVoltMax", 1.00f);
-    vcVoltGain = pref.getFloat("vcVoltGain", 0.50f);
-    vcKp = pref.getFloat("vcKp", 1.50f);
-    vcKi = pref.getFloat("vcKi", 2.00f);
-    vcKd = pref.getFloat("vcKd", 0.00f);
+    vcPwmNominal = pref.getFloat("vcPwmNom", 0.80f);
+#endif
 
+#if SPP_HAS_VR
     // VR (variable-reluctance) speed input
     useVR = pref.getBool("useVR", false);
     maxFreqVR = pref.getUShort("maxFreqVR", 200);
     averageFilterVR = pref.getUChar("avgFilterVR", legacyAverage);
+#else
+    // A settings image carried over from a VR-capable build may have "VR" as the
+    // active source; with no VR input on this board make sure hall takes over.
+    if (pref.getBool("useVR", false) && !useDSG && !useGPS && !useABS && !useECU && !useUDS && !useTP20 && !useAftermarket)
+      useHall = true;
+#endif
+#if SPP_HAS_SPEED_BIAS
+    speedInputBias = pref.getUChar("spdBias", SPEED_BIAS_NONE);
+#endif
   }
+
+#if SPP_HAS_VOLTAGE_CTRL
+  // Test Board result and V5.01 drive settings + calibration marks. Read outside
+  // the first-run branch: units updated from older firmware have none of these
+  // keys yet, so they come up with the defaults / "not calibrated".
+  vcRailMaxV = pref.getFloat("vcRailMax", vcRailMaxV);
+  vcTrimGain = pref.getFloat("vcTrimG", vcTrimGain);
+  vcTrimLimit = pref.getFloat("vcTrimL", vcTrimLimit);
+  driveCalCount = 0;
+  const uint8_t dcN = pref.getUChar("dcN", 0);
+  if (dcN > 0 && dcN <= DRIVE_CAL_MAX &&
+      pref.getBytesLength("dcPts") == sizeof(DriveCalPoint) * dcN)
+  {
+    pref.getBytes("dcPts", driveCal, sizeof(DriveCalPoint) * dcN);
+    driveCalCount = dcN;
+  }
+  else if (!pref.isKey("dcN"))
+  {
+    // V5.00 stored one top-speed point; carry it over as the first mark.
+    const uint16_t topSpd = pref.getUShort("calTopSpd", 0);
+    const float topHz = pref.getFloat("calTopHz", 0.0f);
+    const float topV = pref.getFloat("calTopV", 0.0f);
+    const float topPwm = pref.getFloat("calTopPwm", 0.0f);
+    if (topSpd > 0 && topV > 0.0f && topPwm > 0.0f)
+    {
+      driveCal[0] = {topSpd, topHz, topV * topPwm, topV, topPwm};
+      driveCalCount = 1;
+      DEBUG_EEP("migrated V5.00 top point %u = %.1f Hz @ %.2f V x %.0f%%", topSpd, topHz, topV, topPwm * 100.0f);
+    }
+  }
+  boardTestCode = pref.getUChar("btCode", BT_NOT_RUN);
+  for (uint8_t i = 0; i < BOARD_TEST_POINTS; i++)
+  {
+    char key[8];
+    snprintf(key, sizeof key, "btV%u", (unsigned)i);
+    boardTestMeasV[i] = pref.getFloat(key, 0.0f);
+  }
+  railFitV0 = pref.getFloat("btFitV0", RAIL_MODEL_V0);
+  railFitSlope = pref.getFloat("btFitK", RAIL_MODEL_SLOPE);
+  railFitValid = (boardTestCode == BT_PASS && railFitSlope < -6.0f && railFitSlope > -16.0f);
+  if (!railFitValid)
+  {
+    railFitV0 = RAIL_MODEL_V0;
+    railFitSlope = RAIL_MODEL_SLOPE;
+  }
+  syncFeedbackMaxFreq(); // Hz-at-maxSpeed follows the captured marks
+#endif
 
   averageFilterHall = constrain(averageFilterHall, 1, 10);
   averageFilterRPM = constrain(averageFilterRPM, 1, 10);
+#if SPP_HAS_VR
   averageFilterVR = constrain(averageFilterVR, 1, 10);
+#endif
+#if SPP_HAS_SPEED_BIAS
+  if (speedInputBias > SPEED_BIAS_PULL_DOWN) speedInputBias = SPEED_BIAS_NONE;
+#endif
   broadcastSpeedLowByte = constrain(broadcastSpeedLowByte, 0, 7);
   broadcastSpeedHighByte = constrain(broadcastSpeedHighByte, 0, 7);
   broadcastSpeedDLC = constrain(broadcastSpeedDLC, 0, 8);
@@ -381,7 +441,7 @@ void writeEEP()
   pref.putUShort("clusterRPMLimit", clusterRPMLimit);
 
   pref.putUChar("speedOffset", speedOffset);
-  pref.putBool("speedOffsetPositive", speedOffsetPositive);
+  pref.putBool("spdOffsetPos", speedOffsetPositive);
   pref.putBool("useGlobalOffset", useGlobalSpeedOffset);
   pref.putBool("useCurve", useSpeedOffsetCurve);
   pref.putShort("curveO0", speedOffsetCurveOffsets[0]);
@@ -415,7 +475,7 @@ void writeEEP()
   pref.putFloat("dsgFinal56", dsgFinalDrive56);
   pref.putFloat("dsgTireCirc", dsgTireCirc);
 
-  pref.putBool("reverseDir", reverseDirection);
+  pref.putBool("revDir", reverseDirection);
 
   pref.putBool("fbEnable", feedbackEnable);
   pref.putFloat("pidKp", pidKp);
@@ -425,21 +485,41 @@ void writeEEP()
   pref.putUShort("fbMinSpd", feedbackMinSpeed);
   pref.putUShort("fbMaxFreq", feedbackMaxFreq);
 
-  // V4 buck voltage control
+#if SPP_HAS_VOLTAGE_CTRL
+  // Buck voltage control (S3 board)
   pref.putBool("vcEnable", voltageControlEnable);
   pref.putFloat("vcPwmNom", vcPwmNominal);
-  pref.putFloat("vcPwmMin", vcPwmMin);
-  pref.putFloat("vcVoltMin", vcVoltMin);
-  pref.putFloat("vcVoltMax", vcVoltMax);
-  pref.putFloat("vcVoltGain", vcVoltGain);
-  pref.putFloat("vcKp", vcKp);
-  pref.putFloat("vcKi", vcKi);
-  pref.putFloat("vcKd", vcKd);
+  pref.putFloat("vcRailMax", vcRailMaxV);
+  pref.putFloat("vcTrimG", vcTrimGain);
+  pref.putFloat("vcTrimL", vcTrimLimit);
+  pref.putUChar("dcN", driveCalCount);
+  if (driveCalCount > 0)
+  {
+    pref.putBytes("dcPts", driveCal, sizeof(DriveCalPoint) * driveCalCount);
+  }
+  if (!boardTestActive) // don't save a half-finished test
+  {
+    pref.putUChar("btCode", boardTestCode);
+    for (uint8_t i = 0; i < BOARD_TEST_POINTS; i++)
+    {
+      char key[8];
+      snprintf(key, sizeof key, "btV%u", (unsigned)i);
+      pref.putFloat(key, boardTestMeasV[i]);
+    }
+    pref.putFloat("btFitV0", railFitV0);
+    pref.putFloat("btFitK", railFitSlope);
+  }
+#endif
 
+#if SPP_HAS_VR
   // VR (variable-reluctance) speed input
   pref.putBool("useVR", useVR);
   pref.putUShort("maxFreqVR", maxFreqVR);
   pref.putUChar("avgFilterVR", averageFilterVR);
+#endif
+#if SPP_HAS_SPEED_BIAS
+  pref.putUChar("spdBias", speedInputBias);
+#endif
 
 #if serialDebugEEP
   Serial.println("[EEP] Written EEPROM with data:...");

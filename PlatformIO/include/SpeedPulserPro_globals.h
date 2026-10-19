@@ -3,6 +3,8 @@
 
 #include "Arduino.h"
 #include "driver/ledc.h"
+#include "soc/soc_caps.h"
+#include "SpeedPulserPro_board.h" // SPP_BOARD_* / SPP_HAS_* (self-contained, safe to include first)
 #include <RunningMedian.h>
 #include <Preferences.h>
 #include <WiFi.h>
@@ -21,14 +23,23 @@
 // ============================================================================
 // LEDC PWM Control
 #define LEDC_TIMER LEDC_TIMER_0
+// The classic ESP32 has a high-speed LEDC timer group; the S3 only has the
+// low-speed group, so the mode follows the chip's capabilities. (The RPM output
+// is a GPTimer-toggled pin on both boards, so it never touches LEDC.)
+#if SOC_LEDC_SUPPORT_HS_MODE
 #define LEDC_MODE LEDC_HIGH_SPEED_MODE
+#else
+#define LEDC_MODE LEDC_LOW_SPEED_MODE
+#endif
 #define LEDC_OUTPUT_CHANNEL LEDC_CHANNEL_0
 #define LEDC_RESOLUTION LEDC_TIMER_10_BIT
 #define LEDC_FREQUENCY (10000)
 #define SPEED_OFFSET_CURVE_POINTS 5
 extern RunningMedian samples;
 extern RunningMedian samplesRPM;
+#if SPP_HAS_VR
 extern RunningMedian samplesVR;
+#endif
 extern HardwareSerial ss;
 extern TinyGPSPlus gps;
 extern Preferences pref;
@@ -45,13 +56,27 @@ extern long pwmFrequency;
 extern long dutyCycle;
 extern int pwmResolution;
 extern unsigned long dutyCycleIncoming;
-extern unsigned long dutyCycleMotor;
+extern float rpmInputHz; // engine RPM input frequency (Hz), windowed average
+#if SPP_HAS_VR
 extern volatile unsigned long dutyCycleIncomingVR; // VR input frequency (Hz), written in ISR
+#endif
 extern uint16_t appliedDutyCycle; // last duty value written to the motor (for the live curve marker)
 
 // Motor direction: false = normal (pinMotorDirection LOW), true = reverse (HIGH)
 extern bool reverseDirection;
 void applyDirection(); // drive pinMotorDirection from reverseDirection (io.cpp)
+
+#if SPP_HAS_SPEED_BIAS
+// Speed-input bias (S3 board): the old PullDown/Up header is now two GPIO-driven
+// switches. 0 = none (input floats — fine for push-pull sources such as Can2Cluster),
+// 1 = 4.7k pull-up to VCC/12 V (open-collector hall sensors), 2 = 4.7k pull-down to GND.
+// Only ever ONE switch is driven on; both on would put ~1.3 mA straight through R19+R46.
+#define SPEED_BIAS_NONE      0
+#define SPEED_BIAS_PULL_UP   1
+#define SPEED_BIAS_PULL_DOWN 2
+extern uint8_t speedInputBias;
+void applySpeedInputBias(); // drive pinSpeedPullUp / pinSpeedPullDown from speedInputBias (io.cpp)
+#endif
 
 // ============================================================================
 // Closed-Loop Motor Feedback (PID)
@@ -82,9 +107,11 @@ extern uint16_t vehicleSpeed;
 extern uint16_t vehicleSpeedHall;
 extern uint16_t vehicleSpeedCAN;
 extern uint16_t vehicleSpeedGPS;
-extern uint16_t vehicleSpeedVR;
 extern uint16_t hallSpeed;
+#if SPP_HAS_VR
+extern uint16_t vehicleSpeedVR;
 extern uint16_t vrSpeed;
+#endif
 extern uint16_t ecuSpeed;
 extern uint16_t dsgSpeed;
 extern uint16_t gpsSpeed;
@@ -100,7 +127,9 @@ extern bool updateMotorPerformance;
 extern uint8_t motorPerformanceVal;
 extern uint16_t maxFreqHall;
 extern uint16_t maxFreqCAN;
+#if SPP_HAS_VR
 extern uint16_t maxFreqVR;
+#endif
 extern uint16_t maxSpeed;
 extern uint16_t maxRPM;
 extern uint16_t clusterRPMLimit;
@@ -118,8 +147,10 @@ extern float stepRPM;
 extern float stepSpeed;
 extern uint8_t averageFilterHall;
 extern uint8_t averageFilterRPM;
+#if SPP_HAS_VR
 extern uint8_t averageFilterVR;
-extern uint16_t filteredRPM;
+#endif
+extern float filteredRPMHz; // median-filtered RPM input (Hz), passed straight to the RPM output
 
 // ============================================================================
 // Test Variables
@@ -156,7 +187,9 @@ extern uint8_t speedType;
 // Speed Input Selection
 // ============================================================================
 extern bool useHall;                      // true = Hall sensor
-extern bool useVR;                        // true = variable-reluctance (VR) sensor
+#if SPP_HAS_VR
+extern bool useVR;                        // true = variable-reluctance (VR) sensor (S3 board only)
+#endif
 extern bool useDSG;                       // true = DSG speed
 extern bool useGPS;                       // true = GPS speed
 extern bool useABS;                       // true = ABS speed
@@ -204,7 +237,9 @@ extern uint32_t lastMillis2;
 extern uint32_t lastCAN;
 extern unsigned long lastPulse;
 extern unsigned long lastPulseRPM;
+#if SPP_HAS_VR
 extern volatile unsigned long lastPulseVR;
+#endif
 
 // ============================================================================
 // SavvyCAN / Analyser Variables

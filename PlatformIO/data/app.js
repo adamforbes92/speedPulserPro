@@ -9,7 +9,10 @@ function initApp() {
   initControls();
   initGaugeUI();
   initCalBuilder();
-  fetchCalibrations().then(fetchSettings).then(refreshCalState).then(fetchCalCurve);  // list, settings, cal builder state, then the curve
+  initVoltageCal();
+  // list, settings, cal builder state, the curve, then (S3 only) the Test Board result
+  fetchCalibrations().then(fetchSettings).then(refreshCalState).then(fetchCalCurve)
+    .then(() => { if (boardHasVc) fetchBoardTest(); });
   fetchStatus();    // Initial status fetch
   setInterval(fetchStatus, 200);  // Continue fetching live data only
   window.addEventListener('resize', scheduleCalDraw);
@@ -46,7 +49,7 @@ async function fetchCalibrations() {
     currentCalibrationId = parseInt(data.currentCalibrationId || 1, 10) || 1;
     selectEl.value = String(currentCalibrationId);
     const calibrationStatusEl = document.getElementById('calibrationStatus');
-    if (calibrationStatusEl) {
+    if (calibrationStatusEl && !calModeVoltage) {
       const selectedOption = selectEl.options[selectEl.selectedIndex];
       calibrationStatusEl.textContent = selectedOption ? `Cal: ${selectedOption.textContent}` : 'Cal: --';
     }
@@ -202,6 +205,7 @@ function initControls() {
     'maxSpeed',
     'maxFreqHall',
     'maxFreqVR',
+    'speedInputBias',
     'useGlobalSpeedOffset',
     'speedOffsetPositive',
     'speedOffset'
@@ -214,9 +218,11 @@ function initControls() {
         const ctrlPromise = pushControl(id, value);
 
         if (id === 'motorCalibration') {
+          // With voltage control on the preset isn't what drives the motor, so the
+          // banner keeps saying "Voltage" (the device reports it on the next poll).
           const selectedOption = el.options[el.selectedIndex];
           const calibrationStatusEl = document.getElementById('calibrationStatus');
-          if (selectedOption && calibrationStatusEl) {
+          if (selectedOption && calibrationStatusEl && !calModeVoltage) {
             calibrationStatusEl.textContent = `Cal: ${selectedOption.textContent}`;
           }
           // Refresh the curve only after the device has applied the new cal.
@@ -463,27 +469,23 @@ function initControls() {
     });
   }
 
-  // Motor Voltage Control (V4 boards). Range sliders update their -display span
-  // live and push on input; the enable checkbox and PID number fields push on
-  // change. Keys mirror the firmware settings handler exactly.
-  const voltageControlEnableEl = document.getElementById('voltageControlEnable');
-  if (voltageControlEnableEl) {
-    voltageControlEnableEl.addEventListener('change', () => {
-      pushControl('voltageControlEnable', voltageControlEnableEl.checked);
-    });
-  }
-  ['vcPwmNominal', 'vcPwmMin', 'vcVoltMin', 'vcVoltMax', 'vcVoltGain', 'tempVoltageCmd'].forEach(id => {
+  // Motor Voltage Control (S3 board). Tuning sliders / toggle that map 1:1 to
+  // firmware control keys: push on change, update the -display span live.
+  const vcInputs = ['voltageControlEnable', 'vcPwmNominal', 'vcRailMaxV',
+                    'vcTrimGain', 'vcTrimLimit'];
+  vcInputs.forEach(id => {
     const el = document.getElementById(id);
     if (!el) return;
-    el.addEventListener('input', () => {
-      const displayEl = document.getElementById(id + '-display');
-      if (displayEl) displayEl.textContent = el.value;
-      pushControl(id, el.value);
+    el.addEventListener('change', () => {
+      const value = el.type === 'checkbox' ? el.checked : el.value;
+      pushControl(id, value);
     });
-  });
-  ['vcKp', 'vcKi', 'vcKd'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.addEventListener('change', () => pushControl(id, el.value));
+    if (el.type === 'range') {
+      el.addEventListener('input', () => {
+        updateVcSliderDisplay(id, el.value);
+        if (id === 'vcRailMaxV') setDriveMax(el.value);
+      });
+    }
   });
 
   initCollapsibleCards();
@@ -641,6 +643,9 @@ function applyMphState(useMPH) {
   if (calMph) calMph.checked = useMPH;
   const calUnitEl = document.getElementById('calUnitLabel');
   if (calUnitEl) calUnitEl.textContent = useMPH ? 'mph' : 'km/h';
+  const vcUnitEl = document.getElementById('vcCalUnit');
+  if (vcUnitEl) vcUnitEl.textContent = useMPH ? 'mph' : 'km/h';
+  clusterUnit = useMPH ? 'mph' : 'km/h';
 }
 
 async function fetchSettings() {
@@ -721,11 +726,7 @@ async function fetchSettings() {
     }
     updateSpeedOffsetStatus(data.speedOffsetType, data.currentSpeedOffset);
 
-    const calibrationStatusEl = document.getElementById('calibrationStatus');
-    if (calibrationStatusEl) {
-      const selectedOption = document.getElementById('motorCalibration').selectedOptions[0];
-      calibrationStatusEl.textContent = selectedOption ? `Cal: ${selectedOption.textContent}` : 'Cal: --';
-    }
+    setCalBanner(data);
 
     // Advanced controls
     document.getElementById('testRPM').checked = data.testRPM || false;
@@ -804,31 +805,38 @@ async function fetchSettings() {
     // RPM source dropdown
     document.getElementById('rpmSource').value = (data.rpmType === 'CAN') ? 'CAN' : 'Hall';
 
-    // Motor Voltage Control (V4). The card is only shown when the board reports
+    // Board-specific hardware: show only the controls this PCB actually has
+    // (voltage control + calibration, rail sense, VR, speed bias). The legacy
+    // Calibration Builder is only offered when there's no voltage injection.
+    if (data.railFloorV !== undefined) railFloorV = Number(data.railFloorV);
+    if (data.railCeilV !== undefined) railCeilV = Number(data.railCeilV);
+    const railMaxEl = document.getElementById('vcRailMaxV');
+    if (railMaxEl) { railMaxEl.min = railFloorV; railMaxEl.max = railCeilV; }
+    setDriveMax(data.driveMaxV);
+    applyBoardFeatures(data);
+    const biasEl = document.getElementById('speedInputBias');
+    if (biasEl) biasEl.value = String(data.speedInputBias ?? 0);
+
+    // Motor Voltage Control (S3). The card is only shown when the board reports
     // voltage-control hardware; values are seeded from the firmware defaults.
     const voltageCard = document.getElementById('voltageControlCard');
     if (voltageCard) {
       voltageCard.style.display = data.boardHasVoltageControl ? '' : 'none';
     }
-    const setVc = (id, val, digits) => {
-      const el = document.getElementById(id);
-      if (!el || val === undefined || val === null) return;
-      const num = Number(val);
-      el.value = (el.type === 'range' && digits !== undefined && Number.isFinite(num))
-        ? num.toFixed(digits) : val;
-      const disp = document.getElementById(id + '-display');
-      if (disp) disp.textContent = Number.isFinite(num) && digits !== undefined ? num.toFixed(digits) : val;
-    };
     const vcEnableEl = document.getElementById('voltageControlEnable');
-    if (vcEnableEl) vcEnableEl.checked = !!data.voltageControlEnable;
-    setVc('vcPwmNominal', data.vcPwmNominal, 2);
-    setVc('vcPwmMin', data.vcPwmMin, 2);
-    setVc('vcVoltMin', data.vcVoltMin, 2);
-    setVc('vcVoltMax', data.vcVoltMax, 2);
-    setVc('vcVoltGain', data.vcVoltGain, 2);
-    setVc('vcKp', data.vcKp);
-    setVc('vcKi', data.vcKi);
-    setVc('vcKd', data.vcKd);
+    if (vcEnableEl) vcEnableEl.checked = data.voltageControlEnable !== false;
+    setSlider('vcPwmNominal', data.vcPwmNominal ?? 0.80);
+    setSlider('vcRailMaxV', data.vcRailMaxV ?? 12.0);
+    setSlider('vcTrimGain', data.vcTrimGain ?? 0.50);
+    setSlider('vcTrimLimit', data.vcTrimLimit ?? 0.20);
+
+    if (data.boardHasVoltageControl) {
+      renderBoardTestPills(data.boardTestCode, false);
+      const vcCalEl = document.getElementById('vcTestCal');
+      if (vcCalEl) vcCalEl.checked = data.testCal || false;
+      clusterUnit = data.convertToMPH ? 'mph' : 'km/h';
+      renderDriveCal(data.driveCal, !!data.driveCalHz);
+    }
 
     settingsLoaded = true;
   } catch (error) {
@@ -836,7 +844,14 @@ async function fetchSettings() {
   }
 }
 
+// Only one /api/status request at a time (mirrors SpeedPulser). The 200 ms timer
+// used to fire regardless, so a slow answer stacked requests up until the async
+// server ran out of sockets and the page stopped responding.
+let fetchStatusInFlight = false;
+
 async function fetchStatus() {
+  if (fetchStatusInFlight) return;
+  fetchStatusInFlight = true;
   try {
     const response = await fetch('/api/status');
     const data = await response.json();
@@ -991,8 +1006,9 @@ async function fetchStatus() {
     // Closed-loop feedback (PID) live status
     updateFeedbackStatus(data);
 
-    // Motor Voltage Control (V4) live status
+    // Motor Voltage Control (S3) live status
     updateVoltageStatus(data);
+    setCalBanner(data);
 
     // Diagnostics: colour the active outputs and the input driving them.
     updateDiagHighlights(data);
@@ -1010,6 +1026,8 @@ async function fetchStatus() {
 
   } catch (error) {
     console.log('Error fetching status:', error);
+  } finally {
+    fetchStatusInFlight = false;
   }
 }
 
@@ -1029,8 +1047,17 @@ function updateVoltageStatus(data) {
       buckEl.textContent = data.buckEnabled ? 'On' : 'Off';
     }
   }
-  setTxt('liveVoltageCmd', data.boardHasVoltageControl ? pct(data.voltageCmd) : 'N/A');
+  const volts = (v) => (v === undefined || v === null) ? '--' : Number(v).toFixed(2) + ' V';
+  setTxt('liveDriveV', data.boardHasVoltageControl ? volts(data.driveV) : 'N/A');
+  setTxt('liveVoltageCmd', data.boardHasVoltageControl ? volts(data.railCmdV) : 'N/A');
   setTxt('livePwmFrac', data.boardHasVoltageControl ? pct(data.pwmFrac) : 'N/A');
+  const trim = Number(data.driveTrimPct);
+  setTxt('liveDriveTrim', data.boardHasVoltageControl && Number.isFinite(trim)
+    ? (trim >= 0 ? '+' : '') + trim.toFixed(1) + '%' : 'N/A');
+  if (data.boardHasVoltageControl) {
+    setTxt('liveMotorRailV', volts(data.motorRailV));
+    updateVoltageCalReadouts(data);
+  }
 }
 
 function updateFeedbackStatus(data) {
@@ -1137,20 +1164,36 @@ function pushAction(action) {
   }).catch(e => console.log('Action error:', e));
 }
 
+// Speed / RPM test: one POST in flight per endpoint, always carrying the LATEST
+// state. A slider drag fires dozens of input events; posting each one let them
+// land out of order, so a late "enabled, 120" could arrive after the checkbox's
+// "disabled" and switch the test straight back on (needle stuck high, or the
+// live hall/CAN RPM seeming to override Test RPM).
+const testPushState = {};
+function sendTestLatest(url, enabled, value) {
+  const s = testPushState[url] || (testPushState[url] = { busy: false, next: null });
+  s.next = { enabled, value };
+  if (s.busy) return;
+  const run = () => {
+    const body = s.next;
+    s.next = null;
+    s.busy = true;
+    fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }).catch(e => console.log('Test push error:', e))
+      .finally(() => { s.busy = false; if (s.next) run(); });
+  };
+  run();
+}
+
 function pushTestRPM(enabled, value) {
-  fetch('/api/testRPM', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ enabled, value })
-  }).catch(e => console.log('Test RPM error:', e));
+  sendTestLatest('/api/testRPM', enabled, value);
 }
 
 function pushTestSpeed(enabled, value) {
-  fetch('/api/testSpeed', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ enabled, value })
-  }).catch(e => console.log('Test Speed error:', e));
+  sendTestLatest('/api/testSpeed', enabled, value);
 }
 
 function hex2bin(hex) {
@@ -1181,6 +1224,376 @@ function showNotification(message, type = "success") {
     notification.style.opacity = "0";
     setTimeout(() => notification.remove(), 300);
   }, 3000);
+}
+
+// ===== BOARD FEATURES / VOLTAGE CALIBRATION (S3 board) =====
+// The motor is driven with one number, the DRIVE in volts (rail x PWM). The
+// firmware lowers the rail first and only drops the PWM below the 3 V floor, so
+// the drive runs from 0 (stopped) to Maximum Rail. Calibration captures needle
+// marks against drive; running interpolates between them.
+let boardHasVc = false;
+let railFloorV = 3.0;
+let railCeilV = 12.0;
+let driveMaxV = 12.0;
+let calDriveV = 0;                // calibration drive the UI last asked for (V)
+let calDriveTouchedMs = 0;        // last local change — don't let a status poll fight the user
+let calDriveDragging = false;
+let calDriveInFlight = false;     // a tempDriveV POST is outstanding
+let calDrivePending = false;      // the drive moved again while it was outstanding
+let calSpeedTouched = false;      // user has typed a speed: stop overwriting it
+let boardTestWasRunning = false;
+let boardTestPollTimer = null;
+let clusterUnit = 'km/h';
+
+// Show / hide the controls tied to optional hardware blocks, from the flags the
+// firmware reports. Everything is hidden in the markup by default, so a DevKit
+// build never shows the S3-only cards. The legacy multi-point Calibration
+// Builder is only offered when there is no voltage injection.
+function applyBoardFeatures(data) {
+  const toggle = (cls, on) => {
+    document.querySelectorAll('.' + cls).forEach(el => {
+      if (el.tagName === 'OPTION') { el.hidden = !on; el.disabled = !on; }
+      else el.style.display = on ? '' : 'none';
+    });
+  };
+  boardHasVc = !!data.hasVoltageCtrl;
+  toggle('vc-only', boardHasVc);
+  toggle('vr-only', !!data.hasVR);
+  toggle('bias-only', !!data.hasSpeedBias);
+  toggle('rail-only', !!data.hasRailSense);
+  const builder = document.getElementById('calBuilderCard');
+  if (builder) builder.style.display = boardHasVc ? 'none' : '';
+  const typeEl = document.getElementById('boardTypeVal');
+  if (typeEl) {
+    typeEl.textContent = boardHasVc
+      ? 'ESP32-S3 (voltage injection)' + (data.boardIdStrapOk === false ? ' - BOARD_ID strap not seen!' : '')
+      : 'ESP32 DevKit (PWM only)';
+  }
+}
+
+// Set a slider's value and its live "-display" span in one call.
+function setSlider(id, val) {
+  const el = document.getElementById(id);
+  if (!el || val === undefined || val === null) return;
+  el.value = val;
+  updateVcSliderDisplay(id, val);
+}
+
+function updateVcSliderDisplay(id, val) {
+  const disp = document.getElementById(id + '-display');
+  if (!disp) return;
+  const v = Number(val);
+  if (id === 'vcPwmNominal') disp.textContent = Math.round(v * 100) + '%';
+  else if (id === 'vcTrimLimit') disp.textContent = '±' + Math.round(v * 100) + '%';
+  else if (id === 'vcRailMaxV') disp.textContent = v.toFixed(1) + ' V';
+  else disp.textContent = val;
+}
+
+function setDriveMax(v) {
+  if (!(Number(v) > 0)) return;
+  driveMaxV = Number(v);
+  const el = document.getElementById('vcDriveV');
+  if (el) el.max = driveMaxV;
+}
+
+function setCalDrive(v, push) {
+  v = Math.min(driveMaxV, Math.max(0, Number(v) || 0));
+  calDriveV = Math.round(v * 100) / 100;
+  const el = document.getElementById('vcDriveV');
+  if (el) el.value = calDriveV;
+  const disp = document.getElementById('vcDriveV-display');
+  if (disp) disp.textContent = calDriveV.toFixed(2) + ' V';
+  if (push) {
+    calDriveTouchedMs = Date.now();
+    sendCalDrive();
+  }
+}
+
+// One POST in flight at a time, always carrying the latest value. A slider drag
+// fires dozens of input events; posting each one swamps the device and lets them
+// land out of order.
+function sendCalDrive() {
+  if (calDriveInFlight) { calDrivePending = true; return; }
+  calDriveInFlight = true;
+  calDrivePending = false;
+  Promise.resolve(pushControl('tempDriveV', calDriveV.toFixed(2))).finally(() => {
+    calDriveInFlight = false;
+    calDriveTouchedMs = Date.now();
+    if (calDrivePending) sendCalDrive();
+  });
+}
+
+function boardTestPillState(code, running) {
+  if (running) return { cls: 'warn', text: 'Testing…' };
+  switch (Number(code)) {
+    case 1: return { cls: 'ok', text: 'Pass' };
+    case 3: case 4: case 5: return { cls: 'bad', text: 'Fail' };
+    default: return { cls: 'warn', text: 'Not run' };
+  }
+}
+
+function renderBoardTestPills(code, running) {
+  const st = boardTestPillState(code, running);
+  ['boardTestPill', 'vcCalBoardPill'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.className = 'pill' + (st.cls ? ' ' + st.cls : '');
+    el.textContent = st.text;
+  });
+}
+
+async function fetchBoardTest() {
+  try {
+    const r = await fetch('/api/boardtest');
+    const d = await r.json();
+    renderBoardTestPills(d.code, d.running);
+    const txt = document.getElementById('boardTestText');
+    if (txt) txt.textContent = d.running ? 'Testing: motor stopped, stepping the rail…' : (d.text || '--');
+    const rows = document.getElementById('boardTestRows');
+    if (rows && Array.isArray(d.points)) {
+      const ran = Number(d.code) >= 1;
+      rows.innerHTML = d.points.map((p, i) =>
+        '<tr><td>' + (i + 1) + '</td><td>' + Number(p.target).toFixed(1) + ' V</td><td>' +
+        (ran ? Number(p.measured).toFixed(2) + ' V' : '--') + '</td></tr>').join('');
+    }
+    const btn = document.getElementById('boardTestBtn');
+    if (btn) btn.disabled = !!d.running;
+    return d;
+  } catch (e) {
+    console.log('Error fetching board test:', e);
+    return null;
+  }
+}
+
+// Poll quickly while a test runs, then report the result once.
+function pollBoardTest() {
+  if (boardTestPollTimer) clearTimeout(boardTestPollTimer);
+  const tick = async () => {
+    const d = await fetchBoardTest();
+    if (d && d.running) {
+      boardTestPollTimer = setTimeout(tick, 500);
+      return;
+    }
+    boardTestPollTimer = null;
+    if (d) showNotification(d.text || 'Board test finished', d.pass ? 'success' : 'error');
+    fetchSettings();
+  };
+  boardTestPollTimer = setTimeout(tick, 500);
+}
+
+// The captured marks: speed | tacho Hz | drive (rail x PWM) | delete.
+function renderDriveCal(points, hzOk) {
+  points = Array.isArray(points) ? points : [];
+  const rows = document.getElementById('vcCalRows');
+  if (rows) {
+    rows.innerHTML = points.length ? points.map((p, i) =>
+      '<tr><td>' + p.speed + ' ' + clusterUnit + '</td>' +
+      '<td>' + (Number(p.hz) > 0 ? Number(p.hz).toFixed(1) : '--') + '</td>' +
+      '<td>' + Number(p.drive).toFixed(2) + ' V</td>' +
+      '<td class="muted">' + Number(p.rail).toFixed(1) + ' V × ' + Math.round(Number(p.pwm) * 100) + '%</td>' +
+      '<td><button class="stepper-btn" data-del="' + i + '" title="Delete this mark">✕</button></td></tr>'
+    ).join('') : '<tr><td colspan="5" class="muted">No marks captured yet.</td></tr>';
+  }
+  const res = document.getElementById('vcCalResult');
+  if (res) {
+    if (!points.length) {
+      res.textContent = 'Not calibrated. Capture a low mark and the top mark at least.';
+    } else {
+      let t = points.length + (points.length === 1 ? ' mark' : ' marks') + ', ' +
+        points[0].speed + '–' + points[points.length - 1].speed + ' ' + clusterUnit + '.';
+      if (points.length === 1) t += ' Add a low mark too: one mark assumes the dial is linear to zero.';
+      if (!hzOk) t += ' No tacho readings, so Measured Speed and the feedback trim are off.';
+      res.textContent = t;
+    }
+  }
+}
+
+// POST /api/action with optional extra fields; resolves to the parsed error (or null).
+async function postAction(action, extra) {
+  const r = await fetch('/api/action', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(Object.assign({ action }, extra || {}))
+  });
+  if (r.ok) return null;
+  const e = await r.json().catch(() => ({}));
+  return e.error || ('HTTP ' + r.status);
+}
+
+// POST /api/action and keep the JSON body (the mark actions answer with the table).
+async function vcAction(body) {
+  try {
+    const r = await fetch('/api/action', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const d = await r.json().catch(() => ({}));
+    return { ok: r.ok, data: d };
+  } catch (e) {
+    return { ok: false, data: { error: 'Device not reachable' } };
+  }
+}
+
+function initVoltageCal() {
+  // Board test (Diagnostics page)
+  const btBtn = document.getElementById('boardTestBtn');
+  if (btBtn) {
+    btBtn.addEventListener('click', async () => {
+      try {
+        const err = await postAction('boardTest');
+        if (err) { showNotification(err, 'error'); return; }
+        renderBoardTestPills(0, true);
+        btBtn.disabled = true;
+        pollBoardTest();
+      } catch (e) {
+        showNotification('Board test could not start', 'error');
+      }
+    });
+  }
+
+  // Calibration-mode toggle mirrors the legacy testCal flag.
+  const vcCal = document.getElementById('vcTestCal');
+  if (vcCal) {
+    vcCal.addEventListener('change', () => {
+      pushControl('testCal', vcCal.checked);
+      const legacy = document.getElementById('testCal');
+      if (legacy) legacy.checked = vcCal.checked;
+      if (vcCal.checked) setCalDrive(0, false); // firmware restarts with the motor stopped
+    });
+  }
+
+  // Drive: -/+ jog buttons and a slider, both in volts.
+  document.querySelectorAll('[data-djog]').forEach((btn) => {
+    btn.addEventListener('click', () => setCalDrive(calDriveV + Number(btn.dataset.djog), true));
+  });
+  const driveEl = document.getElementById('vcDriveV');
+  if (driveEl) {
+    driveEl.addEventListener('pointerdown', () => { calDriveDragging = true; });
+    window.addEventListener('pointerup', () => { calDriveDragging = false; });
+    window.addEventListener('pointercancel', () => { calDriveDragging = false; });
+    driveEl.addEventListener('input', () => setCalDrive(driveEl.value, true));
+  }
+
+  const speedEl = document.getElementById('vcCalSpeed');
+  if (speedEl) speedEl.addEventListener('input', () => { calSpeedTouched = true; });
+
+  const captureBtn = document.getElementById('captureMarkBtn');
+  if (captureBtn) {
+    captureBtn.addEventListener('click', async () => {
+      const speed = Number(speedEl ? speedEl.value : 0);
+      if (!(speed >= 1 && speed <= 400)) {
+        showNotification('Enter the speed the needle is showing (1-400)', 'error');
+        return;
+      }
+      const r = await vcAction({ action: 'calAddPoint', speed });
+      if (r.ok) {
+        renderDriveCal(r.data.driveCal, r.data.driveCalHz);
+        showNotification('Captured ' + speed + ' ' + clusterUnit + ' at ' + calDriveV.toFixed(2) + ' V drive');
+      } else {
+        showNotification(r.data.error || 'Capture failed', 'error');
+      }
+    });
+  }
+
+  const rows = document.getElementById('vcCalRows');
+  if (rows) {
+    rows.addEventListener('click', async (e) => {
+      const btn = e.target.closest('[data-del]');
+      if (!btn) return;
+      const r = await vcAction({ action: 'calDeletePoint', index: Number(btn.dataset.del) });
+      if (r.ok) renderDriveCal(r.data.driveCal, r.data.driveCalHz);
+      else showNotification(r.data.error || 'Delete failed', 'error');
+    });
+  }
+
+  const clearBtn = document.getElementById('clearMarksBtn');
+  if (clearBtn) {
+    clearBtn.addEventListener('click', async () => {
+      if (!confirm('Delete every captured mark?')) return;
+      const r = await vcAction({ action: 'calClearPoints' });
+      if (r.ok) { renderDriveCal(r.data.driveCal, r.data.driveCalHz); showNotification('Marks cleared'); }
+      else showNotification(r.data.error || 'Clear failed', 'error');
+    });
+  }
+}
+
+// Live voltage-board read-outs from /api/status (S3 board only).
+function updateVoltageCalReadouts(data) {
+  const setTxt = (id, v, cls) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = v;
+    if (cls !== undefined) {
+      el.classList.remove('on', 'warn');
+      if (cls) el.classList.add(cls);
+    }
+  };
+  const fmtV = (v) => (v === undefined || v === null) ? '--' : Number(v).toFixed(2) + ' V';
+  const spread = Number(data.fbHzSpread);
+  const turning = spread >= 0;
+
+  // Measured rail is only trusted once Test Board has passed.
+  const measCls = data.railSenseOk ? '' : 'warn';
+  setTxt('boardRailVal', fmtV(data.motorRailV), measCls);
+  setTxt('vcCalDrive', fmtV(data.driveV));
+  setTxt('vcCalSetV', fmtV(data.railCmdV));
+  setTxt('vcCalMeasV', fmtV(data.motorRailV), measCls);
+  setTxt('vcCalPwm', data.pwmFrac !== undefined ? Math.round(Number(data.pwmFrac) * 100) + '%' : '--');
+  setTxt('vcCalHz', data.measuredFreqHz !== undefined ? Number(data.measuredFreqHz).toFixed(1) : '--');
+  // Not steady = the average is still moving: show by how much (Hz across ~1 s).
+  const drift = Number(data.fbHzDrift) || 0;
+  setTxt('vcCalSteady', turning ? (data.fbStable ? 'Steady' : 'Settling ' + (drift >= 0 ? '+' : '') + drift.toFixed(1) + ' Hz') : 'Stopped',
+         turning ? (data.fbStable ? 'on' : 'warn') : '');
+  if (data.driveMaxV !== undefined) setDriveMax(data.driveMaxV);
+
+  // Calibration hint: one line, fixed height, so nothing below it moves.
+  const warn = document.getElementById('vcCalWarn');
+  if (warn) {
+    let msg = '';
+    if (data.testCal) {
+      if (data.railLimited) msg = 'The rail can’t reach the set voltage: supply too low, or the motor is overloaded.';
+      else if (!turning) msg = 'Motor stopped. Raise the drive until the needle moves.';
+      else if (!data.fbStable) msg = 'Motor speed still settling. Wait for “Steady” before capturing.';
+      else msg = 'Steady. Enter the speed the needle shows and capture it.';
+    }
+    warn.textContent = msg || ' ';
+  }
+
+  // Keep the drive control in step with the firmware (e.g. after Calibration
+  // Mode restarts it at 0) unless the user is adjusting it.
+  if (data.tempDriveV !== undefined && !calDriveDragging && !calDriveInFlight && !calDrivePending &&
+      Date.now() - calDriveTouchedMs > 1000) {
+    if (Math.abs(Number(data.tempDriveV) - calDriveV) > 0.005) setCalDrive(data.tempDriveV, false);
+  }
+  const vcCalEl = document.getElementById('vcTestCal');
+  if (vcCalEl && data.testCal !== undefined) vcCalEl.checked = !!data.testCal;
+
+  // Board test started or finished elsewhere (another browser): refresh it.
+  if (data.boardTestRunning !== undefined && !!data.boardTestRunning !== boardTestWasRunning) {
+    boardTestWasRunning = !!data.boardTestRunning;
+    if (boardTestWasRunning && !boardTestPollTimer) pollBoardTest();
+  }
+}
+
+// "Cal:" banner from what the device says is driving the motor: the selected PWM
+// preset, or (S3 board with Voltage Control on) the voltage calibration marks.
+let calModeVoltage = false;
+function setCalBanner(data) {
+  if (data.calMode === undefined) return;
+  calModeVoltage = data.calMode === 'voltage';
+  const el = document.getElementById('calibrationStatus');
+  if (el) {
+    if (calModeVoltage) {
+      el.textContent = 'Cal: ' + (data.calibrationText || '--');
+    } else {
+      const sel = document.getElementById('motorCalibration');
+      const opt = sel ? sel.options[sel.selectedIndex] : null;
+      el.textContent = opt ? `Cal: ${opt.textContent}` : 'Cal: --';
+    }
+  }
+  const note = document.getElementById('calPresetNote');
+  if (note) note.style.display = calModeVoltage ? '' : 'none';
 }
 
 // ===== CALIBRATION BUILDER =====
@@ -1255,9 +1668,9 @@ function initCalBuilder() {
     document.getElementById('calText').value = text;
     const nm = document.getElementById('calName');
     const base = (nm && nm.value.trim()) || 'calibration';
-    const fname = base.replace(/[^a-z0-9._-]+/gi, '_') + '.txt';
+    const fname = base.replace(/[^a-z0-9._-]+/gi, '_') + '_pwm-cal.txt';
     downloadTextFile(fname, text);
-    showNotification('Exported to text file');
+    showNotification('Exported PWM calibration');
   }));
 
   bindCal('calExportCArrayBtn', () => calPost({ op: 'export' }).then((r) => {
@@ -1265,9 +1678,24 @@ function initCalBuilder() {
     document.getElementById('calText').value = text;
     const nm = document.getElementById('calName');
     const base = (nm && nm.value.trim()) || 'calibration';
-    const fname = base.replace(/[^a-z0-9._-]+/gi, '_') + '.h';
+    const fname = base.replace(/[^a-z0-9._-]+/gi, '_') + '_pwm-carray.h';
     downloadTextFile(fname, text);
-    showNotification('Exported to C array file');
+    showNotification('Exported PWM C-Array preset');
+  }));
+
+  bindCal('calExportVoltageBtn', () => calPost({ op: 'export' }).then((r) => {
+    if (!r.voltage) {
+      showNotification('No voltage calibration on this board', 'error');
+      return;
+    }
+    if (!r.voltageMarks) {
+      showNotification('No marks captured yet: nothing to export', 'error');
+      return;
+    }
+    document.getElementById('calText').value = r.voltage;
+    const day = new Date().toISOString().slice(0, 10);
+    downloadTextFile('speedpulserpro_voltage-cal_' + day + '.txt', r.voltage);
+    showNotification('Exported voltage calibration (' + r.voltageMarks + ' marks)');
   }));
 
   bindCal('calImportBtn', () => {
@@ -1292,13 +1720,22 @@ function initCalBuilder() {
   }
 }
 
+// One importer for both kinds; the device reads the file's "type" and answers
+// with kind:'voltage' for a voltage cal (otherwise the PWM builder state).
 function calImportText(text) {
   calPost({ op: 'import', json: text }).then((s) => {
+    if (s && s.kind === 'voltage') {
+      renderDriveCal(s.driveCal, s.driveCalHz);
+      fetchSettings();   // Nominal PWM / Maximum Rail / MPH came with the file
+      const n = Array.isArray(s.driveCal) ? s.driveCal.length : 0;
+      showNotification('Voltage calibration imported (' + n + ' marks)');
+      return;
+    }
     applyCalState(s);
     refreshCalibrationsSelect();
     fetchCalCurve();
-    showNotification('Calibration imported');
-  });
+    showNotification('PWM calibration imported');
+  }).catch(() => {});   // calPost already showed the device's reason
 }
 
 // Trigger a browser download of the given text as a file.

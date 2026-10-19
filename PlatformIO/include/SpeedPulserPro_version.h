@@ -81,6 +81,105 @@ V4.02 - OTA overhaul (shared ota_manager / wifi_manager v2 + data/ota.js, ported
         tools/make_release.py) plus a Home WiFi (bridge mode) card; power_manager
         holds WiFi up while any browser is active. Assets served no-cache (ETag)
         instead of the hand-bumped ?v=.
+
+V5.00 - ESP32-S3 board (PCBs/rev6-allConfirmed) on the V4.02 base. (Supersedes the
+        V4.03 "S3 Board" folder, which branched before the V4.02 DevKit GPTimer RPM
+        fix; that fix is kept and the S3 now uses the same GPTimer RPM output.)
+      - ONE codebase, two PlatformIO envs: esp32doit-devkit-v1 (-DSPP_BOARD_DEVKIT)
+        and esp32-s3 (-DSPP_BOARD_S3, ESP32-S3-WROOM-1-N16R8, 16 MB, native USB).
+        Board macros + SPP_HAS_* feature flags in SpeedPulserPro_board.h, per-board
+        pin maps in SpeedPulserPro_config.h. The PCB defines what a board has:
+        S3 = voltage injection + rail sense + VR + switched speed bias + CAN standby;
+        DevKit = PWM motor drive only, and carries NO code/settings/UI for any of
+        those (the old DevKit GPIO25 strap / GPIO32-33 buck / GPIO27 VR are gone).
+      - S3 pin map confirmed pad-by-pad against the rev6 netlist: motor IO10, coil
+        RPM IO9, RPM in IO12, hall in IO16, feedback IO8, dir IO11, CAN RX/TX
+        IO13/IO14, CAN STB IO21, GPS IO17/IO18, V_MOT_SENSE IO4, EN_ADJ IO5,
+        V_ADJ IO6, BOARD_ID IO7 (sanity check only), VR IO15, speed bias IO47/IO48,
+        LED IO38.
+      - S3 voltage control, ported from SpeedPulser V5.00 (identical injection /
+        sense network): rail commands in volts across 3.0-12.0 V (12 V ceiling;
+        voltage control off holds the old fixed 9 V), rail read-back every 100 ms,
+        and "Test Board" on the Diagnostics page (steps 5 / 7.5 / 10 V with the
+        motor stopped, reads each back, stores pass/fail + this board's own
+        duty->volts fit).
+      - S3 one-point Top Speed Calibration: Calibration Mode holds the PWM at
+        Nominal Throttle PWM (default now 80 %), the user raises the rail
+        (-/+ volt buttons) until the needle sits on a top mark, enters the speed
+        shown and captures. Tacho Hz averaged over ~1 s and refused while still
+        settling; stored as (speed, Hz, rail, PWM) in cluster units, linear to zero,
+        and the captured rail seeds the voltage feed-forward. The legacy
+        Calibration Builder is only shown when there is no voltage injection.
+      - from V4.03: per-board OTA images (releases.json "boards", make_release.py
+        --env, ota.js picks this board's images), switched speed-input bias UI,
+        CAN standby held LOW, S3 LEDC low-speed mode, power_manager on the S3 LED.
+
+V5.01 - drive calibration: the S3 voltage control + calibration process copied across from
+        SpeedPulser V5.01 (same injection / sense network, same wording in the UI).
+      - one DRIVE value (V = rail x PWM) commands the motor. Above Minimum Rail x Nominal PWM
+        the PWM holds at Nominal and only the rail moves; below it the rail holds at Minimum
+        Rail (fixed 3.0 V, the hardware floor) and the PWM falls to zero, so the slowest
+        speeds are reachable.
+      - multi-mark calibration replaces the single top point: in Calibration Mode set the drive
+        until the needle sits on a mark, capture it; repeat for a low mark, the top and a few
+        between (up to 10). Each mark stores speed, tacho Hz, drive, rail and PWM. Running
+        interpolates the drive between marks (open loop), and Measured Speed maps tacho Hz back
+        through the same marks. A V5.00 top point is carried over as the first mark.
+      - the mid-ranging law (fast PWM PID + slow voltage loop) is gone. Feedback is now one slow
+        trim on the calibrated drive, only with Feedback Enable on, above Min Feedback Speed and
+        outside the PID Deadband, capped at ±Feedback Trim Limit (default 20 %).
+      - running speed is capped at the top calibration mark (no extrapolated drive past it).
+      - capture "Steady" tests DRIFT (newer half-second mean vs older, <= 2 % or 0.75 Hz), not
+        spread, so low-speed cogging no longer blocks a capture; spread only has to stay under
+        20 % / 4 Hz.
+      - tacho and rail are measured every 100 ms in every mode (one tick in the speed task).
+      - Voltage Control settings are now Nominal PWM, Maximum Rail (V), Feedback Trim Gain and
+        Limit; Min/Max Voltage, Minimum PWM and the inner Kp/Ki/Kd are gone.
+      - needle sweep with Voltage Control on drives up to the calibrated Max Speed by drive.
+      - voltage calibration export/import ("type": speedpulser-voltage-cal, shareable with
+        SpeedPulser); PWM cal files are tagged speedpulser-pwm-cal; one Import button loads
+        either. Cal POST bodies are collected across TCP chunks.
+      - "Cal:" banner reads "Voltage (n marks, lo-hi)" when Voltage Control drives the motor,
+        and the preset selector notes that the PWM preset is idle.
+      - own build folder (speedpulserpro-v501-pio) so the V5.00 build stays intact.
+      - Reverse Direction inverted to mirror SpeedPulser V5.01: unticked (IO11 LOW) is now the
+        correct way. Stored under a new EEP key ("revDir"), so units that had Reverse ticked to
+        compensate come up unticked = correct.
+      - web UI: /api/status is only requested once the previous answer is back (as SpeedPulser);
+        the 200 ms timer used to stack requests until the async server ran out of sockets.
+      - Speed Test / RPM Test sliders + checkboxes send one request at a time, latest value wins,
+        so a late slider request can no longer switch a test back on after it was unticked.
+      - Emerald ECU RPM frame now feeds the CAN RPM source (vehicleRPMCAN) instead of writing
+        the output RPM directly past Test RPM and the source selection.
+
+V5.02 - RPM passthrough: the hall RPM input now reaches the tach output 1:1 in Hz.
+      - the RPM input was converted Hz -> RPM -> Hz through two truncating map()s (and
+        rounded to whole Hz first), so the output ran ~1 Hz low (~30 RPM on a 4-cyl) for
+        22 of every 23 frequencies. The filtered input frequency now drives the output
+        directly; Cluster Frequency Limit / Cluster RPM Limit only scale the RPM shown and
+        CAN / Test RPM into Hz. The output is still capped at Cluster Frequency Limit.
+      - RPM output takes fractional Hz (half period rounded to the 1 us tick) instead of
+        whole-Hz steps.
+      - glitch rejection is now per input: edges closer than half a period at that input's
+        full scale (Max Hall Frequency / Max VR Frequency / Cluster Frequency Limit, floor
+        1 ms) are dropped. It was a fixed 3 ms (333 Hz) for every input, so a real RPM
+        signal above 333 Hz (6-cyl 350 Hz / 8-cyl 466 Hz at 7000 RPM) read HALF its rate.
+      - RPM Filter Samples = 1 output 0 RPM (the filter reset ran after the value was set
+        and cleared it); fixed.
+      - own build folder (speedpulserpro-v502-pio) so the V5.01 build stays intact.
+
+V5.03 - speed source fixes.
+      - picking a speed source switches every other source off first. "Custom CAN" used to
+        leave TP2.0 on, and the speed task then followed TP2.0 while the page said Custom CAN.
+      - the web page's Speed Source and the Live Data highlight now come from one function
+        that checks the sources in the same order as the speed task, so they always agree.
+      - a source reading above Max Speed for more than 0.5 s now parks the needle at Max Speed.
+        It used to hold the last in-range speed for ever, which is 0 straight after boot, so
+        an ECU sending more than Max Speed never moved the needle. A short spike is still ignored.
+      - the Positive Offset tick (Global Speed Offset sign) now saves. Its settings name
+        "speedOffsetPositive" was 19 letters, over the ESP32's 15-letter limit, so it never
+        saved and a + offset came back as - after every restart. Now saved as "spdOffsetPos".
+      - own build folder (speedpulserpro-v503-pio) so the V5.02 build stays intact.
 */
 
 #endif // VERSION_H

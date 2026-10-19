@@ -5,6 +5,7 @@
 #include <WiFi.h>
 #include <LittleFS.h>
 #include <ESPAsyncWebServer.h>
+#include "SpeedPulserPro_board.h" // SPP_BOARD_DEVKIT / SPP_BOARD_S3 + SPP_HAS_* feature flags
 
 // ---------------------------------------------------------------------------
 // Serial debug — tagged, per-subsystem logging (AirLift-style)
@@ -22,7 +23,7 @@
 #define baudSerial 115200
 
 #ifndef enableDebug
-#define enableDebug 0        // ** MASTER ** 0 = silence ALL serial debug
+#define enableDebug 1        // ** MASTER ** 0 = silence ALL serial debug
 #endif
 
 #define debugSys     1       // [SYS]   boot / tasks / general / 1 Hz telemetry
@@ -54,16 +55,70 @@
 #define labelRefresh 200
 #define wifiDisable 60000
 #define wifiHostName "SpeedPulserPro"
-// V4.02 - OTA overhaul: shared ota_manager/wifi_manager v2 + ota.js (guided GitHub update, bridge mode, recovery page)
-#define FW_VERSION "4.02"
+// V5.00 - S3 board (rev6) support on the V4.02 base + voltage-injection Test Board and one-point calibration
+// V5.01 - drive calibration (multi-mark, ported from SpeedPulser V5.01): open-loop drive + gentle feedback trim
+// V5.02 - RPM hall input passed through 1:1 in Hz; per-input glitch threshold from each input's full scale
+// V5.03 - speed source picks exactly one input; over-range speed holds at Max Speed; Global Speed Offset sign now saves
+#define FW_VERSION "5.03"
 
 // Speed Input Configuration
 #define incomingType 0
 #define DEFAULT_AVERAGE_FILTER_HALL 6
 #define DEFAULT_AVERAGE_FILTER_RPM 6
 #define durationReset 1500
+#define SPEED_OVER_RANGE_LOOPS 10 // speed task loops (10 x 50 ms = 0.5 s) a source must stay above Max Speed before the needle parks at Max Speed
 
-// Pin Definitions
+// ===========================================================================
+// Pin Definitions — one block per board (selected in SpeedPulserPro_board.h)
+// ===========================================================================
+#if SPP_BOARD_S3
+// ---------------------------------------------------------------------------
+// S3 board: ESP32-S3-WROOM-1-N16R8 (U13). Confirmed pad-by-pad against the netlist
+// of PCBs/rev6-allConfirmed/ProPrj_speedPulserProV3_claude-s3_2026-09-29_basic.epro2
+// (module pad -> IOn per the WROOM-1 pinout). Every output that must be safe at
+// reset has its own pull-down on the board (EN_ADJ R7, ESP_MOTOR R28,
+// ESP_MOTOR_DIR R27, CAN0_STANDBY R18, ESP_SPD_PU/PD R44/R45, ESP_MK2RPM R25).
+// Unused: IO3 / IO45 / IO46 (strapping), IO35..IO42, UART0 (IO43/IO44 — the
+// console is native USB on IO19/IO20). IO0 is the BOOT button only.
+// ---------------------------------------------------------------------------
+#define pinMotorOutput 10       // pad 18 ESP_MOTOR      -> U11 SN74LVC1G14 -> MOTOR_OUT (PWM, LEDC)
+#define pinRPMOutput 9          // pad 17 ESP_MK2RPM     -> R24 330R -> Q1 MMBT5551 (coil RPM, GPTimer toggled)
+
+#define pinEngineRPMInput 12    // pad 20 ESP_RPM        <- U12 (ECU_RPM after R30/D8 zener/Schmitt)
+#define pinGearboxHall 16       // pad 9  ESP_SPEEDPULSE <- U12 (SPEEDPULSE after R21/D6 zener/Schmitt)
+
+#define pinRX_CAN 13            // pad 21 CAN0_RX  <- U7 TCAN1044V RXD
+#define pinTX_CAN 14            // pad 22 CAN0_TX  -> U7 TCAN1044V TXD
+#define pinCANStandby 21        // pad 23 CAN0_STANDBY -> U7 STB; R18 pull-down, firmware holds LOW = normal mode
+
+// GPS header: pin 2 = net GPS_RX (ESP TX -> module RX), pin 3 = net GPS_TX (ESP RX <- module TX).
+// Same sense as the DevKit (GPIO14 was net GPS_TX = ESP RX). If a module stays silent, swap these two.
+#define pinRX_GPS 17            // pad 10 ESP UART RX  <- GPS_TX
+#define pinTX_GPS 18            // pad 11 ESP UART TX  -> GPS_RX
+
+#define pinMotorFeedback 8      // pad 12 ESP_MOTFEEDBACK <- U9 (MOTOR_FEEDBACK after R20/D4 zener/Schmitt)
+#define pinMotorDirection 11    // pad 19 ESP_MOTOR_DIR   -> R26 -> Q2 2N7002 -> MOTOR_DIR (HIGH = reverse)
+
+// --- Buck voltage control (always fitted on this board) ---
+#define pinBoardVersion 7       // pad 7 BOARD_ID: R12 1k to GND -> reads LOW with INPUT_PULLUP (sanity check only)
+#define pinVoltageAdjust 6      // pad 6 V_ADJ PWM "DAC" -> R32 1k/C38 1uF -> R9 1k -> R8 10k -> U5 FB (inverse)
+#define pinBuckEnable 5         // pad 5 EN_ADJ -> U5 TPS62933 EN (HIGH = motor supply on; R7 holds it LOW at reset)
+#define pinMotorRailSense 4     // pad 4 V_MOT_SENSE: 9V rail via R33 39k / R34 10k + C39 100nF -> ADC1_CH3
+
+// --- Variable-reluctance (VR) speed input — MAX9924 (U8) C Out, R15 10k pull-up to 3V3 ---
+#define pinVRInput 15           // pad 8 VR_COUT, one clean edge per zero crossing, counted like the hall input
+
+// --- Speed-input bias: replaces the old PullDown/Up jumper (see applySpeedInputBias) ---
+#define pinSpeedPullUp 47       // pad 24 ESP_SPD_PU -> Q4 BSS138 -> Q3 MMBT5401: R19 4.7k from VCC (12 V) onto SPEEDPULSE
+#define pinSpeedPullDown 48     // pad 25 ESP_SPD_PD -> Q5 BSS138:                R46 4.7k from SPEEDPULSE to GND
+
+#define pinOnboardLED 38        // pad 31 ESP_LED -> R41 330R -> LED -> GND (active HIGH); the module has no LED
+
+#else
+// ---------------------------------------------------------------------------
+// ESP32 DevKit V1 (WROOM-32) boards — PWM motor drive only. The DevKit never has
+// voltage injection, rail sense, VR or switched bias, so none of those pins exist.
+// ---------------------------------------------------------------------------
 #define pinMotorOutput 21       // Motor Output (PWM)
 #define pinRPMOutput 22         // RPM Output
 
@@ -79,23 +134,15 @@
 #define pinMotorFeedback 23     // Motor Feedback Input
 #define pinMotorDirection 19    // Motor Direction (HIGH = reverse)
 
-// --- V4 board: buck voltage control + board-version strap (mirrors SpeedPulser) ---
-#define pinBoardVersion 25      // Board version strap: V4 ties 1k to GND -> reads LOW (INPUT_PULLUP)
-#define pinVoltageAdjust 33     // V_ADJ PWM "DAC" into the buck FB node (LEDC, inverse mapping)
-#define pinBuckEnable 32        // Buck enable (HIGH = supply on)
-
-// --- Variable-reluctance (VR) speed input — counted like the hall input ---
-#define pinVRInput 27           // VR conditioner digital output (C Out on MAXX), ext pull-up to 3.3V
-
 // Coolant temperature emulation — X9C103 digital potentiometer (as used in the MFSW).
-// NB: relocated off GPIO25/27 on the V4 board (now board-version + VR). These pins are
-// currently DEFINE-ONLY (the coolant feature isn't wired up yet) — re-check against the
-// PCB before implementing it.
+// These pins are currently DEFINE-ONLY (the coolant feature isn't wired up yet) —
+// re-check against the PCB before implementing it.
 #define pinCoolantUD 4          // Coolant Resistance (U/D — up/down direction)
 #define pinCoolantINC 5         // Coolant Resistance (INC — increment clock)
 #define pinCoolantCS 12         // Coolant Resistance (CS — chip select)
 
 #define pinOnboardLED 2 // onboard LED
+#endif // SPP_BOARD_S3
 
 // Baud Rates
 #define baudGPS 9600 // default low baud rate for Neo-6M GPS module (can be raised to 115200 after init)

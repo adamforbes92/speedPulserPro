@@ -1,17 +1,41 @@
 #include "SpeedPulserPro_io.h"
 #include "SpeedPulserPro_control.h"
 #include "SpeedPulserPro_gps.h"
+#include "SpeedPulserPro_voltage.h"
+#include "SpeedPulserPro_driveCal.h"
 
 // Drive the direction pin from the reverseDirection flag.
-// Default (unticked) idles HIGH = normal; ticking Reverse pulls LOW.
+// Default (unticked) drives LOW = the correct direction; ticking Reverse drives HIGH.
+// (Mirrors SpeedPulser V5.01. Up to V5.00 this was the other way round, so Reverse
+// had to be ticked to spin the right way; the setting moved to a new EEP key so
+// those units start unticked.)
 void applyDirection()
 {
-  digitalWrite(pinMotorDirection, reverseDirection ? LOW : HIGH);
+  digitalWrite(pinMotorDirection, reverseDirection ? HIGH : LOW);
 }
+
+#if SPP_HAS_SPEED_BIAS
+// S3 board: the speed-input pull-up / pull-down are two transistor switches on
+// their own GPIOs (both held off by R44/R45 at reset). Only ONE may ever be on,
+// so both are dropped before the chosen one is raised — the two 4.7k legs would
+// otherwise sit across VCC.
+void applySpeedInputBias()
+{
+  digitalWrite(pinSpeedPullUp, LOW);
+  digitalWrite(pinSpeedPullDown, LOW);
+  if (speedInputBias == SPEED_BIAS_PULL_UP)
+    digitalWrite(pinSpeedPullUp, HIGH);
+  else if (speedInputBias == SPEED_BIAS_PULL_DOWN)
+    digitalWrite(pinSpeedPullDown, HIGH);
+  DEBUG_IO("speed input bias: %s", speedInputBias == SPEED_BIAS_PULL_UP ? "pull-up (VCC)"
+                                   : speedInputBias == SPEED_BIAS_PULL_DOWN ? "pull-down (GND)"
+                                                                            : "none (floating)");
+}
+#endif
 
 void basicInit()
 {
-  DEBUG_IO("Initialising SpeedPulser...");
+  DEBUG_IO("Initialising SpeedPulser (%s)...", SPP_BOARD_NAME);
 
   DEBUG_IO("Reading EEPROM...");
   readEEP();
@@ -21,6 +45,20 @@ void basicInit()
   pinMode(pinOnboardLED, OUTPUT);
   digitalWrite(pinOnboardLED, ledOnboard);
   DEBUG_IO("Set up LED Output!");
+
+#if SPP_HAS_SPEED_BIAS
+  DEBUG_IO("Setting up Speed Input Bias (PU IO%d / PD IO%d)...", pinSpeedPullUp, pinSpeedPullDown);
+  pinMode(pinSpeedPullUp, OUTPUT);
+  pinMode(pinSpeedPullDown, OUTPUT);
+  applySpeedInputBias(); // from the persisted setting; default = none
+#endif
+
+#if SPP_HAS_CAN_STANDBY
+  // TCAN1044V STB: R18 already pulls it low, but drive it explicitly so a floating
+  // GPIO can never leave the transceiver in standby.
+  pinMode(pinCANStandby, OUTPUT);
+  digitalWrite(pinCANStandby, LOW);
+#endif
 
   DEBUG_IO("Setting up RPM Output...");
   pinMode(pinRPMOutput, OUTPUT);
@@ -59,13 +97,15 @@ void basicInit()
   attachInterrupt(digitalPinToInterrupt(pinEngineRPMInput), incomingMotorSpeed, FALLING);
   DEBUG_IO("Set up Speed Interrupt!");
 
-  // Variable-reluctance (VR) speed input — counted like the hall input. The VR
-  // conditioner drives a clean digital edge (C Out) with an external pull-up to
-  // 3.3V, so INPUT (no internal pull) is used and we count the FALLING edge.
+#if SPP_HAS_VR
+  // Variable-reluctance (VR) speed input — counted like the hall input. The MAX9924
+  // drives a clean digital edge (C Out) with R15 10k pull-up to 3.3V, so INPUT (no
+  // internal pull) is used and we count the FALLING edge.
   DEBUG_IO("Setting up VR Speed Interrupt (GPIO%d)...", pinVRInput);
   pinMode(pinVRInput, INPUT);
   attachInterrupt(digitalPinToInterrupt(pinVRInput), incomingVR, FALLING);
   DEBUG_IO("Set up VR Speed Interrupt!");
+#endif
 
   // Motor tacho feedback for the closed-loop PID.
   // INPUT_PULLUP (not plain INPUT): on a legacy PCB with no feedback trace the pin
@@ -166,9 +206,22 @@ void needleSweep()
   const long     kMaxRpmFreq = (long)maxRPM;                  // RPM-dial full scale (Hz)
   const float    kStepRef    = 17.0f;                         // reference step: keeps default speed timing unchanged
 
+#if SPP_HAS_VOLTAGE_CTRL
+  // S3 board with Voltage Control on: the speed needle sweeps by DRIVE (rail + PWM)
+  // up to the calibrated Max Speed, so it reaches the top of the dial whatever
+  // rail boot left (the legacy duty presets only apply on the fixed 9 V rail).
+  const bool  sweepByDrive  = voltageControlEnable;
+  const float kMaxSweepDrive = sweepByDrive ? driveForSpeed(kMaxSpeed) : 0.0f;
+#endif
+
   // Move each needle position from its normalised progress (0..1) along its dial.
   auto driveNeedles = [&](float speedP, float rpmP)
   {
+#if SPP_HAS_VOLTAGE_CTRL
+    if (sweepByDrive)
+      applyMotorDrive(speedP * kMaxSweepDrive);
+    else
+#endif
     setMotorDutyRaw(speedToPwmDuty((uint16_t)((float)kMaxSpeed * speedP)));
     frequencyRPM = (long)((float)kMaxRpmFreq * rpmP);
     setFrequencyRPM(frequencyRPM);
@@ -214,6 +267,11 @@ void needleSweep()
   vTaskDelay(pdMS_TO_TICKS((uint32_t)sweepSpeed * 2));
   dutyCycle = 0;
   appliedDutyCycle = 0;
+#if SPP_HAS_VOLTAGE_CTRL
+  if (sweepByDrive)
+    applyMotorDrive(0.0f); // speed output fully off, rail back to minimum
+  else
+#endif
   setMotorDuty(0);    // speed output fully off
   frequencyRPM = 0;
   setFrequencyRPM(0); // RPM output fully off

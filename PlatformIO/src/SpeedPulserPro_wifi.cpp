@@ -15,6 +15,7 @@
 #include "SpeedPulserPro_savvycan.h"
 #include "SpeedPulserPro_calBuilder.h"
 #include "SpeedPulserPro_voltage.h"
+#include "SpeedPulserPro_driveCal.h"
 
 static uint32_t parseHexCanId(const String& text, uint32_t defaultVal) {
   String s = text;
@@ -26,6 +27,114 @@ static uint32_t parseHexCanId(const String& text, uint32_t defaultVal) {
     return defaultVal;
   }
   return (uint32_t)strtoul(s.c_str(), nullptr, 16) & 0x7FF;
+}
+
+// What is actually driving the motor, for the "Cal:" banner. With voltage control
+// on (S3 board), the PWM preset is idle and the drive marks decide the speed, so
+// say so. calMode "pwm" leaves the banner on the selected preset.
+static void addCalText(JsonDocument &doc)
+{
+#if SPP_HAS_VOLTAGE_CTRL
+  if (voltageControlEnable)
+  {
+    doc["calMode"] = "voltage";
+    if (driveCalCount == 0)
+      doc["calibrationText"] = "Voltage (not calibrated)";
+    else
+      doc["calibrationText"] = "Voltage (" + String(driveCalCount) + (driveCalCount == 1 ? " mark, " : " marks, ") +
+                               String(driveCal[0].speed) + "-" + String(driveCalTopSpeed()) + ")";
+    return;
+  }
+#endif
+  doc["calMode"] = "pwm";
+}
+
+#if SPP_HAS_VOLTAGE_CTRL
+// The drive calibration marks (S3 board), for /api/settings and the
+// capture/delete/import responses.
+static void addDriveCal(JsonDocument &doc)
+{
+  JsonArray pts = doc["driveCal"].to<JsonArray>();
+  for (uint8_t i = 0; i < driveCalCount; i++)
+  {
+    JsonObject p = pts.add<JsonObject>();
+    p["speed"] = driveCal[i].speed;
+    p["hz"] = driveCal[i].hz;
+    p["drive"] = driveCal[i].drive;
+    p["rail"] = driveCal[i].rail;
+    p["pwm"] = driveCal[i].pwm;
+  }
+  doc["driveCalHz"] = driveCalHzValid();
+}
+
+// Live S3-board read-outs for /api/status: rail, drive and tacho keep updating
+// in every mode (Calibration, Speed Test and normal running).
+static void addVoltageStatus(JsonDocument &doc)
+{
+  doc["boardHasVoltageControl"] = true;
+  doc["hasRailSense"] = true;
+  doc["voltageControlEnable"] = voltageControlEnable;
+  doc["buckEnabled"] = buckEnabled;
+  doc["voltageCmd"] = lastVoltageCmd;   // 0..1 of the rail window
+  doc["pwmFrac"] = lastPwmFrac;         // 0..1 motor PWM
+  doc["driveV"] = lastDriveV;           // applied drive (V = rail x PWM)
+  doc["driveMaxV"] = driveMaxV();
+  doc["tempDriveV"] = tempDriveV;       // calibration drive the user set
+  doc["driveTrimPct"] = driveTrim * 100.0f;
+  doc["railCmdV"] = lastRailCmdV;       // commanded rail (V)
+  doc["motorRailV"] = motorRailV;       // measured rail (V) — trust it once railSenseOk
+  doc["railSenseOk"] = railFitValid;
+  doc["railLimited"] = railLimited();
+  doc["boardTestRunning"] = (bool)boardTestActive;
+  float fbMeanHz, fbSpreadPct, fbDriftHz;
+  const bool fbWin = feedbackHzWindow(fbMeanHz, fbSpreadPct, fbDriftHz);
+  doc["fbHzAvg"] = fbWin ? fbMeanHz : 0.0f;          // capture-window mean (Hz)
+  doc["fbHzSpread"] = fbWin ? fbSpreadPct : -1.0f;   // % (max-min)/mean; -1 = not turning
+  doc["fbHzDrift"] = fbWin ? fbDriftHz : 0.0f;       // Hz the mean moved across the window
+  doc["fbStable"] = fbWin && feedbackHzSteady(fbMeanHz, fbSpreadPct, fbDriftHz);
+}
+#endif
+
+// Name of the speed source that is really driving the needle. Checked in the
+// opposite order to taskProcessSpeed() (where the LAST matching source wins), so
+// the web page always shows the source the speed task is using.
+static const char *activeSpeedSourceName()
+{
+  if (useAftermarket)
+  {
+    return "Custom CAN";
+  }
+  if (useTP20)
+  {
+    return "TP2.0";
+  }
+  if (useUDS)
+  {
+    return "UDS";
+  }
+  if (useGPS)
+  {
+    return "GPS";
+  }
+  if (useDSG)
+  {
+    return "DSG";
+  }
+  if (useABS)
+  {
+    return "ABS";
+  }
+  if (useECU)
+  {
+    return "ECU";
+  }
+#if SPP_HAS_VR
+  if (useVR)
+  {
+    return "VR";
+  }
+#endif
+  return "Hall";
 }
 
 void handleGetSettings(AsyncWebServerRequest *request)
@@ -79,27 +188,8 @@ void handleGetSettings(AsyncWebServerRequest *request)
   doc["speedOffsetType"] = useSpeedOffsetCurve ? "Curve" : (useGlobalSpeedOffset ? "Global" : "Off");
   doc["currentSpeedOffset"] = currentSpeedOffset;
 
-  // Speed type mapping
-  if (useHall)
-    doc["speedType"] = "Hall";
-  else if (useVR)
-    doc["speedType"] = "VR";
-  else if (useECU)
-    doc["speedType"] = "ECU";
-  else if (useABS)
-    doc["speedType"] = "ABS";
-  else if (useDSG)
-    doc["speedType"] = "DSG";
-  else if (useGPS)
-    doc["speedType"] = "GPS";
-  else if (useTP20)
-    doc["speedType"] = "TP2.0";
-  else if (useUDS)
-    doc["speedType"] = "UDS";
-  else if (useAftermarket)
-    doc["speedType"] = "Custom CAN";
-  else
-    doc["speedType"] = "Hall";
+  // Speed source shown in the dropdown: the one the speed task is really using
+  doc["speedType"] = activeSpeedSourceName();
 
   doc["aftermarketSpeedID"] = aftermarketSpeedID;
   doc["aftermarketSpeedLowByte"] = aftermarketSpeedLowByte;
@@ -136,21 +226,44 @@ void handleGetSettings(AsyncWebServerRequest *request)
   doc["feedbackMinSpeed"] = feedbackMinSpeed;
   doc["feedbackMaxFreq"] = feedbackMaxFreq;
 
-  // V4 buck voltage control
-  doc["boardHasVoltageControl"] = boardHasVoltageControl;
-  doc["voltageControlEnable"] = voltageControlEnable;
-  doc["vcPwmNominal"] = vcPwmNominal;
-  doc["vcPwmMin"] = vcPwmMin;
-  doc["vcVoltMin"] = vcVoltMin;
-  doc["vcVoltMax"] = vcVoltMax;
-  doc["vcVoltGain"] = vcVoltGain;
-  doc["vcKp"] = vcKp;
-  doc["vcKi"] = vcKi;
-  doc["vcKd"] = vcKd;
+  // Board identity + optional hardware blocks. The UI hides every control whose
+  // hardware isn't on this board (voltage control, rail sense, VR, speed bias).
+  doc["boardId"] = SPP_BOARD_ID;
+  doc["boardName"] = SPP_BOARD_NAME;
+  doc["hasVoltageCtrl"] = (bool)SPP_HAS_VOLTAGE_CTRL;
+  doc["hasRailSense"] = (bool)SPP_HAS_RAIL_SENSE;
+  doc["hasVR"] = (bool)SPP_HAS_VR;
+  doc["hasSpeedBias"] = (bool)SPP_HAS_SPEED_BIAS;
 
+#if SPP_HAS_VOLTAGE_CTRL
+  // Buck voltage control (S3 board)
+  doc["boardHasVoltageControl"] = true;
+  doc["boardIdStrapOk"] = boardIdStrapOk;
+  doc["voltageControlEnable"] = voltageControlEnable;
+  doc["railFloorV"] = RAIL_V_FLOOR;   // hardware rail window (V)
+  doc["railCeilV"] = RAIL_V_CEIL;
+  doc["railSenseOk"] = railFitValid;
+  doc["boardTestCode"] = boardTestCode;
+  doc["topSpeedCaptured"] = (driveCalCount > 0);
+  doc["vcPwmNominal"] = vcPwmNominal;
+  doc["vcRailMaxV"] = vcRailMaxV;
+  doc["vcTrimGain"] = vcTrimGain;
+  doc["vcTrimLimit"] = vcTrimLimit;
+  doc["driveMaxV"] = driveMaxV();
+  addDriveCal(doc);
+#else
+  doc["boardHasVoltageControl"] = false;
+#endif
+  addCalText(doc);
+
+#if SPP_HAS_VR
   // VR (variable-reluctance) speed input
   doc["maxFreqVR"] = maxFreqVR;
   doc["averageFilterVR"] = averageFilterVR;
+#endif
+#if SPP_HAS_SPEED_BIAS
+  doc["speedInputBias"] = speedInputBias; // 0 none, 1 pull-up, 2 pull-down
+#endif
 
   doc["FW_VERSION"] = FW_VERSION;
 
@@ -170,8 +283,10 @@ void handleGetStatus(AsyncWebServerRequest *request)
   doc["vehicleSpeed"] = vehicleSpeed;
   doc["hallSpeed"] = hallSpeed;
   doc["vehicleSpeedHall"] = vehicleSpeedHall;
+#if SPP_HAS_VR
   doc["vrSpeed"] = vrSpeed;
   doc["vehicleSpeedVR"] = vehicleSpeedVR;
+#endif
   doc["ecuSpeed"] = ecuSpeed;
   doc["absSpeed"] = absSpeed;
   doc["dsgSpeed"] = dsgSpeed;
@@ -181,16 +296,7 @@ void handleGetStatus(AsyncWebServerRequest *request)
 
   // Active source identifiers so the Diagnostics live-data can highlight which
   // input is currently driving the Speed / RPM outputs.
-  const char *activeSpeedSource = "Hall";
-  if (useVR) activeSpeedSource = "VR";
-  else if (useECU) activeSpeedSource = "ECU";
-  else if (useABS) activeSpeedSource = "ABS";
-  else if (useDSG) activeSpeedSource = "DSG";
-  else if (useTP20) activeSpeedSource = "TP2.0";
-  else if (useUDS) activeSpeedSource = "UDS";
-  else if (useGPS) activeSpeedSource = "GPS";
-  else if (useAftermarket) activeSpeedSource = "Custom CAN";
-  doc["activeSpeedSource"] = activeSpeedSource;
+  doc["activeSpeedSource"] = activeSpeedSourceName();
   doc["activeRpmSource"] = useRPMCAN ? "CAN" : "Hall";
 
   // Test mode status
@@ -228,13 +334,13 @@ void handleGetStatus(AsyncWebServerRequest *request)
   doc["feedbackAvailable"] = feedbackAvailable;
   doc["feedbackMissing"] = feedbackMissing;
 
-  // V4 buck voltage control (live)
-  doc["boardHasVoltageControl"] = boardHasVoltageControl;
-  doc["voltageControlEnable"] = voltageControlEnable;
-  doc["buckEnabled"] = buckEnabled;
-  doc["voltageCmd"] = lastVoltageCmd;   // 0..1 (1 = max motor volts)
-  doc["pwmFrac"] = lastPwmFrac;         // 0..1 throttle fraction
-  doc["tempVoltageCmd"] = tempVoltageCmd;
+#if SPP_HAS_VOLTAGE_CTRL
+  // Buck voltage control + drive calibration (live, S3 board)
+  addVoltageStatus(doc);
+#else
+  doc["boardHasVoltageControl"] = false;
+#endif
+  addCalText(doc);
 
   String response;
   serializeJson(doc, response);
@@ -364,10 +470,29 @@ void handleGetCal(AsyncWebServerRequest *request)
 // { "op": "jog|setDuty|addPoint|deletePoint|clearPoints|setName|apply|save|export|import", ... }
 void handlePostCal(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
 {
+  // An imported file can span several TCP chunks: collect the whole body before
+  // parsing. The buffer rides on _tempObject, which the server frees with the request.
+  const size_t CAL_BODY_MAX = 16384;
+  if (total > CAL_BODY_MAX)
+  {
+    if (index == 0) request->send(413, "application/json", "{\"error\":\"File too large\"}");
+    return;
+  }
+  if (index == 0)
+  {
+    request->_tempObject = malloc(total);
+  }
+  uint8_t *body = (uint8_t *)request->_tempObject;
+  if (!body)
+  {
+    if (index + len == total) request->send(500, "application/json", "{\"error\":\"Out of memory\"}");
+    return;
+  }
+  memcpy(body + index, data, len);
   if (index + len != total) return; // wait for complete payload
 
   JsonDocument doc;
-  if (deserializeJson(doc, data, len))
+  if (deserializeJson(doc, body, total))
   {
     request->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
     return;
@@ -446,8 +571,14 @@ void handlePostCal(AsyncWebServerRequest *request, uint8_t *data, size_t len, si
     String json, carray;
     calExportJson(json);
     calExportCArray(carray);
-    out["json"]   = json;
-    out["carray"] = carray;
+    out["json"]   = json;     // PWM calibration (legacy)
+    out["carray"] = carray;   // PWM calibration as a firmware preset
+#if SPP_HAS_VOLTAGE_CTRL
+    String voltage;
+    driveCalExportJson(voltage);
+    out["voltage"] = voltage;          // voltage (drive) calibration
+    out["voltageMarks"] = driveCalCount;
+#endif
     String response;
     serializeJson(out, response);
     request->send(200, "application/json", response);
@@ -456,9 +587,35 @@ void handlePostCal(AsyncWebServerRequest *request, uint8_t *data, size_t len, si
   else if (strcmp(op, "import") == 0)
   {
     const char *json = doc["json"];
+    // One Import button for both kinds: the file's "type" says which it is.
+    if (json && strstr(json, DRIVE_CAL_FILE_TYPE))
+    {
+#if SPP_HAS_VOLTAGE_CTRL
+      const char *err = nullptr;
+      if (!driveCalImportJson(json, err))
+      {
+        JsonDocument e;
+        e["error"] = err;
+        String errBody;
+        serializeJson(e, errBody);
+        request->send(400, "application/json", errBody);
+        return;
+      }
+      JsonDocument out;
+      out["kind"] = "voltage";
+      addDriveCal(out);
+      String outBody;
+      serializeJson(out, outBody);
+      request->send(200, "application/json", outBody);
+#else
+      request->send(409, "application/json",
+                    "{\"error\":\"This is a voltage calibration: this board has no voltage control\"}");
+#endif
+      return;
+    }
     if (!json || !calImportJson(json))
     {
-      request->send(400, "application/json", "{\"error\":\"Import failed\"}");
+      request->send(400, "application/json", "{\"error\":\"Import failed: not a SpeedPulser calibration file\"}");
       return;
     }
   }
@@ -655,12 +812,32 @@ void handlePostControl(AsyncWebServerRequest *request, uint8_t *data, size_t len
 
   if (key == "testCal")
   {
+#if SPP_HAS_VOLTAGE_CTRL
+    const bool wasCal = testCal;
+    if (!boardTestActive) // the Test Board owns the motor while it runs
+      testCal = (value == "true" || value == "1");
+    // S3 calibration always starts with the motor stopped (drive 0): the user
+    // raises the drive until the needle sits on a mark.
+    if (testCal && !wasCal)
+    {
+      tempDriveV = 0.0f;
+      resetDriveControl();
+    }
+    if (!testCal && wasCal && voltageControlEnable)
+    {
+      applyMotorDrive(0.0f);
+    }
+#else
     testCal = (value == "true" || value == "1");
+#endif
   }
 
   if (key == "maxSpeed")
   {
     maxSpeed = value.toInt();
+#if SPP_HAS_VOLTAGE_CTRL
+    syncFeedbackMaxFreq(); // the captured marks are in cluster units: keep Hz-at-maxSpeed in step
+#endif
   }
 
   if (key == "maxFreqHall")
@@ -776,114 +953,60 @@ void handlePostControl(AsyncWebServerRequest *request, uint8_t *data, size_t len
 
   if (key == "speedType")
   {
-    // Handle speed source selection
-    useVR = false; // cleared by default; only the VR branch re-enables it
-    if (value == "Hall")
-    {
-      useHall = true;
-      useDSG = false;
-      useECU = false;
-      useABS = false;
-      useGPS = false;
-      useUDS = false;
-      useTP20 = false;
-      useAftermarket = false;
-    }
+    // Speed source selection: switch every source off first, then turn on only the
+    // one picked, so two sources can never be on at once (up to V5.02 "Custom CAN"
+    // left TP2.0 switched on, and TP2.0 then won in the speed task)
+    useHall = false;
+#if SPP_HAS_VR
+    useVR = false;
+#endif
+    useECU = false;
+    useABS = false;
+    useDSG = false;
+    useGPS = false;
+    useTP20 = false;
+    useUDS = false;
+    useAftermarket = false;
 
     if (value == "VR")
     {
-      useHall = false;
+#if SPP_HAS_VR
       useVR = true;
-      useDSG = false;
-      useECU = false;
-      useABS = false;
-      useGPS = false;
-      useUDS = false;
-      useTP20 = false;
-      useAftermarket = false;
+#else
+      useHall = true; // no VR input on this board: fall back to the hall input
+#endif
     }
-
-    if (value == "ECU")
+    else if (value == "ECU")
     {
-      useHall = false;
-      useDSG = false;
       useECU = true;
-      useABS = false;
-      useGPS = false;
-      useUDS = false;
-      useTP20 = false;
-      useAftermarket = false;
     }
-
-    if (value == "DSG")
+    else if (value == "ABS")
     {
-      useHall = false;
-      useDSG = true;
-      useECU = false;
-      useABS = false;
-      useGPS = false;
-      useUDS = false;
-      useTP20 = false;
-      useAftermarket = false;
-    }
-
-    if (value == "ABS")
-    {
-      useHall = false;
-      useDSG = false;
-      useECU = false;
       useABS = true;
-      useGPS = false;
-      useUDS = false;
-      useTP20 = false;
-      useAftermarket = false;
     }
-
-    if (value == "GPS")
+    else if (value == "DSG")
     {
-      useHall = false;
-      useDSG = false;
-      useECU = false;
-      useABS = false;
+      useDSG = true;
+    }
+    else if (value == "GPS")
+    {
       useGPS = true;
-      useUDS = false;
-      useTP20 = false;
-      useAftermarket = false;
     }
-
-    if (value == "TP2.0")
+    else if (value == "TP2.0")
     {
-      useHall = false;
-      useDSG = false;
-      useECU = false;
-      useABS = false;
-      useGPS = false;
-      useUDS = false;
       useTP20 = true;
-      useAftermarket = false;
     }
-
-    if (value == "UDS")
+    else if (value == "UDS")
     {
-      useHall = false;
-      useDSG = false;
-      useECU = false;
-      useABS = false;
-      useGPS = false;
       useUDS = true;
-      useTP20 = false;
-      useAftermarket = false;
     }
-
-    if (value == "Custom CAN")
+    else if (value == "Custom CAN")
     {
-      useHall = false;
-      useDSG = false;
-      useECU = false;
-      useABS = false;
-      useGPS = false;
-      useUDS = false;
       useAftermarket = true;
+    }
+    else
+    {
+      useHall = true; // "Hall" (or anything unrecognised): the hall input is the default
     }
   }
 
@@ -956,6 +1079,7 @@ void handlePostControl(AsyncWebServerRequest *request, uint8_t *data, size_t len
     feedbackMaxFreq = (uint16_t)constrain(value.toInt(), 1, 2000);
   }
 
+#if SPP_HAS_VR
   // ---- VR (variable-reluctance) speed input ----
   if (key == "maxFreqVR")
   {
@@ -968,67 +1092,103 @@ void handlePostControl(AsyncWebServerRequest *request, uint8_t *data, size_t len
     averageFilterVR = (uint8_t)constrain(requestedSamples, 1, 10);
     samplesVR.clear();
   }
+#endif
 
-  // ---- V4 buck voltage control ----
+#if SPP_HAS_SPEED_BIAS
+  // ---- Speed-input bias (S3 board): 0 none / 1 pull-up / 2 pull-down ----
+  if (key == "speedInputBias")
+  {
+    speedInputBias = (uint8_t)constrain(value.toInt(), (long)SPEED_BIAS_NONE, (long)SPEED_BIAS_PULL_DOWN);
+    applySpeedInputBias();
+  }
+#endif
+
+#if SPP_HAS_VOLTAGE_CTRL
+  // ---- Buck voltage control (S3 board) ----
   if (key == "voltageControlEnable")
   {
     voltageControlEnable = (value == "true" || value == "1");
-    // On a V4 board, disabling voltage control reverts to legacy PWM behaviour at
-    // full motor volts; the buck stays enabled so the rail is present.
-    if (boardHasVoltageControl && !voltageControlEnable)
+    resetDriveControl();
+    // Disabling voltage control reverts to legacy PWM behaviour on the fixed ~9 V
+    // the duty presets were captured on; the buck stays enabled so the rail is present.
+    if (!voltageControlEnable)
     {
-      setMotorVoltageCmd(vcVoltMax);
+      setMotorRailVolts(RAIL_V_LEGACY);
     }
+  }
+
+  if (key == "tempDriveV")
+  {
+    // Calibration drive (V) from the UI's -/+ buttons and slider; applied by the
+    // speed task on its next 100 ms tick.
+    tempDriveV = constrain(value.toFloat(), 0.0f, driveMaxV());
   }
 
   if (key == "vcPwmNominal")
   {
-    vcPwmNominal = constrain(value.toFloat(), 0.0f, 1.0f);
+    vcPwmNominal = constrain(value.toFloat(), 0.2f, 1.0f);
   }
 
-  if (key == "vcPwmMin")
+  if (key == "vcRailMaxV")
   {
-    vcPwmMin = constrain(value.toFloat(), 0.0f, 1.0f);
+    vcRailMaxV = constrain(value.toFloat(), RAIL_V_FLOOR, RAIL_V_CEIL);
   }
 
-  if (key == "vcVoltMin")
+  if (key == "vcTrimGain")
   {
-    vcVoltMin = constrain(value.toFloat(), 0.0f, 1.0f);
+    vcTrimGain = constrain(value.toFloat(), 0.0f, 5.0f);
   }
 
-  if (key == "vcVoltMax")
+  if (key == "vcTrimLimit")
   {
-    vcVoltMax = constrain(value.toFloat(), 0.0f, 1.0f);
+    vcTrimLimit = constrain(value.toFloat(), 0.0f, 0.5f);
+    driveTrim = constrain(driveTrim, -vcTrimLimit, vcTrimLimit);
   }
-
-  if (key == "vcVoltGain")
-  {
-    vcVoltGain = constrain(value.toFloat(), 0.0f, 5.0f);
-  }
-
-  if (key == "vcKp")
-  {
-    vcKp = constrain(value.toFloat(), 0.0f, 10.0f);
-  }
-
-  if (key == "vcKi")
-  {
-    vcKi = constrain(value.toFloat(), 0.0f, 20.0f);
-  }
-
-  if (key == "vcKd")
-  {
-    vcKd = constrain(value.toFloat(), 0.0f, 10.0f);
-  }
-
-  if (key == "tempVoltageCmd")
-  {
-    // 0..1 motor-voltage command applied live in calibration mode by the speed task.
-    tempVoltageCmd = constrain(value.toFloat(), 0.0f, 1.0f);
-  }
+#endif // SPP_HAS_VOLTAGE_CTRL
 
   request->send(200);
 }
+
+#if SPP_HAS_VOLTAGE_CTRL
+// Error reply in the same {"error":"..."} shape the UI shows as a notification.
+static void sendActionError(AsyncWebServerRequest *request, int code, const char *msg)
+{
+  JsonDocument out;
+  out["error"] = msg;
+  String response;
+  serializeJson(out, response);
+  request->send(code, "application/json", response);
+}
+
+/**
+ * GET /api/boardtest - S3 board: BOARD_ID strap (read at boot) and the last
+ * Test Board result: per-step target/measured rail and the fitted duty->volts line.
+ */
+void handleGetBoardTest(AsyncWebServerRequest *request)
+{
+  JsonDocument doc;
+  doc["boardHasVoltageControl"] = true;
+  doc["boardIdStrapOk"] = boardIdStrapOk;
+  doc["running"] = (bool)boardTestActive;
+  doc["code"] = boardTestCode;
+  doc["text"] = boardTestText(boardTestCode);
+  doc["pass"] = (boardTestCode == BT_PASS);
+  doc["railSenseOk"] = railFitValid;
+  doc["fitV0"] = railFitV0;
+  doc["fitSlope"] = railFitSlope;
+  doc["motorRailV"] = motorRailV;
+  JsonArray pts = doc["points"].to<JsonArray>();
+  for (uint8_t i = 0; i < BOARD_TEST_POINTS; i++)
+  {
+    JsonObject p = pts.add<JsonObject>();
+    p["target"] = boardTestTargetV[i];
+    p["measured"] = boardTestMeasV[i];
+  }
+  String response;
+  serializeJson(doc, response);
+  request->send(200, "application/json", response);
+}
+#endif
 
 void handlePostAction(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
 {
@@ -1041,6 +1201,56 @@ void handlePostAction(AsyncWebServerRequest *request, uint8_t *data, size_t len,
   {
     tempNeedleSweep = true;
   }
+
+#if SPP_HAS_VOLTAGE_CTRL
+  if (action == "boardTest")
+  {
+    if (testCal || testSpeedo || tempNeedleSweep)
+    {
+      sendActionError(request, 409, "Turn off Speed Test / Calibration Mode first");
+      return;
+    }
+    if (!startBoardTest())
+    {
+      sendActionError(request, 409, "Board test already running");
+      return;
+    }
+  }
+
+  if (action == "calAddPoint" || action == "calDeletePoint" || action == "calClearPoints")
+  {
+    // Drive calibration marks. Each answers with the updated table.
+    if (action == "calAddPoint")
+    {
+      if (!testCal)
+      {
+        sendActionError(request, 409, "Enable Calibration Mode first");
+        return;
+      }
+      const uint8_t r = driveCalCapture(doc["speed"] | 0);
+      if (r != DCAL_OK)
+      {
+        sendActionError(request, 409, driveCalErrorText(r));
+        return;
+      }
+    }
+    else if (action == "calDeletePoint")
+    {
+      driveCalDelete(doc["index"] | 255);
+    }
+    else
+    {
+      driveCalClear();
+    }
+    JsonDocument out;
+    out["status"] = "ok";
+    addDriveCal(out);
+    String body;
+    serializeJson(out, body);
+    request->send(200, "application/json", body);
+    return;
+  }
+#endif
 
   request->send(200);
 }
@@ -1106,6 +1316,9 @@ void setupUI()
   server.on("/api/calibrations", HTTP_GET, handleGetCalibrations);
   server.on("/api/calcurve", HTTP_GET, handleGetCalCurve);
   server.on("/api/cal", HTTP_GET, handleGetCal);
+#if SPP_HAS_VOLTAGE_CTRL
+  server.on("/api/boardtest", HTTP_GET, handleGetBoardTest); // Test Board result (start it via /api/action)
+#endif
 
   // API routes for receiving commands
   server.on("/api/control", HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr, [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
@@ -1173,6 +1386,8 @@ void connectWifi()
   ocfg.fwVersion  = FW_VERSION;
   ocfg.product    = "SpeedPulser Pro";
   ocfg.githubRepo = "adamforbes92/speedPulserPro"; // Releases/ + releases.json for "Check for updates"
+  ocfg.boardId    = SPP_BOARD_ID;   // picks this board's images out of releases.json ("boards")
+  ocfg.boardName  = SPP_BOARD_NAME; // shown on the OTA tab
   otaManagerInit(&ocfg);
 
   wifiManagerInit(&wcfg);

@@ -27,32 +27,33 @@ void setup()
   // and parts of the framework misbehave writing to a never-begun UART.
   Serial.begin(baudSerial);
   Serial.setTimeout(10);
-  DEBUG("SpeedPulser Pro booting  |  FW %s  |  debug=%d", FW_VERSION, enableDebug);
+  DEBUG("SpeedPulser Pro booting  |  FW %s  |  %s (%s)  |  debug=%d", FW_VERSION, SPP_BOARD_NAME, SPP_BOARD_ID, enableDebug);
 
   // Stop the motor drive IMMEDIATELY: pinMotorOutput floats at reset, so drive it
-  // low to prevent random motor movement on boot. Then sample the board-version
-  // strap (GPIO25) before anything else uses the pin.
+  // low to prevent random motor movement on boot.
   pinMode(pinMotorOutput, OUTPUT);
   digitalWrite(pinMotorOutput, LOW);
-  detectBoardVersion();
+#if SPP_HAS_VOLTAGE_CTRL
+  detectBoardVersion(); // BOARD_ID strap sanity check, before anything else touches IO7
+#endif
 
   basicInit();        // Initialize hardware, interrupts, CAN, GPS, etc. (also readEEP)
   setupTimer();       // Set up hardware timer for RPM output
   calBuilderInit();   // Load any user (SpeedPulser) custom calibration from NVS
   updateMotorArray(); // Load motor calibration data into array for quick lookup
 
-  // V4 board only: bring up the adjustable motor supply. The buck must be enabled
-  // for the motor to have any voltage, so enable it regardless of the control mode —
+#if SPP_HAS_VOLTAGE_CTRL
+  // S3 board: bring up the adjustable motor supply. The buck must be enabled for
+  // the motor to have any voltage, so enable it regardless of the control mode —
   // starting at the minimum (safe) rail with the motor PWM already off.
   initVoltageControl();
-  if (boardHasVoltageControl)
+  enableBuck();
+  if (!voltageControlEnable)
   {
-    enableBuck();
-    if (!voltageControlEnable)
-    {
-      setMotorVoltageCmd(vcVoltMax); // legacy PWM behaviour: hold full motor volts
-    }
+    // Legacy PWM behaviour: hold the fixed ~9 V the duty presets were captured on.
+    setMotorRailVolts(RAIL_V_LEGACY);
   }
+#endif
 
   if (hasNeedleSweep)
   {
@@ -71,6 +72,10 @@ void setup()
   // onboard LED to cut current draw (and therefore linear-regulator heat).
   power_config_t pcfg = powerDefaultConfig();
   pcfg.verbose = (enableDebug && debugPower);
+  // The module's default is the DevKit's GPIO2; the S3 board drives its own LED
+  // from ESP_LED, so hand it the board's pin rather than a spare GPIO.
+  pcfg.onboardLedPin = pinOnboardLED;
+  pcfg.ledActiveHigh = true;
   powerInit(&pcfg);
 }
 
@@ -91,6 +96,12 @@ void loop()
     DEBUG_GPS("Auto rate apply %s: %s", ok ? "OK" : "FAILED", resp.c_str());
   }
 
+#if SPP_HAS_VOLTAGE_CTRL
+  if (tempNeedleSweep && boardTestActive)
+  {
+    tempNeedleSweep = false; // the Test Board owns the motor; drop the sweep request
+  }
+#endif
   if (tempNeedleSweep)
   {
     tasksSuspendAll(); // Suspend all tasks to prevent interference with needle sweep

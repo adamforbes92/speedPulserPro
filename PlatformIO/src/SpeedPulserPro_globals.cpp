@@ -15,7 +15,9 @@ uint8_t analyzerProtocol = ANALYZER_PROTOCOL_GVRET;
 // LEDC PWM is configured via driver/ledc.h - no object needed
 RunningMedian samples = RunningMedian(10); // for median filtering of speed input (Hall)
 RunningMedian samplesRPM = RunningMedian(10); // for median filtering of RPM input
+#if SPP_HAS_VR
 RunningMedian samplesVR = RunningMedian(10); // for median filtering of speed input (VR)
+#endif
 HardwareSerial ss(2);
 TinyGPSPlus gps;
 Preferences pref;
@@ -32,12 +34,18 @@ long pwmFrequency = 10000;
 long dutyCycle = 0;
 int pwmResolution = 12;
 unsigned long dutyCycleIncoming = 0;
-unsigned long dutyCycleMotor = 0;
+float rpmInputHz = 0.0f;
+#if SPP_HAS_VR
 volatile unsigned long dutyCycleIncomingVR = 0;
+#endif
 uint16_t appliedDutyCycle = 0;
 
 // Motor direction: false = normal (pinMotorDirection LOW), true = reverse (HIGH)
 bool reverseDirection = false;
+
+#if SPP_HAS_SPEED_BIAS
+uint8_t speedInputBias = SPEED_BIAS_NONE; // S3 board: speed-input pull-up/down switch (persisted)
+#endif
 
 // ============================================================================
 // Closed-Loop Motor Feedback (PID)
@@ -68,9 +76,11 @@ uint16_t vehicleSpeed = 0;
 uint16_t vehicleSpeedHall = 0;
 uint16_t vehicleSpeedCAN = 0;
 uint16_t vehicleSpeedGPS = 0;
-uint16_t vehicleSpeedVR = 0;
 uint16_t hallSpeed = 0;
+#if SPP_HAS_VR
+uint16_t vehicleSpeedVR = 0;
 uint16_t vrSpeed = 0;
+#endif
 uint16_t ecuSpeed = 0;
 uint16_t dsgSpeed = 0;
 uint16_t gpsSpeed = 0;
@@ -86,7 +96,9 @@ bool updateMotorPerformance = false;
 uint8_t motorPerformanceVal = 1;
 uint16_t maxFreqHall = 200;
 uint16_t maxFreqCAN = 200;
+#if SPP_HAS_VR
 uint16_t maxFreqVR = 200;
+#endif
 uint16_t maxSpeed = 200;
 uint16_t maxRPM = 230;
 uint16_t clusterRPMLimit = 7000;
@@ -104,8 +116,10 @@ float stepRPM = 14;
 float stepSpeed = 17;
 uint8_t averageFilterHall = DEFAULT_AVERAGE_FILTER_HALL;
 uint8_t averageFilterRPM = DEFAULT_AVERAGE_FILTER_RPM;
+#if SPP_HAS_VR
 uint8_t averageFilterVR = DEFAULT_AVERAGE_FILTER_HALL;
-uint16_t filteredRPM = 0;
+#endif
+float filteredRPMHz = 0.0f;
 
 // ============================================================================
 // Test Variables
@@ -142,7 +156,9 @@ uint8_t speedType = 0;
 // Speed Input Selection
 // ============================================================================
 bool useHall = true; // default source — matches the UI default and the first-run EEPROM write
+#if SPP_HAS_VR
 bool useVR = false;
+#endif
 bool useDSG = false;
 bool useGPS = false;
 bool useABS = false;
@@ -188,7 +204,9 @@ uint32_t lastMillis2 = 0;
 uint32_t lastCAN = 0;
 unsigned long lastPulse = 0;
 unsigned long lastPulseRPM = 0;
+#if SPP_HAS_VR
 volatile unsigned long lastPulseVR = 0;
+#endif
 
 // ============================================================================
 // System Status Variables
