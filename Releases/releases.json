@@ -1,11 +1,54 @@
 {
   "product": "SpeedPulserPro",
-  "latest": "5.02",
+  "latest": "5.03",
   "latestByBoard": {
-    "esp32": "5.02",
-    "esp32s3": "5.02"
+    "esp32": "5.03",
+    "esp32s3": "5.03"
   },
   "releases": [
+    {
+      "version": "5.03",
+      "channel": "stable",
+      "date": "2026-10-18",
+      "ota": true,
+      "notes": "Speed source fixes: picking a source switches the others off (Custom CAN left TP2.0 on) and the page always shows the source really in use; a speed above Max Speed for 0.5 s parks the needle at Max Speed instead of 0; the Positive Offset tick now saves across restarts (re-tick it once after updating).",
+      "boards": {
+        "esp32": {
+          "firmware": {
+            "path": "V5.03/firmware.bin",
+            "size": 1223232,
+            "sha256": "218204be8880a67421e3ed8dc615ca7cee840d0d83af44ee3f3b70330468ff02"
+          },
+          "filesystem": {
+            "path": "V5.03/littlefs.bin",
+            "size": 655360,
+            "sha256": "9cbd3a6a8542af6db111cfcd192158ab15e1eac87df9c1790e6d2ab6d9b3f702"
+          }
+        },
+        "esp32s3": {
+          "firmware": {
+            "path": "V5.03-S3/firmware.bin",
+            "size": 1228320,
+            "sha256": "c27791a0bc95f9ec7bd886dbe029c4c3ce58e0a0398050cf356e6593595a70f8"
+          },
+          "filesystem": {
+            "path": "V5.03-S3/littlefs.bin",
+            "size": 1048576,
+            "sha256": "15d6bd696fb6c808a6a680b9a4ae70a6e5a3e2674fa000564b6935e5bcdb29dc"
+          }
+        }
+      },
+      "firmware": {
+        "path": "V5.03/firmware.bin",
+        "size": 1223232,
+        "sha256": "218204be8880a67421e3ed8dc615ca7cee840d0d83af44ee3f3b70330468ff02"
+      },
+      "filesystem": {
+        "path": "V5.03/littlefs.bin",
+        "size": 655360,
+        "sha256": "9cbd3a6a8542af6db111cfcd192158ab15e1eac87df9c1790e6d2ab6d9b3f702"
+      }
+    },
     {
       "version": "5.02",
       "channel": "stable",
@@ -22,7 +65,7 @@
           "filesystem": {
             "path": "V5.02/littlefs.bin",
             "size": 655360,
-            "sha256": "2029ff17546c72f403cc43286cbe73a7e7152bc9ee84b5edfcbed3fccdfbe192"
+            "sha256": "e252f2b38977b55413db26dd5e463bca453fdfe737e2e028c34a267a23181f74"
           }
         },
         "esp32s3": {
@@ -34,7 +77,7 @@
           "filesystem": {
             "path": "V5.02-S3/littlefs.bin",
             "size": 1048576,
-            "sha256": "0271a12b1997cc3d3f16e1df36688a58333a808779fb4b8b65c420265463dd4c"
+            "sha256": "73e10edea92184ab0dac3216e2237dbcf682508eeab683b8868d48586695fdee"
           }
         }
       },
@@ -46,7 +89,7 @@
       "filesystem": {
         "path": "V5.02/littlefs.bin",
         "size": 655360,
-        "sha256": "2029ff17546c72f403cc43286cbe73a7e7152bc9ee84b5edfcbed3fccdfbe192"
+        "sha256": "e252f2b38977b55413db26dd5e463bca453fdfe737e2e028c34a267a23181f74"
       }
     },
     {
