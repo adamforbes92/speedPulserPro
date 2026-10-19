@@ -27,7 +27,7 @@ It is based on an **ESP32 DevKit V1 (WROOM-32)** and uses a **TY3816B** BLDC mot
 | WiFi UI | Web app type interface |
 | Needle sweep | Full-scale exercise of both needles on power-up (speed + RPM), live-adjustable sweep speed |
 | Speed offset | Global fixed offset **or** 5-point speed-dependent curve |
-| OTA updates | Firmware **and** filesystem upload from the browser |
+| OTA updates | Update from GitHub or by file upload on the OTA tab; Home Wi‑Fi bridge mode; recovery page if the web UI is ever lost |
 | CAN analyzer | Forward live frames to SavvyCAN via WiFi (GVRET) or Serial |
 | Power management | Auto WiFi-off + CPU scaling after 1 min idle |
 | Remembers settings | All settings stored to ESP32 Preferences (EEPROM) |
@@ -183,7 +183,7 @@ Take time here — good fitment minimises noise and extends coupler life.
 
 Connect to the **`SpeedPulserPro`** WiFi access point (open network) and navigate to **`192.168.1.1`** or **`speedpulserpro.local`** in a browser.
 
-The interface is a single-page app served from the ESP32's LittleFS flash partition, built on Forbes Automotive's shared dark theme (the same look and status-colour conventions used across OpenHaldex, Can2Cluster, SpeedPulser, can2rpm, the MQB Steering Wheel Controller and AirLift Controller). Settings are applied in real time and saved to EEPROM automatically every 5 seconds. Current firmware version: **4.01.0**.
+The interface is a single-page app served from the ESP32's LittleFS flash partition, built on Forbes Automotive's shared dark theme (the same look and status-colour conventions used across OpenHaldex, Can2Cluster, SpeedPulser, can2rpm, the MQB Steering Wheel Controller and AirLift Controller). Settings are applied in real time and saved to EEPROM automatically every 5 seconds. Current firmware version: **5.03**.
 
 **Status colours**, used throughout the Dashboard and Diagnostics tabs:
 
@@ -264,7 +264,7 @@ Source selection, tuning and diagnostics:
 | GPS Update Rate | Select **1 / 5 / 10 / 16 Hz** and view the live updates-per-second figure |
 | Signal Filters | Hall speed, VR speed and RPM running-median sample counts (1–10) |
 | CAN Analyser | Forward all received CAN frames to **SavvyCAN** via WiFi (GVRET on `192.168.4.1:23`) or Serial (GVRET) |
-| Speed Selection | Primary speed source: Hall / ECU / ABS / DSG / TP2.0 / UDS / GPS / Custom CAN |
+| Speed Selection | Primary speed source: Hall / VR (S3) / ECU / ABS / DSG / TP2.0 / UDS / GPS / Custom CAN. Only one is used at a time |
 | Custom CAN Input | When *Custom CAN* is selected, define ID, byte indices, endianness, scale & offset |
 | DSG Speed Calculation | When *DSG* is selected, the gear ratios, final drives and tyre circumference used to derive speed from RPM and gear |
 | RPM Selection | Primary RPM source (Hall or CAN), cluster frequency limit and RPM ceiling |
@@ -431,7 +431,8 @@ Source (Hall / ECU / ABS / DSG / TP2.0 / UDS / GPS / Custom CAN)
     │
     ▼  ISR (windowed capture) / TWAI RX / GPS parser
     Hall / VR / RPM inputs accumulate each edge interval + count, rejecting
-    pulses < 3 ms (> 333 Hz) as electrical noise; other sources arrive in km/h
+    edges closer than half a period at that input's full scale as electrical
+    noise; other sources arrive in km/h
     │
     ▼  speedControlTask  (once per loop)
     For Hall: frequency = intervals ÷ summed interval time (true average over the
@@ -441,6 +442,10 @@ Source (Hall / ECU / ABS / DSG / TP2.0 / UDS / GPS / Custom CAN)
     ▼  RunningMedian filter  (averageFilterHall samples, default 6)
     Smoothed median speed value
     │
+    ▼  Max Speed check
+    Above Max Speed for a moment: hold the last good speed (spike);
+    above it for 0.5 s: park at Max Speed
+    │
     ▼  applyConfiguredSpeedOffset()
     Speed ± global offset  OR  speed ± curve offset for that band
     │
@@ -449,6 +454,7 @@ Source (Hall / ECU / ABS / DSG / TP2.0 / UDS / GPS / Custom CAN)
     ▼  findClosestMatch()
     Scans motorPerformance[] for the closest matching speed value
     Returns the array index = 10-bit duty cycle
+    At or below the array's lowest speed the motor stays off
     │
     ▼  setMotorDuty()  — native LEDC IDF driver, 10 kHz
     Motor PWM output on GPIO 21
@@ -456,7 +462,10 @@ Source (Hall / ECU / ABS / DSG / TP2.0 / UDS / GPS / Custom CAN)
 
 > **Default hall-sensor scaling:** 1 Hz = 1 km/h. This matches 02J / 02M gearbox sensors used in most VW/Audi applications. Adjust `maxFreqHall` and `maxSpeed` together if your sensor has a different ratio (e.g. set both to 160 for a sensor that outputs 160 Hz at 160 km/h).
 
-> **Windowed frequency capture:** The hall, VR and RPM inputs no longer derive their reading from a single edge-to-edge period — which could turn tone-wheel / tooth-spacing jitter straight into a jumpy needle. Instead each ISR accumulates the edge intervals and the task averages them once per window, and pulses closer than ~3 ms (> 333 Hz) are rejected so ignition-coil EMI can't be mistaken for a valid signal.
+> **Windowed frequency capture:** The hall, VR and RPM inputs no longer derive their reading from a single edge-to-edge period — which could turn tone-wheel / tooth-spacing jitter straight into a jumpy needle. Instead each ISR accumulates the edge intervals and the task averages them once per window, and edges closer than half a period at that input's full scale (Max Hall Frequency / Max VR Frequency / Cluster Frequency Limit, never above 1 kHz) are rejected so ignition-coil EMI can't be mistaken for a valid signal.
+
+> [!NOTE]
+> **Lowest speed shown:** each legacy calibration array has a lowest speed the motor can hold (the default array starts at 24 km/h). At or below it the motor is switched off and the needle rests on zero, so low test speeds on the bench may not move the needle. On the S3 board, Voltage Control with a drive calibration that includes a low mark reaches much slower speeds.
 
 ### Reading a Legacy Calibration Array
 
@@ -525,17 +534,17 @@ The two modes are mutually exclusive and can be toggled from the CAN Analyzer ca
 
 ---
 
-### OTA Tab
+### Over-the-Air Updates
 
-<p align="center"><img src="Images/ui-ota.png" alt="OTA tab — firmware info and two-step update" width="300"></p>
+Everything happens on the **OTA** tab; USB is only needed for the very first install, or if the web interface is ever lost.
 
-Powered by the shared `ota_manager` module. Firmware and the web UI live on separate flash partitions, so an update is a **two-step process**:
+- **Update from GitHub** — press **Check for updates**. The page reads the release list from [`adamforbes92/speedPulserPro`](https://github.com/adamforbes92/speedPulserPro) (`Releases/releases.json` plus the `V…` folders), shows *Installed* vs. *Latest* (older and beta releases sit behind a tick-box, for rolling back), then installs the selected version in six tracked steps: download and flash the web UI, verify it, download and flash the firmware, reboot. The browser needs internet *while it can still reach the controller* — join the controller to your router in the **Home WiFi (Bridge Mode)** card, put the phone on the same network and open the address the card shows (`http://speedpulserpro.local/` works there too). On the controller's own access point alone most phones drop mobile data.
+- **Home WiFi (Bridge Mode)** — the controller joins a home or garage network as a station alongside its own access point. Scan or type the network name, save, and once it shows *Connected* the controller is reachable from that network as well. It tries hard for 20 s after boot, then once every 5 minutes, so a saved network can't disturb the access point when the car is parked away from home.
+- **Update from Files** — no internet needed: download `littlefs.bin` and `firmware.bin` from the newest `Releases/V…/` folder and upload them here, **Filesystem** (web UI) first, then **Firmware**. The device reboots after the firmware.
 
-1. **Filesystem** — pick **Filesystem (web UI)** from the dropdown and upload `littlefs.bin` (`POST /api/ota/fs`, written to the SPIFFS partition). This updates `index.html` / `app.js` / `style.css`; the device does **not** reboot, so you can go straight on to step 2.
-2. **Firmware** — pick **Firmware (application)** and upload `firmware.bin` (`POST /api/ota`, written to the OTA app partition). The device reboots automatically once this completes.
+Every upload is size-checked, and a filesystem image is verified by mounting it before the device reports success — a failed filesystem upload is wiped rather than left half-written. If the web interface is ever missing (a filesystem update that stopped part-way), the controller serves a **recovery page** at its address with the same two uploads and partition diagnostics, so it is never a USB job. Web assets are served `no-cache`, so a new UI is never hidden behind a stale copy in the phone's browser. `GET /api/ota/info` reports the firmware and web UI versions shown at the top of the tab; `GET /api/ota/check` gates updates on the device being in a safe state.
 
-- **Firmware Info** — reports the running firmware version, hardware family and board name (`GET /api/ota/info`).
-- **OTA Update** — pick **Firmware** or **Filesystem** from the dropdown, then drag-and-drop or choose the matching `.bin`. A progress bar tracks each upload.
+<p align="center"><img src="Images/ui-ota.png" alt="OTA tab — Update from GitHub, Home WiFi bridge mode and Update from Files" width="300"></p>
 
 ---
 
@@ -635,4 +644,9 @@ The SpeedPulser Pro drives an analog speedometer for display purposes. It should
 | V3.04 | Closed-loop feedback is sense-check for legacy PCBs without the motor-feedback circuit |
 | V4.00.0 | Voltage-control hardware support (VR input) |
 | V4.01.0 | Adopted Forbes Automotive's shared Ignitron dark theme, Wi‑Fi AP/mDNS manager (`speedpulserpro.local`) and the two-step `ota_manager` firmware/filesystem OTA module, common across the ESP32 product line |
+| V4.02 | OTA overhaul: uploads that complete, verified filesystem updates with a recovery page, "Update from GitHub" and a Home WiFi (bridge mode) card |
+| V5.00 | ESP32-S3 board (rev6): one codebase for DevKit and S3, buck voltage control with Test Board, VR speed input, switchable speed-input bias |
+| V5.01 | S3 drive calibration: up to 10 captured marks set the motor drive (rail x PWM), with an optional gentle feedback trim; voltage calibration export / import |
+| V5.02 | RPM input passes through to the tach 1:1 (was ~30 RPM low); fractional-Hz RPM output; glitch filter scaled per input, so 6/8-cyl RPM above 333 Hz no longer reads half; RPM Filter Samples = 1 no longer outputs 0 RPM |
+| V5.03 | Picking a speed source switches the others off (Custom CAN left TP2.0 on), and the page always shows the source really in use; a speed above Max Speed for 0.5 s parks the needle at Max Speed instead of 0; the Positive Offset tick now saves across restarts |
 
