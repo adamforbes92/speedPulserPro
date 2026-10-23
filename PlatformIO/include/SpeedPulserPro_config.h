@@ -59,7 +59,7 @@
 // V5.01 - drive calibration (multi-mark, ported from SpeedPulser V5.01): open-loop drive + gentle feedback trim
 // V5.02 - RPM hall input passed through 1:1 in Hz; per-input glitch threshold from each input's full scale
 // V5.03 - speed source picks exactly one input; over-range speed holds at Max Speed; Global Speed Offset sign now saves
-#define FW_VERSION "5.03"
+#define FW_VERSION "5.04"
 
 // Speed Input Configuration
 #define incomingType 0

@@ -180,6 +180,18 @@ V5.03 - speed source fixes.
         "speedOffsetPositive" was 19 letters, over the ESP32's 15-letter limit, so it never
         saved and a + offset came back as - after every restart. Now saved as "spdOffsetPos".
       - own build folder (speedpulserpro-v503-pio) so the V5.02 build stays intact.
+
+V5.04 - MQB DSG theoretical speed over UDS corrected (ported from the Can2Cluster DSG
+        firmware reverse-engineering; the UDS/TP speed code is shared, so the fix must match).
+      - UDS speed was a placeholder: DID 0x0101, /100, on the OBD2 broadcast 0x7DF/0x7E8.
+        Now it reads the DSG's own DID 0x100A "Vehicle speed from transmission" on the DSG
+        physical IDs 0x7E1/0x7E9, as 16-bit little-endian signed, km/h = raw/10.
+      - PQ DSG speed (TP2.0 KWP 21 01, raw/3) is unchanged - the DQ500 firmware confirmed
+        that scaling is right (the gearbox stores speed at 1/3 km/h and 0x25 is the tester
+        scaling code, so raw/3 is correct).
+      - The MQB DID number and raw/10 want one on-car check: the DID table sits in a flash
+        region the FRF didn't contain. See Can2Cluster Documents/dsg_re/.
+      - own build folder (speedpulserpro-v504-pio) so the V5.03 build stays intact.
 */
 
 #endif // VERSION_H
