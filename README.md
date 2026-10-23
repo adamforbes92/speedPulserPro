@@ -183,7 +183,7 @@ Take time here — good fitment minimises noise and extends coupler life.
 
 Connect to the **`SpeedPulserPro`** WiFi access point (open network) and navigate to **`192.168.1.1`** or **`speedpulserpro.local`** in a browser.
 
-The interface is a single-page app served from the ESP32's LittleFS flash partition, built on Forbes Automotive's shared dark theme (the same look and status-colour conventions used across OpenHaldex, Can2Cluster, SpeedPulser, can2rpm, the MQB Steering Wheel Controller and AirLift Controller). Settings are applied in real time and saved to EEPROM automatically every 5 seconds. Current firmware version: **5.03**.
+The interface is a single-page app served from the ESP32's LittleFS flash partition, built on Forbes Automotive's shared dark theme (the same look and status-colour conventions used across OpenHaldex, Can2Cluster, SpeedPulser, can2rpm, the MQB Steering Wheel Controller and AirLift Controller). Settings are applied in real time and saved to EEPROM automatically every 5 seconds. Current firmware version: **5.04**.
 
 **Status colours**, used throughout the Dashboard and Diagnostics tabs:
 
@@ -649,4 +649,5 @@ The SpeedPulser Pro drives an analog speedometer for display purposes. It should
 | V5.01 | S3 drive calibration: up to 10 captured marks set the motor drive (rail x PWM), with an optional gentle feedback trim; voltage calibration export / import |
 | V5.02 | RPM input passes through to the tach 1:1 (was ~30 RPM low); fractional-Hz RPM output; glitch filter scaled per input, so 6/8-cyl RPM above 333 Hz no longer reads half; RPM Filter Samples = 1 no longer outputs 0 RPM |
 | V5.03 | Picking a speed source switches the others off (Custom CAN left TP2.0 on), and the page always shows the source really in use; a speed above Max Speed for 0.5 s parks the needle at Max Speed instead of 0; the Positive Offset tick now saves across restarts |
+| V5.04 | MQB DSG speed over UDS corrected (shared DSG speed code, ported from the Can2Cluster firmware reverse-engineering): reads DID `0x100A` "Vehicle speed from transmission" on the DSG's own IDs `0x7E1/0x7E9`, 16-bit little-endian signed, km/h = raw/10, replacing a placeholder (`0x0101`, /100). PQ DSG speed (TP2.0, raw/3) confirmed correct and unchanged |
 
