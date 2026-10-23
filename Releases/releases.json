@@ -1,11 +1,54 @@
 {
   "product": "SpeedPulserPro",
-  "latest": "5.03",
+  "latest": "5.04",
   "latestByBoard": {
-    "esp32": "5.03",
-    "esp32s3": "5.03"
+    "esp32": "5.04",
+    "esp32s3": "5.04"
   },
   "releases": [
+    {
+      "version": "5.04",
+      "channel": "stable",
+      "date": "2026-10-23",
+      "ota": true,
+      "notes": "MQB DSG speed over UDS corrected (shared DSG speed code, ported from the Can2Cluster firmware RE): reads DID 0x100A on the DSG IDs 0x7E1/0x7E9, km/h = raw/10, replacing a placeholder. PQ DSG speed (TP2.0, raw/3) unchanged and confirmed correct by the RE.",
+      "boards": {
+        "esp32": {
+          "firmware": {
+            "path": "V5.04/firmware.bin",
+            "size": 1223264,
+            "sha256": "9a4bb389c557b09b9e279ac5b1e606c5eda5aac2b4c4f161f2589c4e36f618c7"
+          },
+          "filesystem": {
+            "path": "V5.04/littlefs.bin",
+            "size": 655360,
+            "sha256": "82893ea44d64c68276c2ad77594f2080334547111449c9d67e5dfdb227f05246"
+          }
+        },
+        "esp32s3": {
+          "firmware": {
+            "path": "V5.04-S3/firmware.bin",
+            "size": 1228352,
+            "sha256": "e7b22c12871f570fbc3069700a55129b2747135c288ec23013ad87eda19e40f5"
+          },
+          "filesystem": {
+            "path": "V5.04-S3/littlefs.bin",
+            "size": 1048576,
+            "sha256": "976bddfd10904ab1e4d2b02f8aa3fb3033199144a4f6704f4aa09f5cf8d47a13"
+          }
+        }
+      },
+      "firmware": {
+        "path": "V5.04/firmware.bin",
+        "size": 1223264,
+        "sha256": "9a4bb389c557b09b9e279ac5b1e606c5eda5aac2b4c4f161f2589c4e36f618c7"
+      },
+      "filesystem": {
+        "path": "V5.04/littlefs.bin",
+        "size": 655360,
+        "sha256": "82893ea44d64c68276c2ad77594f2080334547111449c9d67e5dfdb227f05246"
+      }
+    },
     {
       "version": "5.03",
       "channel": "stable",
