@@ -1,6 +1,8 @@
 # SpeedPulser Pro
 
-The SpeedPulser Pro converts a vehicle speed signal — from a gearbox hall sensor, a [Can2Cluster](https://forbes-automotive.com) signal, a CAN bus (ECU / ABS / DSG / UDS), or a GPS module — into a 10 kHz PWM signal that drives a BLDC motor and gives life back to an OEM analog speedometer without a mechanical cable. It can also read engine RPM (hall or CAN) and re-output it as a traditional coil-style ignition signal for a tachometer. It is fully open-source, WiFi-configurable, and calibrated per cluster type so the needle reads accurately across the available speed range of the motor.
+**Get one ready-built:** [SpeedPulser Pro at Forbes Automotive](https://forbes-automotive.com/products/speedpulser-pro?utm_source=github&utm_medium=readme&utm_campaign=speedpulserpro) · Check your speedo in the [Speedo Fitment Guide](https://forbes-automotive.com/pages/speedo-fitment-guide?utm_source=github&utm_medium=readme&utm_campaign=speedpulserpro) · Not sure which board you need? See the [speedo, tacho & cluster comparison](https://forbes-automotive.com/collections/speedo-tacho-cluster?utm_source=github&utm_medium=readme&utm_campaign=speedpulserpro).
+
+The SpeedPulser Pro converts a vehicle speed signal — from a gearbox hall sensor, a [Can2Cluster](https://forbes-automotive.com/products/can2cluster) signal, a CAN bus (ECU / ABS / DSG / UDS), or a GPS module — into a 10 kHz PWM signal that drives a BLDC motor and gives life back to an OEM analog speedometer without a mechanical cable. It can also read engine RPM (hall or CAN) and re-output it as a traditional coil-style ignition signal for a tachometer. It is fully open-source, WiFi-configurable, and calibrated per cluster type so the needle reads accurately across the available speed range of the motor.
 
 It is based on an **ESP32 DevKit V1 (WROOM-32)** and uses a **TY3816B** BLDC motor driven via a native LEDC hardware PWM channel. The PCB is an upgrade for the original SpeedPulser board, with the addition of CAN, GPS and a coil-type RPM output.
 
@@ -61,7 +63,7 @@ It is based on an **ESP32 DevKit V1 (WROOM-32)** and uses a **TY3816B** BLDC mot
 
 ## Purchase
 
-Pre-assembled SpeedPulser Pro units are available here: [SpeedPulser Pro — Forbes Automotive](https://forbes-automotive.com/products/speedpulserpro)
+Pre-assembled SpeedPulser Pro units are available here: [SpeedPulser Pro — Forbes Automotive](https://forbes-automotive.com/products/speedpulser-pro)
 
 ---
 
