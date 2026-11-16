@@ -80,7 +80,6 @@
     cfg.repo = info.repo || "";
     cfg.branch = info.branch || "main";
     cfg.releasesDir = (info.releasesDir || "Releases").replace(/^\/+|\/+$/g, "");
-    cfg.product = info.product || "";
     cfg.version = info.version || "";
     cfg.boardId = info.boardId || "esp32";
     installedVersion = cfg.version;
@@ -125,8 +124,6 @@
       set("otaFsVersion", i.fsVersion && i.fsVersion !== "--" ? i.fsVersion : (i.version ? i.version + " (assumed)" : "--"));
       const boardText = i.boardName ? i.boardName + " — " + i.board : i.board;
       set("otaBoard", boardText);
-      set("otaPartition", i.partition);
-      set("otaHardware", boardText);
       set("updInstalled", i.version ? "v" + i.version : "--");
       const repoEl = $("updRepo");
       if (repoEl) repoEl.textContent = cfg.repo ? cfg.repo + " / " + cfg.releasesDir : "no release channel configured";

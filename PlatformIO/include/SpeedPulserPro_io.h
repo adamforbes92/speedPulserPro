@@ -10,7 +10,6 @@ void readEEP();    // from eep.cpp
 void canInit();    // from can.cpp
 
 void basicInit();
-void testSpeed();
 void needleSweep();
 void setMotorDuty(uint32_t duty);
 void setMotorDutyRaw(uint32_t pwmDuty);

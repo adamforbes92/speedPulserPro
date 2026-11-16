@@ -17,7 +17,7 @@
 // #### Connect SavvyCAN via WiFi (GVRET)
 // 1. Connect to the SpeedPulserPro Wi-Fi AP.
 // 2. In SavvyCAN: Add New Device Connection -> Network Connection (GVRET).
-// 3. IP: 192.168.4.1, port 23 (implicit in SavvyCAN GVRET UI).
+// 3. IP: 192.168.1.1, port 23 (implicit in SavvyCAN GVRET UI).
 //
 // #### Connect SavvyCAN via Serial (GVRET)
 // 1. Connect USB to the ESP32.

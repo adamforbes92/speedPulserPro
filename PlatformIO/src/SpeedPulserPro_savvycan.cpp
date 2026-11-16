@@ -445,6 +445,7 @@ static void analyzerTask(void *arg) {
       if (serialStarted) {
         serialStarted = false;
         resetGvretParser();
+        Serial.updateBaudRate(baudSerial); // back to the debug rate (V5.09: it stayed at 1 Mbaud)
       }
       vTaskDelay(kAnalyzerPollDelayMs / portTICK_PERIOD_MS);
       continue;
@@ -477,7 +478,10 @@ static void analyzerTask(void *arg) {
     }
 
     // ---- WiFi GVRET / SLCAN mode ----
-    serialStarted = false;
+    if (serialStarted) {
+      serialStarted = false;
+      Serial.updateBaudRate(baudSerial); // back to the debug rate (V5.09: it stayed at 1 Mbaud)
+    }
 
     if (analyzerActiveProtocol != analyzerProtocol) {
       analyzerActiveProtocol = analyzerProtocol;

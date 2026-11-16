@@ -1,10 +1,6 @@
 #ifndef MAIN_H
 #define MAIN_H
 
-// Forward declarations for functions defined in main.cpp
-void incomingHz();
-void incomingMotorSpeed();
-void setFrequencyRPM(float frequencyHz);
-uint16_t findClosestMatch(uint16_t val);
+uint16_t findClosestMatch(uint16_t val); // SpeedPulserPro_control.cpp (the rest is in SpeedPulserPro_control.h)
 
 #endif // MAIN_H

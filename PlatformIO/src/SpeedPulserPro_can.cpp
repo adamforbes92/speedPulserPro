@@ -57,6 +57,50 @@ void canInit()
  * FreeRTOS task for receiving CAN messages
  * Runs continuously and processes incoming TWAI frames
  */
+// Last time each CAN-fed value was refreshed. A module that drops off the bus while
+// others keep talking must not leave its last value on the needle / tach (V5.06).
+static const uint32_t CAN_VALUE_TIMEOUT_MS = 500;
+static uint32_t lastEngineRpmFrameMs = 0;
+static uint32_t lastEcuSpeedFrameMs = 0;
+static uint32_t lastAbsSpeedFrameMs = 0;
+static uint32_t lastCustomSpeedFrameMs = 0;
+static uint32_t lastGearFrameMs = 0;  // V5.09: gear / lever expire too (a stale gear gave a wrong DSG speed)
+static uint32_t lastLeverFrameMs = 0;
+
+static void expireStaleCanValues()
+{
+  const uint32_t now = millis();
+  if (now - lastEngineRpmFrameMs > CAN_VALUE_TIMEOUT_MS) vehicleRPMCAN = 0;
+  if (now - lastEcuSpeedFrameMs > CAN_VALUE_TIMEOUT_MS) ecuSpeed = 0;
+  if (now - lastAbsSpeedFrameMs > CAN_VALUE_TIMEOUT_MS) absSpeed = 0;
+  if (now - lastCustomSpeedFrameMs > CAN_VALUE_TIMEOUT_MS) aftermarketSpeed = 0;
+  if (now - lastGearFrameMs > CAN_VALUE_TIMEOUT_MS) gear = 0;   // DSG speed reads 0 with no gear
+  if (now - lastLeverFrameMs > CAN_VALUE_TIMEOUT_MS) lever = 0; // and with no lever position
+}
+
+// A wiring or bitrate fault can drive the controller bus-off; without recovery every
+// CAN source (speed, RPM, UDS, TP2.0) stayed dead until a reboot (V5.06).
+static void recoverFromBusOff()
+{
+  static uint32_t lastCheckMs = 0;
+  if (millis() - lastCheckMs < 1000)
+    return;
+  lastCheckMs = millis();
+  twai_status_info_t status;
+  if (twai_get_status_info(&status) != ESP_OK)
+    return;
+  if (status.state == TWAI_STATE_BUS_OFF)
+  {
+    DEBUG_CAN("bus-off: starting recovery");
+    twai_initiate_recovery();
+  }
+  else if (status.state == TWAI_STATE_STOPPED)
+  {
+    DEBUG_CAN("recovered: restarting the controller");
+    twai_start();
+  }
+}
+
 void taskCANRx(void *parameter)
 {
   DEBUG_CAN("CAN receive task started");
@@ -67,9 +111,13 @@ void taskCANRx(void *parameter)
   {
     // Wait for message with timeout
     esp_err_t ret = twai_receive(&frame, pdMS_TO_TICKS(10));
+    expireStaleCanValues();
+    recoverFromBusOff();
 
     if (ret == ESP_OK)
     {
+      if (frame.data_length_code > 8)
+        frame.data_length_code = 8; // CAN FD style DLC 9-15: never read or forward past 8 bytes
       // Message received - process it
       processTWAIMessage(frame);
 
@@ -119,8 +167,10 @@ void taskCANRx(void *parameter)
     }
 #endif
 
-    // Give other tasks a chance to run
-    vTaskDelay(pdMS_TO_TICKS(1));
+    // No extra delay (V5.08): twai_receive() already blocks while the queue is
+    // empty. A 1 ms delay per frame capped the task at ~1000 frames/s, below a busy
+    // VAG bus (1500-2500/s): the queue filled, speeds lagged ~250 ms and UDS / TP2.0
+    // replies were dropped.
   }
 }
 
@@ -130,80 +180,53 @@ void taskCANRx(void *parameter)
  */
 void processTWAIMessage(const twai_message_t &frame)
 {
-#if enableDebug && debugCAN
-  DEBUG_CAN_("RX Len:%u ID:0x%X Data:", frame.data_length_code, frame.identifier);
-  for (uint8_t i = 0; i < frame.data_length_code; i++)
-  {
-    Serial.printf("%02X ", frame.data[i]);
-  }
-  Serial.println();
-#endif
-
   lastCAN = millis();
 
-  // Extract data from TWAI message
+  // Only standard 11-bit data frames carry the values below. An extended (29-bit)
+  // frame with a small ID, or a remote request (no data), must not match them.
+  if (frame.extd || frame.rtr)
+    return;
+
+  // Extract data from TWAI message. Every case checks the frame is long enough for
+  // the bytes it reads: the frame buffer is reused, so a short frame would otherwise
+  // pick up the previous frame's bytes (V5.06).
   uint32_t id = frame.identifier;
   uint8_t len = frame.data_length_code;
   uint8_t *buf = (uint8_t *)frame.data;
+  const uint32_t now = millis();
 
   switch (id)
   {
   case MOTOR1_ID:
+    if (len < 4) break;
     vehicleRPMCAN = ((buf[3] << 8) | buf[2]) * 0.25;
+    lastEngineRpmFrameMs = now;
     break;
 
   case MOTOR2_ID:
-    ecuSpeed = (buf[3] * 100 * 128) / 10000;
-    break;
-
-  case MOTOR5_ID:
-    vehicleEML = bitRead(buf[1], 5);
-    vehicleEPC = bitRead(buf[1], 6);
-    break;
-
-  case MOTOR6_ID:
-    if (buf[0] == 0x73 || buf[0] == 0x72)
-    {
-      // vehicleReverse = true;  // managed by mWaehlhebel_1_ID / gearLever_ID
-    }
-    else
-    {
-      // vehicleReverse = false; // managed by mWaehlhebel_1_ID / gearLever_ID
-    }
-    if (buf[0] == 0x83 || buf[0] == 0x82)
-    {
-      vehiclePark = true;
-    }
-    else
-    {
-      vehiclePark = false;
-    }
+    if (len < 4) break;
+    ecuSpeed = (uint16_t)((buf[3] * 128 + 50) / 100); // 1.28 km/h per bit, rounded
+    lastEcuSpeedFrameMs = now;
     break;
 
   case BRAKES3_ID:
   {
+    if (len < 2) break;
     const uint16_t br3_speed_raw = (((uint16_t)buf[1] << 8) | buf[0]) >> 1;
     absSpeed = (uint16_t)(br3_speed_raw * 0.01f + 0.5f);
+    lastAbsSpeedFrameMs = now;
   }
     break;
 
   case mWaehlhebel_1_ID:
+    if (len < 8) break;
     gear_raw = ((buf[7] & 0b01110000) >> 4) - 1;
     lever_raw = (buf[7] & 0b00000001);
+    lastGearFrameMs = now;
 
     if (lever_raw)
     {
       gear = gear_raw;
-
-      switch (gear)
-      {
-      case 3:
-        vehicleReverse = true;
-        break;
-      default:
-        vehicleReverse = false;
-        break;
-      }
 
       if (gear == 0xFF)
       {
@@ -213,17 +236,23 @@ void processTWAIMessage(const twai_message_t &frame)
     break;
 
   case gearLever_ID:
+    if (len < 1) break;
     lever = (buf[0] & 0b11110000) >> 4;
+    lastLeverFrameMs = now;
     break;
 
   case emeraldECU1_ID:
     // CAN RPM source only: the RPM task decides what reaches the output (Test RPM
     // first, then the selected source). Writing vehicleRPM here bypassed both.
+    if (len < 2) break;
     vehicleRPMCAN = ((buf[0] << 8) | buf[1]);
+    lastEngineRpmFrameMs = now;
     break;
 
   case emeraldECU2_ID:
+    if (len < 4) break;
     ecuSpeed = (uint16_t)(((buf[2] << 8) | buf[3]) * (2.25f / 256.0f) + 0.5f);
+    lastEcuSpeedFrameMs = now;
     break;
 
   default:
@@ -234,6 +263,8 @@ void processTWAIMessage(const twai_message_t &frame)
   if (useAftermarket && id == (aftermarketSpeedID & 0x7FF)) {
     uint8_t lowIdx  = constrain(aftermarketSpeedLowByte,  0, 7);
     uint8_t highIdx = constrain(aftermarketSpeedHighByte, 0, 7);
+    if (len <= max(lowIdx, highIdx))
+      return; // too short for the configured bytes
     uint16_t rawValue;
     if (aftermarketSpeedLittleEndian) {
       rawValue = (uint16_t)buf[lowIdx] | ((uint16_t)buf[highIdx] << 8);
@@ -242,6 +273,7 @@ void processTWAIMessage(const twai_message_t &frame)
     }
     float scaled = (rawValue * aftermarketSpeedScale) + aftermarketSpeedOffset;
     aftermarketSpeed = (uint16_t)constrain((int32_t)(scaled + 0.5f), 0, 65535);
+    lastCustomSpeedFrameMs = now;
   }
 }
 
@@ -265,7 +297,10 @@ void sendBroadcastSpeedFrame()
     speedFrame.data[i] = broadcastSpeedData[i];
   }
 
-  int32_t scaledSpeed = static_cast<int32_t>((vehicleSpeed * broadcastSpeedScale) + broadcastSpeedOffset);
+  // The car's real speed, not the Speed Test value (V5.09): a Haldex listening on
+  // the bus must never see a test speed, or a speed frozen by Calibration Mode.
+  const uint16_t realSpeed = (uint16_t)lroundf(inputSpeedKph);
+  int32_t scaledSpeed = static_cast<int32_t>((realSpeed * broadcastSpeedScale) + broadcastSpeedOffset);
   scaledSpeed = constrain(scaledSpeed, 0, 65535);
   broadcastSpeedValue = static_cast<uint16_t>(scaledSpeed);
 
@@ -290,7 +325,7 @@ void sendBroadcastSpeedFrame()
   for (uint8_t i = 0; i < speedFrame.data_length_code; i++) {
     Serial.printf(" %02X", speedFrame.data[i]);
   }
-  Serial.printf("  Value:%u (vehicleSpeed:%u)\n", broadcastSpeedValue, vehicleSpeed);
+  Serial.printf("  Value:%u (speed:%u)\n", broadcastSpeedValue, realSpeed);
 #endif
 
   if (twai_transmit(&speedFrame, pdMS_TO_TICKS(10)) != ESP_OK)

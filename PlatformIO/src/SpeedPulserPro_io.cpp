@@ -3,6 +3,7 @@
 #include "SpeedPulserPro_gps.h"
 #include "SpeedPulserPro_voltage.h"
 #include "SpeedPulserPro_driveCal.h"
+#include "SpeedPulserPro_calBuilder.h"
 
 // Drive the direction pin from the reverseDirection flag.
 // Default (unticked) drives LOW = the correct direction; ticking Reverse drives HIGH.
@@ -82,10 +83,9 @@ void basicInit()
   ledc_channel.channel = LEDC_OUTPUT_CHANNEL;
   ledc_channel.intr_type = LEDC_INTR_DISABLE;
   ledc_channel.timer_sel = LEDC_TIMER;
-  ledc_channel.duty = (uint32_t)dutyCycle;
+  ledc_channel.duty = 0;
   ledc_channel.hpoint = 0;
   ledc_channel_config(&ledc_channel);
-  ledc_fade_func_install(0); // install LEDC hardware fade ISR (required once before any fade calls)
 
   DEBUG_IO("Set up PWM (LEDC)!");
 
@@ -112,10 +112,12 @@ void basicInit()
   // floats and picks up noise, faking a tacho signal that latches feedbackAvailable
   // and lets the PID wind up and peg the motor to full scale. The pull-up holds a
   // disconnected pin steady so feedback stays correctly "missing" (open-loop, UI N/A).
+#if SPP_HAS_VOLTAGE_CTRL // the DevKit has no tacho wired (V5.09: it attached the interrupt anyway)
   DEBUG_IO("Setting up Feedback Interrupt (GPIO%d)...", pinMotorFeedback);
   pinMode(pinMotorFeedback, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(pinMotorFeedback), feedbackPulse, FALLING);
   DEBUG_IO("Set up Feedback Interrupt!");
+#endif
 
   DEBUG_IO("Setting up Motor Direction (GPIO%d)...", pinMotorDirection);
   pinMode(pinMotorDirection, OUTPUT);
@@ -148,131 +150,185 @@ void setMotorDuty(uint32_t duty)
 
 // Write a duty straight to the 12-bit PWM hardware (0..PWM_DUTY_MAX). Used by
 // the interpolated speed path and the needle sweep for sub-count precision.
-// appliedDutyCycle is kept in the full 12-bit domain so the live cal-curve marker
+// motorDutyApplied is kept in the full 12-bit domain so the live cal-curve marker
 // and the calibration builder share one duty scale (mirrors SpeedPulser).
 void setMotorDutyRaw(uint32_t pwmDuty)
 {
-  appliedDutyCycle = (uint16_t)pwmDuty;
+  motorDutyApplied = (uint16_t)pwmDuty;
   ledc_set_duty(LEDC_MODE, LEDC_OUTPUT_CHANNEL, pwmDuty);
   ledc_update_duty(LEDC_MODE, LEDC_OUTPUT_CHANNEL);
 }
 
-void testSpeed()
-{
-  if (testCal)
-  {
-    setMotorDutyRaw(tempDutyCycle);
-#if serialDebug
-    DEBUG_PRINTF("[IO] Test Duty: %d", tempDutyCycle);
-#endif
-  }
+// ===== Needle sweep =====
+// Mirrors SpeedPulser V5.07. The speed needle follows the motor's SPEED, and
+// speed isn't a straight line against drive or duty: nothing until the motor
+// breaks away, then a steep low end, then a flatter top. Ramping the drive evenly
+// made the needle leap off the stop, slow in the middle and rush at the end. So
+// the sweep ramps the dial SPEED evenly and looks up the output for it through the
+// calibration on every tick: the calibration is the measured inverse of that
+// bent curve, so an even speed ramp gives an even needle.
+//
+// One climb: from the lowest calibrated speed at a steady pace, then the last
+// SWEEP_EASE of the time slowing to a stop, so the weighted needle isn't flung at
+// the top. It starts at full pace: the motor's own lag (~0.35 s) already eases the
+// needle off the stop. At the top it waits for the motor to get there (S3 tacho)
+// or a fixed hold. The way down is the climb played backwards; at the lowest
+// speed the motor is cut and coasts the needle home.
+//
+// Range: only where the calibration has proven the needle goes, the lowest to the
+// highest calibrated speed (S3: the drive marks; DevKit: the selected preset or
+// the custom table). No calibration = no speed sweep (the tach still sweeps).
+//
+// The tach needle is an air-core coil driven by frequency, which IS a straight
+// line, so it simply follows the same profile from 0 to Max RPM.
+//
+// Pace: the speed needle runs at Sweep pace (ms per dial km/h or mph) x
+// SWEEP_RATE_REF / Speed needle rate. The tach takes as long as the speed needle
+// would over Max Speed, x SWEEP_RATE_REF / Tach needle rate. All read live, so
+// moving a slider retimes a sweep in progress.
 
-  if (!testCal && tempSpeed > 0)
+// Position 0..1 along the climb at time 0..1: a steady rate, then a cosine
+// slow-down to rest. The steady rate is set so the climb still ends at 1.
+static const float SWEEP_STEADY_RATE = 1.0f / (1.0f - SWEEP_EASE / 2.0f);
+static float sweepProfile(float t)
+{
+  const float easeFrom = 1.0f - SWEEP_EASE;
+  if (t <= easeFrom)
+    return SWEEP_STEADY_RATE * t;
+  const float u = (t - easeFrom) / SWEEP_EASE; // 0..1 through the slow-down
+  return SWEEP_STEADY_RATE * (easeFrom + SWEEP_EASE * (u / 2.0f + sinf(PI * u) / (2.0f * PI)));
+}
+
+// The calibrated dial range. false = no calibration to sweep through.
+static bool sweepRange(uint16_t &lowSpeed, uint16_t &topSpeed)
+{
+#if SPP_HAS_VOLTAGE_CTRL
+  if (driveCalCount == 0)
+    return false;
+  lowSpeed = driveCal[0].speed;
+  topSpeed = driveCalTopSpeed();
+#else
+  topSpeed = 0;
+  if (presetId == CUSTOM_CAL_ID && customCalValid)
+    topSpeed = customCalPoints[customCalCount - 1].speed;
+  else
+    for (uint16_t s : presetSpeedTable)
+      if (s > topSpeed)
+        topSpeed = s;
+  lowSpeed = 1; // the first speed the table gives any duty for
+  while (lowSpeed < topSpeed && speedToPwmDuty(lowSpeed) == 0)
+    lowSpeed++;
+#endif
+  if (lowSpeed >= topSpeed)
+    lowSpeed = 0; // a single drive mark: its line runs through zero
+  return topSpeed > 0;
+}
+
+// Drive the speed motor for a (fractional) dial speed through the calibration.
+static void sweepSpeedOutput(float speed)
+{
+#if SPP_HAS_VOLTAGE_CTRL
+  applyMotorDrive(driveForSpeed(speed));
+#else
+  // Preset tables work in whole speeds: blend the duty of the two either side.
+  const uint16_t whole = (uint16_t)speed;
+  const float dutyLow = (float)speedToPwmDuty(whole);
+  const float dutyHigh = (float)speedToPwmDuty(whole + 1);
+  setMotorDutyRaw((uint32_t)lroundf(dutyLow + (speed - (float)whole) * (dutyHigh - dutyLow)));
+#endif
+}
+
+static void sweepRpmOutput(float hz)
+{
+  frequencyRPM = lroundf(hz);
+  setFrequencyRPM(hz);
+}
+
+// The sweep runs with the tasks suspended, so on the S3 it keeps the 100 ms
+// measurements going itself: the rail over-voltage check and the tacho.
+static void sweepWait(uint32_t ms)
+{
+  vTaskDelay(pdMS_TO_TICKS(ms));
+#if SPP_HAS_VOLTAGE_CTRL
+  static uint32_t sinceMeasure = 0;
+  sinceMeasure += ms;
+  if (sinceMeasure >= 100)
   {
-#if serialDebug
-    DEBUG_PRINTF("[IO] Chosen Speed: %d", tempSpeed);
-#endif
-    uint16_t spd = applyConfiguredSpeedOffset((uint16_t)tempSpeed);
-    spd = spd * speedMultiplier;
-    if (convertToMPH)
-    {
-      spd = spd * mphFactor;
-    }
-    dutyCycle = findClosestMatch(spd);   // cal-domain duty (display)
-    setMotorDutyRaw(speedToPwmDuty(spd)); // 12-bit hardware duty applied
-#if serialDebug
-    DEBUG_PRINTF("[IO]   Final Duty: %ld", dutyCycle);
-    DEBUG_PRINTLN("");
-#endif
+    sinceMeasure = 0;
+    updateMotorRail();
+    updateMeasuredFreq();
   }
+#endif
+}
+
+// One leg for both needles, up (climb) or down (the climb backwards).
+static void sweepLeg(bool up, bool sweepSpeed, uint16_t lowSpeed, uint16_t topSpeed)
+{
+  const float travel = (float)(topSpeed - lowSpeed);
+  float tSpeed = sweepSpeed ? 0.0f : 1.0f; // no calibration: the speed needle stays put
+  float tRpm = 0.0f;
+  while (tSpeed < 1.0f || tRpm < 1.0f)
+  {
+    const float pace = needleSweepSpeed < 1 ? 1.0f : (float)needleSweepSpeed;
+    const float speedRate = stepSpeed < 1.0f ? 1.0f : stepSpeed;
+    const float rpmRate = stepRPM < 1.0f ? 1.0f : stepRPM;
+    const float dialSpan = maxSpeed < 10 ? 200.0f : (float)maxSpeed;
+    const float speedLegMs = SWEEP_STEADY_RATE * travel * pace * (SWEEP_RATE_REF / speedRate);
+    const float rpmLegMs = SWEEP_STEADY_RATE * dialSpan * pace * (SWEEP_RATE_REF / rpmRate);
+    if (tSpeed < 1.0f)
+    {
+      tSpeed += (float)SWEEP_TICK_MS / speedLegMs;
+      if (tSpeed > 1.0f)
+        tSpeed = 1.0f;
+      sweepSpeedOutput((float)lowSpeed + travel * sweepProfile(up ? tSpeed : 1.0f - tSpeed));
+    }
+    if (tRpm < 1.0f)
+    {
+      tRpm += (float)SWEEP_TICK_MS / rpmLegMs;
+      if (tRpm > 1.0f)
+        tRpm = 1.0f;
+      sweepRpmOutput((float)maxRPM * sweepProfile(up ? tRpm : 1.0f - tRpm));
+    }
+    sweepWait(SWEEP_TICK_MS);
+  }
+}
+
+// At the top: wait until the speed needle is really there before turning round.
+// S3 with a tacho: until the motor reaches the top mark's speed; else a fixed hold.
+static void sweepHoldAtTop(uint16_t topSpeed)
+{
+#if SPP_HAS_VOLTAGE_CTRL
+  const bool tacho = feedbackAvailable && driveCalHzValid();
+  const float arrivedHz = tacho ? SWEEP_TOP_ARRIVED * hzForSpeed((float)topSpeed) : 0.0f;
+#else
+  const bool tacho = false;
+  const float arrivedHz = 0.0f;
+  (void)topSpeed;
+#endif
+  uint32_t waited = 0;
+  while (waited < (tacho ? SWEEP_TOP_WAIT_MAX_MS : SWEEP_TOP_HOLD_MS))
+  {
+    sweepWait(SWEEP_TICK_MS);
+    waited += SWEEP_TICK_MS;
+    if (tacho && measuredFreqRawHz >= arrivedHz)
+      break;
+  }
+  vTaskDelay(pdMS_TO_TICKS(SWEEP_TOP_DWELL_MS));
 }
 
 void needleSweep()
 {
-  // Startup needle exercise for a KNOWN two-dial system. Both dials share the same
-  // physical endpoints: a common REST (0) and a common FULL-SCALE marking. We drive
-  // each needle across its OWN dial using its calibration so it lands exactly on the
-  // top-of-scale marking instead of slamming past it into the mechanical stop:
-  //   Speed dial: 0 .. maxSpeed km/h  -> duty via speedToPwmDuty() (the cal curve)
-  //   RPM  dial : 0 .. maxRPM Hz       -> full-scale tach deflection (linear)
-  // The two needles are DIFFERENT actuators (BLDC motor vs air-core tach coil) and
-  // do not track at the same rate, so each has its OWN traversal rate (stepSpeed /
-  // stepRPM) between the shared endpoints. Durations are recomputed per tick from
-  // the LIVE sliders, so dragging sweepSpeed / stepSpeed / stepRPM retimes an
-  // in-progress sweep smoothly.
-  const uint32_t kPollMs     = 10;                            // software-fade cadence
-  const long     kSpan       = (maxSpeed < 10) ? 200 : maxSpeed; // sets sweep DURATION only
-  const uint16_t kMaxSpeed   = (maxSpeed < 10) ? 10 : maxSpeed;  // speed-dial full scale (km/h)
-  const long     kMaxRpmFreq = (long)maxRPM;                  // RPM-dial full scale (Hz)
-  const float    kStepRef    = 17.0f;                         // reference step: keeps default speed timing unchanged
+  uint16_t lowSpeed = 0, topSpeed = 0;
+  const bool sweepSpeed = sweepRange(lowSpeed, topSpeed);
+  DEBUG_IO("needle sweep: speed %s %u..%u, tach 0..%u Hz", sweepSpeed ? "" : "(no calibration)",
+           lowSpeed, topSpeed, (unsigned)maxRPM);
+  sweepLeg(true, sweepSpeed, lowSpeed, topSpeed);
+  sweepHoldAtTop(topSpeed);
+  sweepLeg(false, sweepSpeed, lowSpeed, topSpeed);
 
-#if SPP_HAS_VOLTAGE_CTRL
-  // S3 board with Voltage Control on: the speed needle sweeps by DRIVE (rail + PWM)
-  // up to the calibrated Max Speed, so it reaches the top of the dial whatever
-  // rail boot left (the legacy duty presets only apply on the fixed 9 V rail).
-  const bool  sweepByDrive  = voltageControlEnable;
-  const float kMaxSweepDrive = sweepByDrive ? driveForSpeed(kMaxSpeed) : 0.0f;
-#endif
-
-  // Move each needle position from its normalised progress (0..1) along its dial.
-  auto driveNeedles = [&](float speedP, float rpmP)
-  {
-#if SPP_HAS_VOLTAGE_CTRL
-    if (sweepByDrive)
-      applyMotorDrive(speedP * kMaxSweepDrive);
-    else
-#endif
-    setMotorDutyRaw(speedToPwmDuty((uint16_t)((float)kMaxSpeed * speedP)));
-    frequencyRPM = (long)((float)kMaxRpmFreq * rpmP);
-    setFrequencyRPM(frequencyRPM);
-  };
-
-  // Ramp UP: both needles from REST (0) to their FULL-SCALE marking (1).
-  float speedP = 0.0f, rpmP = 0.0f;
-  while (speedP < 1.0f || rpmP < 1.0f)
-  {
-    float sSpeed = (stepSpeed < 1.0f) ? 1.0f : stepSpeed;
-    float sRpm   = (stepRPM   < 1.0f) ? 1.0f : stepRPM;
-    uint32_t speedFullMs = (uint32_t)((float)sweepSpeed * (float)kSpan * (kStepRef / sSpeed));
-    uint32_t rpmFullMs   = (uint32_t)((float)sweepSpeed * (float)kSpan * (kStepRef / sRpm));
-    if (speedFullMs < 1) speedFullMs = 1;
-    if (rpmFullMs   < 1) rpmFullMs   = 1;
-    speedP += (float)kPollMs / (float)speedFullMs; if (speedP > 1.0f) speedP = 1.0f;
-    rpmP   += (float)kPollMs / (float)rpmFullMs;   if (rpmP   > 1.0f) rpmP   = 1.0f;
-    driveNeedles(speedP, rpmP);
-    vTaskDelay(pdMS_TO_TICKS(kPollMs));
-  }
-  driveNeedles(1.0f, 1.0f); // pin both needles on their full-scale markings
-
-  // Pause at full scale
-  vTaskDelay(pdMS_TO_TICKS((uint32_t)sweepSpeed * 2));
-
-  // Ramp DOWN — mirror of the ramp-up, back to the shared REST point.
-  speedP = 0.0f; rpmP = 0.0f;
-  while (speedP < 1.0f || rpmP < 1.0f)
-  {
-    float sSpeed = (stepSpeed < 1.0f) ? 1.0f : stepSpeed;
-    float sRpm   = (stepRPM   < 1.0f) ? 1.0f : stepRPM;
-    uint32_t speedFullMs = (uint32_t)((float)sweepSpeed * (float)kSpan * (kStepRef / sSpeed));
-    uint32_t rpmFullMs   = (uint32_t)((float)sweepSpeed * (float)kSpan * (kStepRef / sRpm));
-    if (speedFullMs < 1) speedFullMs = 1;
-    if (rpmFullMs   < 1) rpmFullMs   = 1;
-    speedP += (float)kPollMs / (float)speedFullMs; if (speedP > 1.0f) speedP = 1.0f;
-    rpmP   += (float)kPollMs / (float)rpmFullMs;   if (rpmP   > 1.0f) rpmP   = 1.0f;
-    driveNeedles(1.0f - speedP, 1.0f - rpmP);
-    vTaskDelay(pdMS_TO_TICKS(kPollMs));
-  }
-
-  // Settle, then hard-zero both outputs
-  vTaskDelay(pdMS_TO_TICKS((uint32_t)sweepSpeed * 2));
-  dutyCycle = 0;
-  appliedDutyCycle = 0;
-#if SPP_HAS_VOLTAGE_CTRL
-  if (sweepByDrive)
-    applyMotorDrive(0.0f); // speed output fully off, rail back to minimum
-  else
-#endif
-  setMotorDuty(0);    // speed output fully off
-  frequencyRPM = 0;
-  setFrequencyRPM(0); // RPM output fully off
+  // Both outputs fully off: the motor coasts the speed needle home.
+  needleTargetSpeed = 0;
+  motorDutyApplied = 0;
+  sweepSpeedOutput(0.0f);
+  sweepRpmOutput(0.0f);
 }

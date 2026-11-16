@@ -15,15 +15,18 @@ double dq250_speed(uint16_t rpm_in, uint8_t gear) {
   double rpm = (double)rpm_in * 1.0;
   double speed_mps = (rpm * tireCircumference) / (dq250_gear_ratio(gear) * dq250_final(gear) * 60);
   double vehicleSpeedTemp = speed_mps * 3.6;
-  return vehicleSpeedTemp > 10 ? vehicleSpeedTemp : 1;
+  return vehicleSpeedTemp > 10 ? vehicleSpeedTemp : 0; // V5.06: was 1, so stopped in D the needle sat at 1+offset
 }
 
 void parseDSG() {
   static uint8_t lastGear = 0;
-  static uint32_t gearSettleUntil = 0;
+  static uint32_t gearChangedMs = 0; // elapsed time (V5.09): "millis() >= until" broke at the 49.7-day wrap
   static double dsgSpeedFiltered = 0;
 
-  if (vehicleRPM != 0 && gear != 0) {
+  // Engine RPM from the input itself (CAN or hall), never the tach output value:
+  // with Test RPM on that is the test value (V5.06).
+  const uint16_t engineRpm = useRPMCAN ? vehicleRPMCAN : vehicleRPMHall;
+  if (engineRpm != 0 && gear != 0) {
     switch (lever) {
       case LEVER_D:
       case LEVER_S:
@@ -36,10 +39,10 @@ void parseDSG() {
         // calculated speed. Hold the last value briefly, then low-pass it.
         if (gear != lastGear) {
           lastGear = gear;
-          gearSettleUntil = millis() + dsgGearSettleMs;
+          gearChangedMs = millis();
         }
-        if (millis() >= gearSettleUntil) {
-          double raw = dq250_speed(vehicleRPM, gear);
+        if (millis() - gearChangedMs >= dsgGearSettleMs) {
+          double raw = dq250_speed(engineRpm, gear);
           dsgSpeedFiltered += (raw - dsgSpeedFiltered) * dsgSpeedSmoothing;
           dsgSpeed = (uint16_t)(dsgSpeedFiltered + 0.5);
         }
@@ -52,8 +55,8 @@ void parseDSG() {
         dsgSpeedFiltered = 0;
         break;
     }
-  } else if (gear == 0) {
-    dsgSpeed = 0;  // no gear engaged - don't hold a stale value
+  } else {
+    dsgSpeed = 0;  // engine stopped / no gear engaged - don't hold a stale value
     dsgSpeedFiltered = 0;
   }
 }

@@ -192,6 +192,186 @@ V5.04 - MQB DSG theoretical speed over UDS corrected (ported from the Can2Cluste
       - The MQB DID number and raw/10 want one on-car check: the DID table sits in a flash
         region the FRF didn't contain. See Can2Cluster Documents/dsg_re/.
       - own build folder (speedpulserpro-v504-pio) so the V5.03 build stays intact.
+
+V5.05 - motor side brought level with SpeedPulser V5.05 (both boards now share the same motor /
+        injection hardware and the same logic; DevKit = the legacy fixed-voltage, adjustable-
+        duty method, unchanged apart from the tacho reading).
+      - tacho measured from pulse TIMING (every board): the ISR keeps the last 32 edge times and
+        the reading averages whole revolutions (5 pulses per turn) over >= 200 ms. Up to V5.04
+        pulses were summed per 100 ms window and two were needed, so below ~20 Hz windows read
+        0 while the motor was still turning (20 -> 0 -> 20). Holds down to the motor's floor
+        (~6 Hz); reads down once a pulse is overdue; 0 after 0.6 s; edges < 1 ms apart dropped.
+      - S3: Minimum Rail is a setting (Advanced > Motor Voltage Control), default 4.8 V: the
+        TY3816B's driver needs ~4.75 V+ (SpeedPulser bench 2026-11-15: from 3.1 to 4.6 V low
+        speeds jump, stall and won't restart; at 4.8 V the PWM alone runs it from ~2 % / 8 Hz).
+        A unit updated with a calibration keeps 3.0 V until the marks are recaptured. Cal files
+        carry railMinV; older files import as 3.0 V. Motor off idles the rail at the 3.0 V floor.
+      - S3: feedback trim compares the tacho with a reference model (the target followed with
+        the motor's own lag, 63 % in ~0.35 s) and only integrates once the model has reached
+        the target (no more 5-31 Hz overshoot on speed changes); trimmed drive capped at the
+        top mark's drive + 5 %.
+      - S3 defaults (new units / Reset PID Defaults): Feedback Enable ON, Trim Gain 2.0, Trim
+        Limit +/-40 %, Deadband 0.3 Hz, Min Feedback Speed 8. DevKit keeps the PID defaults.
+      - S3 Drive Calibration Auto Fill (SpeedPulserPro_autoFill.cpp, same code as SpeedPulser):
+        capture the top mark by eye (optionally a low one), Auto Fill keeps every eye mark's
+        speed + Hz, adds auto marks at 10/20/30/40 then every 10 to the top on the line through
+        the eye marks (below the lowest eye mark: the lowest-to-top line; none below 9 Hz; low
+        auto marks the motor can't hold are left out), and finds each mark's drive with the
+        tacho. Never faster than the top mark (raw tacho > topHz x 1.06 + 1 Hz stops it), drive
+        <= 1.25 x the top mark's and the Max Rail limit, steps up <= 25 %. Fails safe: motor
+        off, table untouched.
+      - marks carry their source (eye / auto) in what was struct padding (NVS "dcSrcV" marks the
+        new layout; older tables read as all eye); cal files carry "src". An eye capture drops
+        the auto marks at that speed or out of order with it, and makes room by dropping the
+        nearest auto mark when full. Up to 20 marks (was 10). One backup table in NVS ("dcBak"),
+        saved just before Auto Fill replaces the table; Restore Previous swaps the two.
+      - S3 calibration drive bar is display-only (the -/+ buttons change it) and one tempDriveV
+        request may raise the drive by at most 0.5 V (SpeedPulser V5.03).
+      - API: actions calAutoFill / calAutoFillStop / calRestore; status "autoFill" {state, index,
+        total, speed, hz, msg} and "calBackup"; setting vcRailMinV.
+      - speed task stack 3 KB -> 6 KB (Auto Fill writes the backup table from it).
+      - own build folder (speedpulserpro-v505-pio) so the V5.04 build stays intact.
+
+V5.06 - audit pass (2026-11-16), mirroring SpeedPulser V5.06.
+      Safety:
+      - an uncalibrated S3 no longer drives the motor outside Calibration Mode (the old guess
+        ran a straight line up to Max Rail x Nominal PWM at Max Speed and pegged a new speedo).
+      - needle sweep: refused unless the car is stopped and no test is running; Sweep Speed is
+        at least 1; the S3 sweeps the speed needle to the top calibration mark (no marks = no
+        sweep). The DevKit still sweeps to full PWM (to be reviewed with SpeedPulser).
+      - every /api/control value is range-checked: Max RPM (tach Hz) 10-1000 (60000 from a
+        hand-made request stalled the chip), Cluster RPM Limit 1000-12000, Test RPM 0-12000,
+        ramp rates, offsets, rails, trims. The reply is the full settings, so the page shows
+        the values kept.
+      - Speed Test and Calibration Mode exclude each other; drive marks and the Calibration
+        Builder only change in Calibration Mode; the direction only with the motor stopped.
+      - Calibration Builder refuses a point whose duty doesn't rise with speed and
+        interpolates in signed maths; imports are checked as a whole first. The S3 refuses
+        the raw-duty ops (jog / setDuty / addPoint). The DevKit jog keeps its 0 <-> 4095 wrap.
+      - calibration tables saved table first, count second, count taken from the table size.
+      - web POSTs must be application/json and are collected across TCP chunks. OTA only with
+        the car stopped and no test running; the motor and tach stop when an upload starts; a
+        firmware upload whose phone disconnects is aborted; a web UI upload cut off by power
+        loss is caught at the next boot (recovery page).
+      - test modes are never saved, and settings ARE saved while a test runs.
+      Speed input (SpeedPulserPro_control.cpp):
+      - hall and VR are each set by pulses per km (VW / Audi 3600 = 1 Hz per km/h). Old units
+        carry their Max Hall / VR Frequency : Max Speed ratio over. Max Speed is only the needle
+        limit now.
+      - hall and VR are timed pulse by pulse (64-pulse rings) and averaged over the Smoothing
+        time (default 200 ms); glitch filter = half a period at Max Speed (200 us - 3 ms); a
+        stopped input falls smoothly, 0 after 1.5 s. Replaces the block median for speed.
+      - one signed offset (-50..+50 km/h; old offset + Positive tick carried over); the offset
+        curve is interpolated between 25/75/125/175/225 km/h; mph rounded once.
+      Sources:
+      - ECU / ABS / Custom CAN speeds read 0 after 500 ms without their frame; CAN bus-off is
+        recovered; DLC clamped to 8, extended / RTR frames skipped, per-frame length checks.
+      - GPS speed is 0 with no fix or no module (it used to hold the last speed); UDS and TP2.0
+        speed 0 after 1 s with no good reply, then reconnect.
+      - DSG speed uses the RPM from the selected RPM input, reads 0 below 10 km/h.
+      Removed: the DevKit PID (no feedback wired on the DevKit) and its settings, the S3
+      "Voltage Control off" setting (never meant for the S3), /api/testSpeed and /api/testRPM
+      (the page uses /api/control), the unused SoftwareSerial library.
+      Web UI rebuilt in the SpeedPulser V5.06 layout: Dashboard / Setup (1 Board, 2 Cluster &
+      Speed Source, 3 Tach, 4 Calibrate, 5 Speed / RPM Test, 6 Offset, 7 Needle Sweep) /
+      Advanced / Diagnostics / Update; only the selected source's settings and this board's
+      hardware are shown.
+      - enableDebug defaults to 0 (release builds are silent).
+
+V5.07 - even needle sweep (2026-11-16), mirroring SpeedPulser V5.07.
+      - the speed needle sweep ramps the dial SPEED evenly and looks up the drive / duty for it
+        through the calibration every 10 ms. It used to ramp the drive (S3) evenly; the motor's
+        speed isn't a straight line against it, so the needle leapt off the stop, slowed in the
+        middle and rushed at the end.
+      - it runs from the lowest to the highest calibrated speed, slows to a stop over the last 20 %
+        of the climb, then waits at the top: S3 with a tacho until the motor is within 3 % of the
+        top mark (at most 1.5 s), otherwise 0.4 s. The way down is the climb backwards; at the
+        lowest speed the motor is cut and coasts home.
+      - DevKit: sweeps the preset / custom table's calibrated range (was 0..Max Speed).
+      - the tach needle follows the same eased profile, 0..Max RPM, at its own rate.
+      - no calibration: the speed needle stays still, the tach still sweeps.
+      - S3: the rail over-voltage check and the tacho keep running during the sweep.
+      - driveForSpeed() takes a fractional speed; sweep constants in SpeedPulserPro_config.h.
+      - removed an empty "#define PI" in the DSG block that blanked Arduino's PI.
+
+V5.08 - second audit pass (2026-11-16), mirroring SpeedPulser V5.08.
+      Calibration:
+      - DevKit: Calibration Builder edits and Export no longer overwrite the running preset table
+        (the needle could go dead, or run the custom curve, until a reboot). A selected custom cal
+        with < 2 points falls back to preset 1.
+      - DevKit: Save & Use (was Generate & Apply + Save to Device) always saves the points and the
+        dial unit; picking Custom saves them too; the dial is no longer forced to mph after every
+        Builder op, and mph can't be switched away from a selected custom cal's unit. Builder point
+        changes need Calibration Mode. A preset change is swapped in by the label task, not mid-
+        request.
+      - S3: Auto Fill clears the auto marks at the start and adds each mark as it is measured; a
+        stopped or failed run puts the old table back; Stop is handled in the speed task; it
+        refuses to start with the car moving. A mark's eye / auto pill can be tapped to switch it.
+      - S3: Minimum Rail / Nominal PWM / Maximum Rail change in Calibration Mode only. Maximum Rail
+        default 8 V for a new unit (was 12 V); up to 12 V allowed.
+      Safety:
+      - Speed Test, RPM Test and Calibration Mode end when WiFi goes to sleep.
+      - S3 feedback: a tacho silent for 1.5 s drops the trim (open loop) and the page says so;
+        readings far from the model are never integrated.
+      - S3 rail over-voltage trip: 2 V over the command for 0.5 s (command steady 3 s) turns the
+        motor and buck off until a restart.
+      - OTA / Home WiFi POSTs from another site's page are refused (Origin check); a web UI upload
+        is checked once at the start (a GPS speed blip mid-upload wiped the UI).
+      - the home WiFi retry no longer switches the radio back on in low-power mode.
+      Sources:
+      - GPS speed below 3 km/h reads 0 (a parked module wanders 1-2 km/h).
+      - the GPS rate is only sent when it isn't 1 Hz, and the other tasks keep running while it is
+        (the suspend froze both needles ~2 s about 20 s after every satellite lock).
+      - CAN receive: no 1 ms delay per frame (capped at ~1000 frames/s; a busy bus overflowed).
+      - settings task stack 4096 bytes (was 2048; the comment said words, it is bytes).
+      Web UI: same as SpeedPulser V5.08 (orange test banner with Stop, offline badge, emptied
+      boxes put back, slider scroll guard, Calibration Mode locks, centred tiles, Adv. / Diag. /
+      OTA tabs, mph next to Reverse, shorter help text, preset names as text); the sweep pace
+      slider retimes a running sweep.
+
+V5.09 - shared web UI + small audit fixes (2026-11-16), mirroring SpeedPulser V5.09.
+      Shared (both projects):
+      - one app.js for SpeedPulser and SpeedPulser Pro: the web API uses the same names in both
+        (Pro renamed e.g. testCal -> calibrationModeOn, tempSpeed -> speedTestKph, vcRailMaxV ->
+        railMaxV, convertToMPH -> clusterInMph; saved settings are untouched). /api/control replies
+        {"status":"ok","value":...} on both; an unknown setting or action is refused.
+      - tuning constants (Auto Fill, tacho, feedback trim, input glitch limits) moved out of the
+        .cpp files into one Tuning section of the main header.
+      - micros() wrap: a parked unit forgets old pulses (a twitch every 71.6 min); slow sensors get a
+        longer stop timeout (up to 5 s) instead of flickering to 0.
+      - imported and stored drive tables are range-checked (drive <= 12 V, Hz, rail, PWM, order);
+        tables save their count first, so a power cut can't leave 0 marks over a new table; the
+        settings save takes a consistent copy of the table (it could catch one mid-change).
+      - Test Board never steps past Maximum rail, and needs Maximum rail >= 6 V.
+      - the Calibration Builder is refused on a voltage board; a PWM file can't be imported there.
+      - a POST with no body is answered (it hung); mark speeds are checked before they wrap.
+      - the board-ID pull-up is turned off after reading (~72 uA); preset tables are const
+        (14 KB of RAM back); retired NVS keys removed once replaced; library versions pinned;
+        unused code and status values removed.
+      - page: "Motor speed" dial only on boards with a tacho; Test Board shows "No answer" if the
+        unit stops answering mid-test.
+      - feedback anti-windup: the trim stops growing when the drive hits its cap (1.05 x the top
+        mark, or Max Rail x 100 %); it used to wind up to the +40 % limit against the cap. The page
+        says when the trim sits at its limit (the calibration doesn't match the motor there).
+      - phone: a touch outside the box being typed in releases it (each slider move scrolled the
+        page back to the last box typed in); the Auto Fill prompt lists the eye marks it keeps.
+      Pro only:
+      - start-up log (Diagnostics), from SpeedPulser: why it started, brown-outs, short runs.
+      - the CAN speed broadcast sends the car's real speed (it sent the Speed Test value, or a
+        speed frozen by Calibration Mode); the dashboard Speed tile shows it too.
+      - DSG gear / lever time out like the other CAN values (a stale gear gave a wrong speed).
+      - TP2.0: a short reply frame no longer reads past the frame; DSG / UDS timers survive the
+        49.7-day millis() wrap.
+      - the hall, VR, RPM and tacho interrupts take their lock (the tasks run on the other core).
+      - Test Board waits for the speed task to stand back (a false "out of range" fail).
+      - CAN scale, DSG ratios, final drives and tyre circumference range-checked on save and load.
+      - board test results and drive-table changes are saved straight away (was within 5 s).
+      - loop() rests 10 ms (core 1 ran at 100 %); the LED stays off in reduced power; Serial goes
+        back to the debug baud after the Serial analyzer; no tacho interrupt / measurement on the
+        DevKit; step-rate limits match the page (1-50); Speed Test / Calibration Mode refused
+        during Test Board; unused CAN states, globals, defines and functions removed.
+      - page: the rev-counter labels say "Tacho" (card 3 Tacho (RPM), Tacho full scale, ...), not "Tach".
+      - page: the motor's FG signal is called "Motor feedback" (Diagnostics tile, feedback-lost warning), not "tacho".
 */
 
 #endif // VERSION_H

@@ -7,71 +7,49 @@
 #include "Arduino.h"
 #include "hal/gpio_ll.h"
 
-void normaliseSpeedOffsetCurve()
+// ===== Speed offset + units (V5.06, mirrors SpeedPulser V5.06) =====
+// Global: one fixed km/h added to every speed. Curve: an offset at 25 / 75 / 125 /
+// 175 / 225 km/h, straight lines between them, flat beyond the ends (so the needle
+// never jumps as the speed crosses from one band into the next; up to V5.05 it
+// stepped at 50 / 100 / 150 / 200).
+static const float CURVE_POINT_KPH[SPEED_OFFSET_CURVE_POINTS] = {25.0f, 75.0f, 125.0f, 175.0f, 225.0f};
+
+static float curveOffsetAt(float kph)
 {
-  for (uint8_t index = 0; index < SPEED_OFFSET_CURVE_POINTS; index++)
+  const int16_t *off = speedOffsetCurveOffsets;
+  if (kph <= CURVE_POINT_KPH[0])
+    return off[0];
+  for (uint8_t i = 1; i < SPEED_OFFSET_CURVE_POINTS; i++)
   {
-    speedOffsetCurveOffsets[index] = constrain(speedOffsetCurveOffsets[index], -20, 20);
+    if (kph <= CURVE_POINT_KPH[i])
+    {
+      const float t = (kph - CURVE_POINT_KPH[i - 1]) / (CURVE_POINT_KPH[i] - CURVE_POINT_KPH[i - 1]);
+      return off[i - 1] + t * (float)(off[i] - off[i - 1]);
+    }
   }
+  return off[SPEED_OFFSET_CURVE_POINTS - 1];
 }
 
-int16_t getCurveOffsetForSpeed(uint16_t speedKph)
+// km/h -> offset -> mph if the dial reads mph, rounded once at the end (V5.05 and
+// before truncated twice, so the needle read ~0.5 mph low on average).
+uint16_t toNeedleTarget(float speedKph)
 {
-  if (speedKph <= 50)
+  if (speedKph <= 0.0f)
   {
-    return speedOffsetCurveOffsets[0];
+    speedOffsetApplied = 0.0f;
+    return 0; // standing still: no offset, needle at rest
   }
-  if (speedKph <= 100)
-  {
-    return speedOffsetCurveOffsets[1];
-  }
-  if (speedKph <= 150)
-  {
-    return speedOffsetCurveOffsets[2];
-  }
-  if (speedKph <= 200)
-  {
-    return speedOffsetCurveOffsets[3];
-  }
-  return speedOffsetCurveOffsets[4];
-}
-
-uint16_t applyConfiguredSpeedOffset(uint16_t speedKph)
-{
-  normaliseSpeedOffsetCurve();
-
-  int32_t correctedSpeed = (int32_t)speedKph;
-  int16_t offsetToApply = 0;
-
-  if (useSpeedOffsetCurve)
-  {
-    offsetToApply = getCurveOffsetForSpeed(speedKph);
-  }
-  else if (useGlobalSpeedOffset)
-  {
-    offsetToApply = speedOffsetPositive ? (int16_t)speedOffset : -(int16_t)speedOffset;
-  }
-
-  currentSpeedOffset = offsetToApply;
-  correctedSpeed += offsetToApply;
-
-  if (correctedSpeed < 0)
-  {
-    correctedSpeed = 0;
-  }
-
-  if (correctedSpeed > 400)
-  {
-    correctedSpeed = 400;
-  }
-
-  return (uint16_t)correctedSpeed;
-}
-
-void resetHallMedianFilter()
-{
-  rawCount = 0;
-  samples.clear();
+  const float offset = useSpeedOffsetCurve ? curveOffsetAt(speedKph) : (float)globalSpeedOffsetKph;
+  speedOffsetApplied = offset;
+  float target = speedKph + offset;
+  if (target < 0.0f)
+    target = 0.0f;
+  if (clusterInMph)
+    target *= KPH_TO_MPH;
+  long rounded = lroundf(target);
+  if (rounded > 400)
+    rounded = 400;
+  return (uint16_t)rounded;
 }
 
 void resetRPMMedianFilter()
@@ -81,40 +59,160 @@ void resetRPMMedianFilter()
   samplesRPM.clear();
 }
 
+// ============================================================================
+// Speed sensor inputs: hall (and VR on the S3) — V5.06, mirrors SpeedPulser V5.06
+// ============================================================================
+// Each interrupt keeps the time of the last INPUT_EDGE_HISTORY pulses; the speed
+// task works the speed out from them: walk back from the newest pulse until the
+// pulses cover inputSmoothingMs (or the history runs out), frequency = intervals /
+// time. Between pulses the reading holds, but no longer than the car could still be
+// moving that fast (with no pulse for `age` it can't be faster than 1.5 / age), so a
+// stopping car reads down smoothly, and 0 after the input's timeout (V5.09, mirrors
+// SpeedPulser: INPUT_TIMEOUT_MS, longer for a slow sensor so it doesn't flicker to 0
+// between pulses). Once stopped the history is forgotten: micros() wraps every 71.6
+// minutes, and a parked car's last pulses would otherwise look new for a moment.
+//
+// The interrupts take inputMux too (V5.09): the tasks run on the other core, where
+// the task's critical section alone doesn't keep the interrupt out.
+//
+// Glitch filter: a pulse closer to the last one than half a period at Max Speed
+// can't be real (ignition noise) and is dropped, keeping the last good pulse. The
+// limit follows each input's own pulses-per-km setting.
+//
+// IRAM_ATTR: the interrupts must run while the flash cache is off (settings save).
+#define INPUT_EDGE_HISTORY 64 // power of 2
+struct PulseTimer
+{
+  volatile uint32_t edgeUs[INPUT_EDGE_HISTORY]; // micros() of the newest pulses
+  volatile uint32_t edgeCount;                  // pulses accepted since boot
+  volatile uint32_t glitchUs;                   // pulses closer than this are noise
+  uint32_t timeoutUs;                           // no pulse for this long = stopped
+};
+static PulseTimer hallTimer = {{0}, 0, 2500, INPUT_TIMEOUT_MS * 1000UL};
+#if SPP_HAS_VR
+static PulseTimer vrTimer = {{0}, 0, 2500, INPUT_TIMEOUT_MS * 1000UL};
+#endif
+static portMUX_TYPE inputMux = portMUX_INITIALIZER_UNLOCKED;
+
+static inline void IRAM_ATTR pulseTimerEdge(PulseTimer &timer, uint32_t now)
+{
+  portENTER_CRITICAL_ISR(&inputMux);
+  const uint32_t n = timer.edgeCount;
+  if (!n || (now - timer.edgeUs[(n - 1) & (INPUT_EDGE_HISTORY - 1)]) >= timer.glitchUs)
+  {
+    timer.edgeUs[n & (INPUT_EDGE_HISTORY - 1)] = now;
+    timer.edgeCount = n + 1;
+  } // else noise: keep the last good pulse
+  portEXIT_CRITICAL_ISR(&inputMux);
+}
+
+// Stopped after INPUT_TIMEOUT_SLOW_PERIODS pulse periods at INPUT_TIMEOUT_SLOW_KPH,
+// within INPUT_TIMEOUT_MS..INPUT_TIMEOUT_MAX_MS (a 100 pulses/km sensor gives one
+// pulse every 1.8 s at 20 km/h, which the fixed 1.5 s read as stopped).
+static uint32_t timeoutUsFor(float pulsesPerKm)
+{
+  const float slowPeriodMs = 3600000.0f / (INPUT_TIMEOUT_SLOW_KPH * pulsesPerKm);
+  const float timeoutMs = constrain(INPUT_TIMEOUT_SLOW_PERIODS * slowPeriodMs, (float)INPUT_TIMEOUT_MS,
+                                    (float)INPUT_TIMEOUT_MAX_MS);
+  return (uint32_t)(timeoutMs * 1000.0f);
+}
+
+static uint32_t glitchUsFor(float pulsesPerKm)
+{
+  const float fullScaleHz = (float)maxSpeed * pulsesPerKm / 3600.0f;
+  uint32_t us = fullScaleHz > 1.0f ? (uint32_t)(500000.0f / fullScaleHz) : 3000;
+  return constrain(us, (uint32_t)INPUT_GLITCH_MIN_US, (uint32_t)INPUT_GLITCH_MAX_US);
+}
+
+void updateInputGlitchFilters()
+{
+  hallTimer.glitchUs = glitchUsFor(hallPulsesPerKm);
+  hallTimer.timeoutUs = timeoutUsFor(hallPulsesPerKm);
+#if SPP_HAS_VR
+  vrTimer.glitchUs = glitchUsFor(vrPulsesPerKm);
+  vrTimer.timeoutUs = timeoutUsFor(vrPulsesPerKm);
+#endif
+}
+
+static float pulseTimerHz(PulseTimer &timer)
+{
+  uint32_t edges[INPUT_EDGE_HISTORY];
+  portENTER_CRITICAL(&inputMux);
+  const uint32_t n = timer.edgeCount;
+  for (uint8_t i = 0; i < INPUT_EDGE_HISTORY; i++)
+    edges[i] = timer.edgeUs[i];
+  portEXIT_CRITICAL(&inputMux);
+  if (n < 2)
+    return 0.0f;
+  const uint32_t timeoutUs = timer.timeoutUs;
+  const uint32_t newest = edges[(n - 1) & (INPUT_EDGE_HISTORY - 1)];
+  const uint32_t age = micros() - newest;
+  if (age >= timeoutUs)
+  {
+    portENTER_CRITICAL(&inputMux);
+    if (timer.edgeCount == n)
+      timer.edgeCount = 0; // stopped: forget the old pulses (see the micros() note above)
+    portEXIT_CRITICAL(&inputMux);
+    return 0.0f;
+  }
+  const uint32_t wantedSpanUs = (uint32_t)inputSmoothingMs * 1000UL;
+  const uint32_t maxIntervals = (n - 1 < INPUT_EDGE_HISTORY - 1) ? n - 1 : INPUT_EDGE_HISTORY - 1;
+  uint32_t intervals = 0, spanUs = 0;
+  for (uint32_t i = 1; i <= maxIntervals; i++)
+  {
+    const uint32_t span = newest - edges[(n - 1 - i) & (INPUT_EDGE_HISTORY - 1)];
+    if (span - spanUs > timeoutUs)
+      break; // the car was stopped before this pulse
+    intervals = i;
+    spanUs = span;
+    if (spanUs >= wantedSpanUs)
+      break;
+  }
+  if (intervals == 0 || spanUs == 0)
+    return 0.0f;
+  float hz = (float)intervals * 1000000.0f / (float)spanUs;
+  if (hz * (float)age > 1500000.0f)
+    hz = 1500000.0f / (float)age; // next pulse overdue: slowing down
+  return hz;
+}
+
+float measureHallFrequency() { return pulseTimerHz(hallTimer); }
+#if SPP_HAS_VR
+float measureVRFrequency() { return pulseTimerHz(vrTimer); }
+#endif
+
+void IRAM_ATTR incomingHz()
+{
+  pulseTimerEdge(hallTimer, micros());
+  ledCounter++;
+}
+
+#if SPP_HAS_VR
+// The VR conditioner (MAX9924 C Out) gives one clean edge per zero-crossing.
+void IRAM_ATTR incomingVR()
+{
+  pulseTimerEdge(vrTimer, micros());
+}
+#endif
+
+// ===== Engine RPM input (tach output) =====
+// Windowed frequency capture: the ISR sums the edge intervals and counts them, the
+// RPM task reads-and-clears the pair once per window (freq = count / summed time).
+// Edges closer than half a period at Cluster Frequency Limit are dropped (V5.02).
+//
 // File-scope (not a function-local static): a function-local static with a
 // runtime initializer would emit a __cxa_guard_acquire on first use, which takes
 // a FreeRTOS mutex with a timeout — illegal in an ISR and asserts in queue.c.
-//
-// Windowed frequency capture — shared by the hall, VR and RPM inputs. Deriving Hz
-// from a single edge-to-edge period turns tone-wheel / tooth-spacing jitter straight
-// into a jumpy reading, so instead each ISR accumulates the summed edge intervals
-// and the interval count. The task reads-and-clears the pair once per window, so
-// freq = count / summedInterval is a true average over the window — exactly how the
-// closed-loop tacho (feedbackPulse) already works.
 struct PulseWindow
 {
-  volatile uint32_t accumUs;    // summed edge-to-edge intervals (us) this window
-  volatile uint32_t count;      // number of intervals summed into accumUs
-  volatile uint32_t lastEdgeUs; // micros() of the previous accepted edge (kept across windows)
-  volatile uint32_t minIntervalUs; // edges closer than this are rejected (see pulseMinIntervalUs)
+  volatile uint32_t accumUs;       // summed edge-to-edge intervals (us) this window
+  volatile uint32_t count;         // number of intervals summed into accumUs
+  volatile uint32_t lastEdgeUs;    // micros() of the previous accepted edge (kept across windows)
+  volatile uint32_t minIntervalUs; // edges closer than this are rejected
 };
-
-// Glitch rejection. Ignition-coil EMI couples in as sub-millisecond bursts, so edges
-// closer together than half a period at the input's configured full scale (Max Hall
-// Frequency / Max VR Frequency / Cluster Frequency Limit) are dropped. Up to V5.01 this
-// was a fixed 3 ms (333 Hz) for every input, and since a rejected edge keeps the last
-// good edge, a genuine input above 333 Hz (6/8-cyl RPM near redline) read HALF its
-// frequency. Half a period at full scale means anything rejected is above 2x full
-// scale, and the doubled interval it leaves still reads >= full scale, so the output
-// sits at its ceiling instead of collapsing.
 static const uint32_t PULSE_MIN_INTERVAL_DEFAULT_US = 3000; // until the first read sets it
 static const uint32_t PULSE_MIN_INTERVAL_FLOOR_US = 1000;   // never accept edges above 1 kHz
-
-static PulseWindow hallPulse = {0, 0, 0, PULSE_MIN_INTERVAL_DEFAULT_US}; // vehicle hall speed input
-#if SPP_HAS_VR
-static PulseWindow vrPulse = {0, 0, 0, PULSE_MIN_INTERVAL_DEFAULT_US};   // variable-reluctance speed input (S3 board)
-#endif
-static PulseWindow rpmPulse = {0, 0, 0, PULSE_MIN_INTERVAL_DEFAULT_US};  // engine RPM input
+static PulseWindow rpmPulse = {0, 0, 0, PULSE_MIN_INTERVAL_DEFAULT_US};
 
 static uint32_t pulseMinIntervalUs(uint16_t fullScaleHz)
 {
@@ -124,36 +222,28 @@ static uint32_t pulseMinIntervalUs(uint16_t fullScaleHz)
   return us < PULSE_MIN_INTERVAL_FLOOR_US ? PULSE_MIN_INTERVAL_FLOOR_US : us;
 }
 
-// Guards the read-and-clear of the pulse windows against the ISRs. portMUX is the
-// FreeRTOS/ESP32 safe primitive; a global noInterrupts() would starve the WiFi radio.
 static portMUX_TYPE pulseMux = portMUX_INITIALIZER_UNLOCKED;
 
-// Accumulate one edge into a window. Returns true when the edge was accepted (it
-// advanced the average), false when it merely seeded the window or was rejected as
-// a glitch/bounce. lastEdgeUs is kept on a glitch so the next real edge still
-// measures from the last good edge.
 static inline bool IRAM_ATTR pulseEdge(PulseWindow &w, uint32_t now)
 {
-  uint32_t last = w.lastEdgeUs;
+  bool accepted = false;
+  portENTER_CRITICAL_ISR(&pulseMux); // the RPM task reads-and-clears from the other core
+  const uint32_t last = w.lastEdgeUs;
   if (last == 0)
   {
     w.lastEdgeUs = now; // seed on the first pulse only
-    return false;
   }
-  uint32_t interval = now - last;
-  if (interval < w.minIntervalUs)
-    return false; // coil EMI / bounce: ignore, keep the last good edge
-  w.accumUs += interval;
-  w.count++;
-  w.lastEdgeUs = now;
-  return true;
+  else if (now - last >= w.minIntervalUs) // closer = coil EMI / bounce: keep the last good edge
+  {
+    w.accumUs += now - last;
+    w.count++;
+    w.lastEdgeUs = now;
+    accepted = true;
+  }
+  portEXIT_CRITICAL_ISR(&pulseMux);
+  return accepted;
 }
 
-// Read-and-clear a window, returning its averaged frequency in Hz, or -1 when no
-// fresh edges arrived (caller should hold the previous value). lastEdgeUs is left
-// intact so the next window's first interval bridges from this window's last edge.
-// The glitch threshold is refreshed from the live full-scale setting on every read,
-// so a slider change takes effect within one window.
 static float readPulseHz(PulseWindow &w, uint16_t fullScaleHz)
 {
   w.minIntervalUs = pulseMinIntervalUs(fullScaleHz);
@@ -168,8 +258,6 @@ static float readPulseHz(PulseWindow &w, uint16_t fullScaleHz)
   return -1.0f;
 }
 
-// Full reset (including the edge reference) — used on timeout / test transitions so
-// a stale lastEdgeUs can't inject one bogus huge-interval reading when input resumes.
 static void resetPulseWindow(PulseWindow &w)
 {
   portENTER_CRITICAL(&pulseMux);
@@ -179,48 +267,8 @@ static void resetPulseWindow(PulseWindow &w)
   portEXIT_CRITICAL(&pulseMux);
 }
 
-float readHallHz() { return readPulseHz(hallPulse, maxFreqHall); }
 float readRPMHz() { return readPulseHz(rpmPulse, maxRPM); }
-void resetHallPulseCounter() { resetPulseWindow(hallPulse); }
 void resetRPMPulseCounter() { resetPulseWindow(rpmPulse); }
-#if SPP_HAS_VR
-float readVRHz() { return readPulseHz(vrPulse, maxFreqVR); }
-void resetVRPulseCounter() { resetPulseWindow(vrPulse); }
-#endif
-
-// Interrupt handler for the vehicle hall speed input.
-// IRAM_ATTR is required so a pulse arriving while the flash cache is disabled
-// (EEPROM/LittleFS write) doesn't crash the chip.
-void IRAM_ATTR incomingHz()
-{
-  // Ignore the vehicle hall input entirely while bench-testing or calibrating —
-  // the motor is driven from the Speed Test / Cal controls, so an incoming signal
-  // must not touch the counter, lastPulse or the LED counter until the test
-  // (or cal) is turned off.
-  if (testSpeedo || testCal)
-    return;
-  if (pulseEdge(hallPulse, micros()))
-  {
-    lastPulse = millis();
-    ledCounter++;
-  }
-}
-
-#if SPP_HAS_VR
-// Interrupt handler for the variable-reluctance (VR) speed input. Counted exactly
-// like the hall input — one clean digital edge per zero-crossing from the VR
-// conditioner (C Out) — feeding the same windowed period->frequency->speed pipeline.
-// IRAM_ATTR is required so a pulse arriving while the flash cache is disabled
-// (EEPROM/LittleFS write) doesn't crash the chip.
-void IRAM_ATTR incomingVR()
-{
-  // Ignore the VR input while bench-testing or calibrating (same rule as the hall).
-  if (testSpeedo || testCal)
-    return;
-  if (pulseEdge(vrPulse, micros()))
-    lastPulseVR = millis();
-}
-#endif // SPP_HAS_VR
 
 // Interrupt handler for the engine RPM input.
 // IRAM_ATTR is required so a pulse arriving while the flash cache is disabled
@@ -232,95 +280,73 @@ void IRAM_ATTR incomingMotorSpeed()
 }
 
 // ============================================================================
-// Closed-Loop Motor Feedback (PID)
+// Closed-Loop Motor Feedback — tacho pulse timestamps (V5.05, from SpeedPulser V5.04)
 // ============================================================================
-// The motor's own tacho pulse train (pinMotorFeedback) is measured period-based:
-// we accumulate the exact micros() interval between edges as well as the edge
-// count, so freq = edges / (summed interval time) has continuous resolution and
-// averages out per-commutation jitter over the sample window.
+// The motor tacho (pinMotorFeedback) is timed in software, on every board: this
+// ISR keeps the micros() of the last FB_TS_N falling edges, and
+// updateMeasuredFreq() works the frequency out from them.
+//
+// Up to V5.04 the ISR summed edge intervals per 100 ms window and needed two edges
+// in a window, so below ~20 Hz windows read 0 Hz while the motor was still turning
+// and the reading went 20 -> 0 -> 20 (SpeedPulser bench, 2026-11-15: 14 of 29
+// windows read 0 at 15 Hz, all of them at 8.5 Hz). Timing the edges themselves has
+// no such floor.
+//
+// Edges closer than FB_GLITCH_US are line noise (the top speed is ~254 Hz =
+// 3.9 ms; the bench saw 0.02-0.6 ms pairs on the tacho line) and are dropped,
+// keeping the earlier edge.
+//
 // IRAM_ATTR is required so a pulse arriving while the flash cache is disabled
 // (EEPROM/LittleFS write) doesn't crash the chip.
-static volatile uint32_t feedbackAccumUs = 0;    // summed edge-to-edge intervals (us)
-static volatile uint32_t feedbackLastEdgeUs = 0; // micros() of the previous edge
-void IRAM_ATTR feedbackPulse()
-{
-  uint32_t now = micros();
-  uint32_t last = feedbackLastEdgeUs;
-  feedbackLastEdgeUs = now;
-  if (last != 0)
-  {
-    feedbackAccumUs = feedbackAccumUs + (now - last);
-  }
-  feedbackCount = feedbackCount + 1;
-}
-
-// Full-scale hardware PWM duty — the feedback loop works in the 12-bit domain.
-static inline uint16_t fbDutyMax()
-{
-  return (uint16_t)PWM_DUTY_MAX; // 4095
-}
-
-static float pidIntegral = 0.0f;
-static float pidPrevError = 0.0f; // previous error, tacho Hz domain
-static float measFreqFilt = 0.0f; // EMA-smoothed tacho frequency
-
-// Guards the read-and-clear of the ISR accumulators. portMUX is the FreeRTOS/ESP32
-// safe primitive; a global noInterrupts() would starve the WiFi radio.
+#define FB_TS_N 32                // edge history (power of 2): 6 revolutions + 2
+static volatile uint32_t fbTs[FB_TS_N]; // micros() of the newest edges
+static volatile uint32_t fbSeq = 0;     // edges accepted since boot
+// Guards the edge history between the ISR and the speed task (other core).
+// portMUX is the FreeRTOS/ESP32 safe primitive; a global noInterrupts() would
+// starve the WiFi radio.
 static portMUX_TYPE feedbackMux = portMUX_INITIALIZER_UNLOCKED;
 
-void resetPid()
+void IRAM_ATTR feedbackPulse()
 {
-  pidIntegral = 0.0f;
-  pidPrevError = 0.0f;
-  measFreqFilt = 0.0f;
-  pidCorrection = 0;
+  const uint32_t now = micros();
+  portENTER_CRITICAL_ISR(&feedbackMux);
+  const uint32_t s = fbSeq;
+  if (!s || (now - fbTs[(s - 1) & (FB_TS_N - 1)]) >= FB_GLITCH_US)
+  {
+    fbTs[s & (FB_TS_N - 1)] = now;
+    fbSeq = s + 1;
+  } // else noise: keep the earlier edge
+  portEXIT_CRITICAL_ISR(&feedbackMux);
 }
+
+static float measFreqFilt = 0.0f; // EMA-smoothed tacho frequency
+
 
 // ===== Speed <-> tacho scale =====
-// S3 board with a drive calibration: the captured marks map dial speed <-> tacho
-// Hz directly (piecewise, so a dial that isn't linear near zero still reads
-// right). Otherwise (DevKit, Voltage Control off, or no tacho in the marks) the
-// legacy single scale: feedbackMaxFreq Hz at maxSpeed, straight through zero.
-#if SPP_HAS_VOLTAGE_CTRL
-static bool useDriveTable()
-{
-  return voltageControlEnable && driveCalHzValid();
-}
-#endif
-
+// S3 board: the drive calibration marks map dial speed <-> tacho Hz (piecewise, so
+// a dial that isn't linear near zero still reads right). No table = 0. The DevKit
+// has no motor feedback (V5.06: the legacy PID scale is gone).
 float speedToTachoHz(float speed)
 {
 #if SPP_HAS_VOLTAGE_CTRL
-  if (useDriveTable())
+  if (driveCalHzValid())
     return hzForSpeed(speed);
 #endif
-  const uint16_t scaleFreq = feedbackMaxFreq > 0 ? feedbackMaxFreq : 1;
-  const uint16_t spdSpan = maxSpeed > 0 ? maxSpeed : 1;
-  return speed * (float)scaleFreq / (float)spdSpan;
+  (void)speed;
+  return 0.0f;
 }
 
 static float tachoHzToSpeed(float hz)
 {
 #if SPP_HAS_VOLTAGE_CTRL
-  if (useDriveTable())
+  if (driveCalHzValid())
     return speedForHz(hz);
 #endif
-  const uint16_t scaleFreq = feedbackMaxFreq > 0 ? feedbackMaxFreq : 1;
-  const uint16_t spdSpan = maxSpeed > 0 ? maxSpeed : 1;
-  return hz * (float)spdSpan / (float)scaleFreq;
+  (void)hz;
+  return 0.0f;
 }
 
 #if SPP_HAS_VOLTAGE_CTRL
-// Keep the legacy feedbackMaxFreq (Hz at maxSpeed) in step with the drive table.
-// It still normalises the legacy PID gains, so call after a capture, at boot and
-// whenever maxSpeed changes.
-void syncFeedbackMaxFreq()
-{
-  if (!driveCalHzValid())
-    return;
-  long hz = lroundf(hzForSpeed((float)(maxSpeed > 0 ? maxSpeed : 1)));
-  feedbackMaxFreq = (uint16_t)constrain(hz, 1L, 2000L);
-}
 
 // ===== Capture window =====
 // The last ~1 s of RAW tacho readings (one per 100 ms measurement). The capture
@@ -368,39 +394,84 @@ bool feedbackHzWindow(float &meanHz, float &spreadPct, float &driftHz)
 }
 #endif // SPP_HAS_VOLTAGE_CTRL
 
-// Period-based tacho frequency (Hz), EMA-smoothed, published to measuredFreqHz /
-// measuredSpeed. Called once per 100 ms by the speed task in EVERY mode, so the
-// read-outs, the capture window and the feedback loops all share one fresh
-// measurement.
+// ===== Motor Speed Measurement (V5.05, from SpeedPulser V5.04) =====
+// Motor frequency (Hz) from the edge timestamps, smoothed, published to
+// measuredFreqHz/measuredSpeed. Called once per 100 ms by the speed task in EVERY
+// mode, so the read-outs, the capture window and the feedback loops all share one
+// fresh measurement.
+//
+// From the newest edge, walk back over whole revolutions (multiples of
+// FB_PULSES_PER_REV intervals: the poles aren't evenly spaced, and a whole turn
+// cancels that) until the span covers FB_SPAN_US, or the history runs out.
+// freq = intervals / span. At 254 Hz that is 6 turns in ~120 ms; at 8 Hz one turn
+// in ~0.6 s. Never averages across a gap longer than FB_STALL_US (the motor was
+// stopped there). Between edges the reading holds, but no longer than the motor
+// could plausibly be turning: with no edge for `age`, it can't be faster than
+// 1.5 / age, so a stopping motor reads down smoothly, and 0 after FB_STALL_US.
 float updateMeasuredFreq()
 {
-  const uint32_t FB_STALL_US = 300000UL; // no edge for 300 ms -> stopped
-  const float FB_MEAS_ALPHA = 0.4f;      // EMA weight for the measured-Hz low-pass
 
+  uint32_t ts[FB_TS_N];
   portENTER_CRITICAL(&feedbackMux);
-  uint32_t pulses = feedbackCount;
-  uint32_t accumUs = feedbackAccumUs;
-  uint32_t lastEdge = feedbackLastEdgeUs;
-  feedbackCount = 0;
-  feedbackAccumUs = 0;
+  const uint32_t seq = fbSeq;
+  for (uint8_t i = 0; i < FB_TS_N; i++)
+    ts[i] = fbTs[i];
   portEXIT_CRITICAL(&feedbackMux);
+  const uint32_t nowUs = micros();
 
-  float measuredFreq;
-  if (pulses >= 2 && accumUs > 0 &&
-      (uint32_t)(micros() - lastEdge) < FB_STALL_US)
+  float measuredFreq = 0.0f;
+  uint32_t kUsed = 0;
+  if (seq >= 2)
   {
-    measuredFreq = (float)pulses * 1000000.0f / (float)accumUs;
-  }
-  else
-  {
-    measuredFreq = 0.0f;
+    const uint32_t newest = ts[(seq - 1) & (FB_TS_N - 1)];
+    const uint32_t age = nowUs - newest;
+    if (age >= FB_STALL_US)
+    {
+      // Stopped: forget the old edges, or once micros() wraps (71.6 min) they look new.
+      portENTER_CRITICAL(&feedbackMux);
+      if (fbSeq == seq)
+        fbSeq = 0;
+      portEXIT_CRITICAL(&feedbackMux);
+    }
+    else
+    {
+      const uint32_t maxK = (seq - 1 < FB_TS_N - 1) ? seq - 1 : FB_TS_N - 1;
+      uint32_t k = 0, span = 0, kRev = 0, spanRev = 0;
+      for (uint32_t i = 1; i <= maxK; i++)
+      {
+        const uint32_t s = newest - ts[(seq - 1 - i) & (FB_TS_N - 1)];
+        if (s - span > FB_STALL_US)
+          break; // the motor was stopped before this edge
+        k = i;
+        span = s;
+        if (k % FB_PULSES_PER_REV == 0)
+        {
+          kRev = k;
+          spanRev = span;
+          if (span >= FB_SPAN_US)
+            break;
+        }
+      }
+      if (kRev) // whole turns available: use them
+      {
+        k = kRev;
+        span = spanRev;
+      }
+      if (k && span)
+      {
+        measuredFreq = (float)k * 1000000.0f / (float)span;
+        if (measuredFreq * (float)age > 1500000.0f)
+          measuredFreq = 1500000.0f / (float)age; // overdue edge: slowing down
+        kUsed = k;
+      }
+    }
   }
   measuredFreqRawHz = measuredFreq;
 #if SPP_HAS_VOLTAGE_CTRL
-  pushFeedbackSample(measuredFreq); // top-speed capture window
+  pushFeedbackSample(measuredFreq); // capture window
 #endif
 
-  if (measuredFreq > 0.0f)
+  if (measuredFreq > 0.0f && kUsed >= 2)
   {
     feedbackAvailable = true; // a genuine tacho edge stream proves the feedback pin is wired
   }
@@ -418,77 +489,6 @@ float updateMeasuredFreq()
   return measFreqFilt;
 }
 
-// Trims the feed-forward duty so the measured motor speed tracks the requested
-// speed. baseDuty and the return value are in the 12-bit hardware duty domain
-// (0..PWM_DUTY_MAX). Works in the tacho FREQUENCY domain (Hz) to keep the error
-// smooth. Sample at 100 ms; uses the measurement taken this tick (updateMeasuredFreq).
-int16_t applyFeedbackTrim(uint16_t targetSpeed, uint16_t baseDuty)
-{
-  const float PID_PERIOD_S = 0.1f;   // 100 ms control interval
-  const float deadbandHz = feedbackDeadband > 0.0f ? feedbackDeadband : 0.0f; // user-set anti-hunt band; 0 = off
-
-  const float measFreq = measuredFreqHz;
-
-  const uint16_t dutyMax = fbDutyMax();
-  const uint16_t scaleFreq = feedbackMaxFreq > 0 ? feedbackMaxFreq : 1;
-  const float targetFreq = speedToTachoHz((float)targetSpeed);
-
-  // Below feedbackMinSpeed the motor can't run smoothly (stiction/cogging), so the
-  // loop can only hunt. Drop to pure feed-forward and hold the PID reset.
-  if (feedbackMinSpeed > 0 && targetSpeed < feedbackMinSpeed)
-  {
-    pidIntegral = 0.0f;
-    pidPrevError = 0.0f;
-    pidCorrection = 0;
-    return (int16_t)constrain((int32_t)baseDuty, 0, (int32_t)dutyMax);
-  }
-
-  const float error = targetFreq - measFreq; // Hz
-
-  // Full calibration duty range spans the full tacho range, so the UI gains keep
-  // their authority whatever feedbackMaxFreq is.
-  const float dutyPerHz = (float)dutyMax / (float)scaleFreq;
-
-  // Deadband (anti-hunt): near the motor's break-free duty the response is sticky,
-  // and chasing measurement jitter sets up a limit-cycle hunt. Inside the band we
-  // silence P and D so they don't react to that jitter — but the INTEGRAL keeps
-  // accumulating so the loop still trims out the last couple of Hz of steady-state
-  // error and actually settles on the target (freezing it here used to leave a fixed
-  // ~2 km/h offset). Outside the band the full PID runs as before.
-  const bool inDeadband = fabsf(error) < deadbandHz;
-
-  pidIntegral += error * PID_PERIOD_S;
-  const float maxIntegral = (float)scaleFreq / (pidKi > 0.001f ? pidKi : 0.001f);
-  pidIntegral = constrain(pidIntegral, -maxIntegral, maxIntegral);
-
-  const float derivative = (error - pidPrevError) / PID_PERIOD_S;
-  pidPrevError = error;
-
-  const float pTerm = inDeadband ? 0.0f : pidKp * error;
-  const float iTerm = pidKi * pidIntegral; // always active — nulls the steady-state offset
-  const float dTerm = inDeadband ? 0.0f : pidKd * derivative;
-  const float output = (pTerm + iTerm + dTerm) * dutyPerHz;
-  pidCorrection = (int16_t)constrain(output, -(float)dutyMax, (float)dutyMax);
-
-  int32_t corrected = (int32_t)baseDuty + pidCorrection;
-  // Allow headroom above the calibrated full-scale so the loop can compensate for
-  // load / supply sag, but stay inside the 12-bit hardware range.
-  corrected = constrain(corrected, 0, (int32_t)PWM_DUTY_MAX);
-
-#if enableDebug && debugFB
-  static uint8_t fbLogDiv = 0;
-  if (++fbLogDiv >= 10)
-  {
-    fbLogDiv = 0;
-    DEBUG_FB("tgtF=%.1f measF=%.1f/%u Hz meas=%u kph err=%+.1f corr=%+d base=%u applied=%d",
-             targetFreq, measFreq, scaleFreq, measuredSpeed, error,
-             pidCorrection, baseDuty, (int)corrected);
-  }
-#endif
-
-  return (int16_t)corrected;
-}
-
 #if SPP_HAS_VOLTAGE_CTRL
 // ===== Drive Control (S3 board) =====
 // Open loop first: the drive for a target speed comes straight from the
@@ -498,13 +498,36 @@ int16_t applyFeedbackTrim(uint16_t targetSpeed, uint16_t baseDuty)
 // With Feedback Enable on (and a tacho, and a table with Hz), ONE slow integrator
 // nudges that drive by a few percent to hold the calibrated tacho Hz against load
 // and temperature drift. It does nothing inside the deadband, nothing below the
-// minimum feedback speed, and is capped at ±vcTrimLimit — so it can't fight the
+// minimum feedback speed, and is capped at ±trimLimit — so it can't fight the
 // calibration or hunt the way the old fast PWM loop + slow voltage loop did.
 float driveTrim = 0.0f;
+
+// V5.05 reference model (SpeedPulser V5.04): the tacho Hz the motor should be
+// showing NOW, following the target the way the motor + measurement do (bench,
+// 2026-11-15: 63 % of a step in ~0.35 s, 90 % in ~0.55 s, up or down, 10-160 km/h).
+// The trim works on the error against this, and only once it has (nearly) reached
+// the target: getting to a new speed is the calibration's job. Integrating the raw
+// step error instead wound the trim up while the motor was still accelerating:
+// 5-31 Hz overshoot on a speed-up, and on a big slow-down the needle dipped to ~0
+// and took ~7 s to come back.
+static float refHz = 0.0f;
+
+// Tacho lost (V5.08, mirrors SpeedPulser): feedbackAvailable latches once a tacho is
+// seen, so a wire that breaks later read as "the motor is stopped" and the trim
+// wound up to +trimLimit in about a second (needle ~40 % high). If the tacho reads
+// nothing for FB_LOST_TICKS while the target is above the motor's floor, the trim
+// is dropped (open loop, straight from the calibration) and the page says the
+// feedback is missing. A reading far from the model (noise) is never integrated.
+static uint8_t tachoSilentTicks = 0;
+static bool tachoLost = false;
+
+bool tachoSignalLost() { return tachoLost; }
 
 void resetDriveControl()
 {
   driveTrim = 0.0f;
+  refHz = 0.0f;
+  tachoSilentTicks = 0;
 }
 
 // Called on the 100 ms control cadence. Returns the applied raw PWM duty.
@@ -515,7 +538,6 @@ uint16_t applyDriveControl(uint16_t targetSpeed)
   if (targetSpeed == 0)
   {
     resetDriveControl();
-    pidCorrection = 0;
     return applyMotorDrive(0.0f);
   }
 
@@ -526,27 +548,58 @@ uint16_t applyDriveControl(uint16_t targetSpeed)
     targetSpeed = topSpeed;
 
   const float ffDrive = driveForSpeed(targetSpeed);
-  const bool closedLoop = feedbackEnable && feedbackAvailable && driveCalHzValid() &&
+  if (feedbackAvailable && measuredFreqRawHz <= 0.0f && hzForSpeed((float)targetSpeed) > FB_LOST_MIN_HZ)
+  {
+    if (tachoSilentTicks < 255)
+      tachoSilentTicks++;
+  }
+  else
+  {
+    tachoSilentTicks = 0;
+  }
+  tachoLost = tachoSilentTicks >= FB_LOST_TICKS;
+  const bool closedLoop = feedbackEnable && feedbackAvailable && !tachoLost && driveCalHzValid() &&
                           !(feedbackMinSpeed > 0 && targetSpeed < feedbackMinSpeed);
   float tgtHz = 0.0f;
   if (closedLoop)
   {
     tgtHz = hzForSpeed((float)targetSpeed);
-    const float errHz = tgtHz - measuredFreqHz;
+    if (refHz <= 0.0f)
+      refHz = measuredFreqHz; // loop just engaged: start the model where the motor is
+    refHz += (tgtHz - refHz) * (PERIOD_S / (FB_REF_TAU_S + PERIOD_S));
+    const float errHz = refHz - measuredFreqHz;
     const float deadbandHz = feedbackDeadband > 0.0f ? feedbackDeadband : 0.0f;
-    if (tgtHz > 0.5f && fabsf(errHz) > deadbandHz)
+    const bool settled = fabsf(tgtHz - refHz) <= FB_REF_SETTLED * tgtHz;
+    const bool plausible = fabsf(errHz) <= FB_PLAUSIBLE * refHz;
+    if (tgtHz > 0.5f && settled && plausible && fabsf(errHz) > deadbandHz)
     {
-      driveTrim += vcTrimGain * (errHz / tgtHz) * PERIOD_S;
-      driveTrim = constrain(driveTrim, -vcTrimLimit, vcTrimLimit);
+      driveTrim += trimGain * (errHz / tgtHz) * PERIOD_S;
+      driveTrim = constrain(driveTrim, -trimLimit, trimLimit);
     }
   }
   else
   {
     driveTrim = 0.0f;
+    refHz = 0.0f;
   }
 
-  const uint16_t duty = applyMotorDrive(ffDrive * (1.0f + driveTrim));
-  pidCorrection = (int16_t)lroundf(driveTrim * 100.0f); // UI "trim", in %
+  // Never let the trim push the drive more than 5 % past the top proven mark:
+  // past it nobody has seen where the needle goes (a pegged speedo is damaged), nor
+  // past the most the rail can give.
+  float drive = ffDrive * (1.0f + driveTrim);
+  float driveCap = driveMaxV();
+  if (topSpeed > 0 && driveForSpeed(topSpeed) * 1.05f < driveCap)
+    driveCap = driveForSpeed(topSpeed) * 1.05f;
+  if (drive > driveCap)
+  {
+    drive = driveCap;
+    // Anti-windup (V5.09): the trim stops where the drive stops. It used to keep
+    // integrating against the cap up to +trimLimit, then held the needle high for
+    // seconds after the speed dropped.
+    if (closedLoop && ffDrive > 0.0f && driveTrim > drive / ffDrive - 1.0f)
+      driveTrim = drive / ffDrive - 1.0f;
+  }
+  const uint16_t duty = applyMotorDrive(drive);
 
 #if enableDebug && debugFB
   static uint8_t logDiv = 0;
@@ -574,12 +627,12 @@ uint32_t speedToPwmDuty(uint16_t speedKph)
   // points so we use the full 12-bit duty range. The 385-entry table can only
   // represent duty up to 384<<DUTY_SCALE_SHIFT (~37.5%), which would otherwise
   // clamp a full-range custom calibration far short of its top speed.
-  if (motorPerformanceVal == CUSTOM_CAL_ID && customCalValid)
+  if (presetId == CUSTOM_CAL_ID && customCalValid)
   {
     return customSpeedToDuty12(speedKph);
   }
 
-  const int32_t maxIdx = (int32_t)(sizeof motorPerformance / sizeof motorPerformance[0]) - 1; // 384
+  const int32_t maxIdx = (int32_t)(sizeof presetSpeedTable / sizeof presetSpeedTable[0]) - 1; // 384
 
   const uint16_t dNear = findClosestMatch(speedKph);
   if (dNear == 0)
@@ -587,7 +640,7 @@ uint32_t speedToPwmDuty(uint16_t speedKph)
     return 0; // below the motor's start threshold -> off
   }
 
-  const int32_t vNear = (int32_t)motorPerformance[dNear];
+  const int32_t vNear = (int32_t)presetSpeedTable[dNear];
   const uint32_t base = (uint32_t)dNear << DUTY_SCALE_SHIFT;
   if (vNear == (int32_t)speedKph)
   {
@@ -598,16 +651,16 @@ uint32_t speedToPwmDuty(uint16_t speedKph)
   // skipping flat entries so we interpolate across a real slope.
   const int32_t dir = (speedKph > vNear) ? +1 : -1;
   int32_t dOther = (int32_t)dNear + dir;
-  while (dOther >= 0 && dOther <= maxIdx && motorPerformance[dOther] == (uint16_t)vNear)
+  while (dOther >= 0 && dOther <= maxIdx && presetSpeedTable[dOther] == (uint16_t)vNear)
   {
     dOther += dir;
   }
-  if (dOther < 0 || dOther > maxIdx || motorPerformance[dOther] == 0)
+  if (dOther < 0 || dOther > maxIdx || presetSpeedTable[dOther] == 0)
   {
     return base; // no usable neighbour -> fall back to the anchor
   }
 
-  const int32_t vOther = (int32_t)motorPerformance[dOther];
+  const int32_t vOther = (int32_t)presetSpeedTable[dOther];
   const int32_t den = vOther - vNear;
   if (den == 0)
   {
@@ -688,9 +741,11 @@ void setFrequencyRPM(float frequencyHz)
   if (frequencyHz > 0.0f)
   {
     halfPeriodTicks = (uint64_t)((float)rpmTimerTickHz / (2.0f * frequencyHz) + 0.5f);
-    if (halfPeriodTicks < 2)
+    // Floor: 250 us half period (2 kHz). The timer interrupts every half period, so
+    // a runaway frequency must never turn into an interrupt storm that stalls the core.
+    if (halfPeriodTicks < 250)
     {
-      halfPeriodTicks = 2;
+      halfPeriodTicks = 250;
     }
   }
   if (rpmTimer == nullptr || halfPeriodTicks == rpmLastHalfTicks)
@@ -728,14 +783,14 @@ void setFrequencyRPM(float frequencyHz)
 }
 
 // ===== Speed Matching Function =====
-// motorPerformance[] maps duty index (0..384) -> speed (kph). Leading entries are
+// presetSpeedTable[] maps duty index (0..384) -> speed (kph). Leading entries are
 // 0 (motor won't turn) and the remainder is non-decreasing. Return the duty whose
 // calibrated speed is nearest to `val`; on an equal-distance tie prefer the lower
 // duty. Below the motor's lowest calibrated speed we are in the dead-zone, so
 // return 0 (motor off) — this is what the caller relies on for the start threshold.
 uint16_t findClosestMatch(uint16_t val)
 {
-  const uint16_t n = sizeof motorPerformance / sizeof motorPerformance[0];
+  const uint16_t n = sizeof presetSpeedTable / sizeof presetSpeedTable[0];
 
   uint16_t bestIdx = 0;
   uint32_t bestErr = UINT32_MAX;
@@ -744,7 +799,7 @@ uint16_t findClosestMatch(uint16_t val)
 
   for (uint16_t i = 0; i < n; i++)
   {
-    const uint16_t spd = motorPerformance[i];
+    const uint16_t spd = presetSpeedTable[i];
     if (spd == 0)
     {
       continue; // skip dead-zone / uncalibrated entries

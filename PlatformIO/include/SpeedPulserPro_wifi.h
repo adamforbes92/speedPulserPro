@@ -11,8 +11,6 @@
 // Web server initialization
 void setupUI();
 void connectWifi();
-void disconnectWifi();
-void setupOTA();
 void updateLabels();
 
 // API Request handlers

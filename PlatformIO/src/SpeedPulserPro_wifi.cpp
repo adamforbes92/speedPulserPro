@@ -16,6 +16,16 @@
 #include "SpeedPulserPro_calBuilder.h"
 #include "SpeedPulserPro_voltage.h"
 #include "SpeedPulserPro_driveCal.h"
+#include "SpeedPulserPro_io.h"
+#include "SpeedPulserPro_resetLog.h"
+
+// A POST with no body never reaches the body handler, so the request answers it
+// (V5.09, as SpeedPulser: it used to hang until the browser timed out).
+static void answerEmptyPost(AsyncWebServerRequest *request)
+{
+  if (request->contentLength() == 0)
+    request->send(400, "application/json", "{\"error\":\"Empty request\"}");
+}
 
 static uint32_t parseHexCanId(const String& text, uint32_t defaultVal) {
   String s = text;
@@ -35,18 +45,14 @@ static uint32_t parseHexCanId(const String& text, uint32_t defaultVal) {
 static void addCalText(JsonDocument &doc)
 {
 #if SPP_HAS_VOLTAGE_CTRL
-  if (voltageControlEnable)
-  {
-    doc["calMode"] = "voltage";
-    if (driveCalCount == 0)
-      doc["calibrationText"] = "Voltage (not calibrated)";
-    else
-      doc["calibrationText"] = "Voltage (" + String(driveCalCount) + (driveCalCount == 1 ? " mark, " : " marks, ") +
-                               String(driveCal[0].speed) + "-" + String(driveCalTopSpeed()) + ")";
-    return;
-  }
+  if (driveCalCount == 0)
+    doc["calibrationText"] = "Not calibrated";
+  else
+    doc["calibrationText"] = String(driveCalCount) + (driveCalCount == 1 ? " mark, " : " marks, ") +
+                             String(driveCal[0].speed) + "-" + String(driveCalTopSpeed());
+  return;
 #endif
-  doc["calMode"] = "pwm";
+  doc["calibrationText"] = getCalibrationText(presetId);
 }
 
 #if SPP_HAS_VOLTAGE_CTRL
@@ -63,35 +69,44 @@ static void addDriveCal(JsonDocument &doc)
     p["drive"] = driveCal[i].drive;
     p["rail"] = driveCal[i].rail;
     p["pwm"] = driveCal[i].pwm;
+    p["src"] = driveCal[i].src == DCAL_SRC_AUTO ? "auto" : "eye";
   }
   doc["driveCalHz"] = driveCalHzValid();
+  doc["calBackup"] = driveCalBackupValid; // Restore Previous available
 }
 
 // Live S3-board read-outs for /api/status: rail, drive and tacho keep updating
 // in every mode (Calibration, Speed Test and normal running).
 static void addVoltageStatus(JsonDocument &doc)
 {
-  doc["boardHasVoltageControl"] = true;
-  doc["hasRailSense"] = true;
-  doc["voltageControlEnable"] = voltageControlEnable;
-  doc["buckEnabled"] = buckEnabled;
-  doc["voltageCmd"] = lastVoltageCmd;   // 0..1 of the rail window
   doc["pwmFrac"] = lastPwmFrac;         // 0..1 motor PWM
   doc["driveV"] = lastDriveV;           // applied drive (V = rail x PWM)
   doc["driveMaxV"] = driveMaxV();
-  doc["tempDriveV"] = tempDriveV;       // calibration drive the user set
+  doc["calibrationDriveV"] = calibrationDriveV;       // calibration drive the user set
   doc["driveTrimPct"] = driveTrim * 100.0f;
+  // The trim has run out of room (V5.09): the calibration is off at this speed.
+  doc["trimAtLimit"] = trimLimit > 0.0f && fabsf(driveTrim) >= trimLimit - 0.005f;
   doc["railCmdV"] = lastRailCmdV;       // commanded rail (V)
   doc["motorRailV"] = motorRailV;       // measured rail (V) — trust it once railSenseOk
   doc["railSenseOk"] = railFitValid;
   doc["railLimited"] = railLimited();
+  if (railTripped)
+    doc["railTrippedV"] = railTripV; // motor supply shut off: reboot to clear
   doc["boardTestRunning"] = (bool)boardTestActive;
   float fbMeanHz, fbSpreadPct, fbDriftHz;
   const bool fbWin = feedbackHzWindow(fbMeanHz, fbSpreadPct, fbDriftHz);
-  doc["fbHzAvg"] = fbWin ? fbMeanHz : 0.0f;          // capture-window mean (Hz)
   doc["fbHzSpread"] = fbWin ? fbSpreadPct : -1.0f;   // % (max-min)/mean; -1 = not turning
   doc["fbHzDrift"] = fbWin ? fbDriftHz : 0.0f;       // Hz the mean moved across the window
   doc["fbStable"] = fbWin && feedbackHzSteady(fbMeanHz, fbSpreadPct, fbDriftHz);
+  // Auto Fill progress (V5.05)
+  JsonObject af = doc["autoFill"].to<JsonObject>();
+  af["state"] = autoFillState; // 0 idle, 1 running, 2 done, 3 failed
+  af["index"] = autoFillIndex;
+  af["total"] = autoFillTotal;
+  af["speed"] = autoFillSpeed;
+  af["hz"] = autoFillTargetHz;
+  af["msg"] = autoFillMsg;
+  doc["calBackup"] = driveCalBackupValid;
 }
 #endif
 
@@ -137,15 +152,91 @@ static const char *activeSpeedSourceName()
   return "Hall";
 }
 
-void handleGetSettings(AsyncWebServerRequest *request)
+// ===== POST bodies (V5.06, mirrors SpeedPulser V5.06) =====
+// Collect a POST body that may arrive in several TCP chunks; the whole body once the
+// last chunk is in, nullptr until then (or after an error reply). POSTs must be
+// application/json: a page on another site can only send that after a preflight this
+// server never answers, so it can't drive the motor or the tach.
+static uint8_t *collectJsonBody(AsyncWebServerRequest *request, uint8_t *data, size_t len,
+                                size_t index, size_t total, size_t maxBytes)
 {
-  DEBUG_WIFI("GET /api/settings");
+  if (!request->contentType().startsWith("application/json"))
+  {
+    if (index == 0)
+      request->send(415, "application/json", "{\"error\":\"JSON only\"}");
+    return nullptr;
+  }
+  if (total > maxBytes)
+  {
+    if (index == 0)
+      request->send(413, "application/json", "{\"error\":\"Request too large\"}");
+    return nullptr;
+  }
+  if (index == 0)
+    request->_tempObject = malloc(total);
+  uint8_t *body = (uint8_t *)request->_tempObject;
+  if (!body)
+  {
+    if (index + len == total)
+      request->send(500, "application/json", "{\"error\":\"Out of memory\"}");
+    return nullptr;
+  }
+  memcpy(body + index, data, len);
+  return (index + len == total) ? body : nullptr;
+}
 
-  JsonDocument doc;
-  doc["hasNeedleSweep"] = hasNeedleSweep;
-  doc["linearSpeedSweep"] = linearSpeedSweep;
+// The needle is at rest and nothing is driving it (direction changes, the needle
+// sweep and OTA updates are only allowed then).
+static bool motorIsStopped()
+{
+  // inputSpeedKph: the source's own speed, also in Calibration Mode (V5.09, as SpeedPulser)
+  return motorDutyApplied == 0 && needleTargetSpeed == 0 && !speedTestOn && inputSpeedKph <= 0.0f
+#if SPP_HAS_VOLTAGE_CTRL
+         && lastDriveV <= 0.0f
+#endif
+      ;
+}
+
+// ota_manager hooks: an update restarts the unit, so only with the car stopped.
+bool otaIsSafe(String &reason)
+{
+  if (!motorIsStopped())
+  {
+    reason = "Stop the car first: the speedo is running";
+    return false;
+  }
+  if (calibrationModeOn || speedTestOn || testRPM || needleSweepRequested
+#if SPP_HAS_VOLTAGE_CTRL
+      || boardTestActive || autoFillRunning()
+#endif
+  )
+  {
+    reason = "Turn off Speed Test / RPM Test / Calibration Mode first";
+    return false;
+  }
+  return true;
+}
+
+void otaOnStart(bool filesystem)
+{
+  (void)filesystem;
+  speedTestOn = false; // nothing may drive the motor while the flash is rewritten
+  testRPM = false;
+  calibrationModeOn = false;
+  setMotorDutyRaw(0);
+#if SPP_HAS_VOLTAGE_CTRL
+  applyMotorDrive(0.0f);
+#endif
+  setFrequencyRPM(0);
+}
+
+// Every setting, for GET /api/settings and as the reply to each /api/control change
+// (so the page always shows the values the unit kept after range checks).
+static void fillSettings(JsonDocument &doc)
+{
+  doc["needleSweepOnBoot"] = needleSweepOnBoot;
   doc["coilType"] = coilType;
-  doc["convertToMPH"] = convertToMPH;
+  doc["clusterInMph"] = clusterInMph;
   doc["broadcastSpeedEnabled"] = broadcastSpeedEnabled;
   doc["broadcastSpeedID"] = broadcastSpeedID;
   doc["broadcastSpeedDLC"] = broadcastSpeedDLC;
@@ -158,35 +249,30 @@ void handleGetSettings(AsyncWebServerRequest *request)
     String dk = "broadcastSpeedData" + String(i);
     doc[dk] = broadcastSpeedData[i];
   }
-  doc["sweepSpeed"] = sweepSpeed;
+  doc["needleSweepSpeed"] = needleSweepSpeed;
   doc["stepRPM"] = stepRPM;
   doc["stepSpeed"] = stepSpeed;
-  doc["testSpeedo"] = testSpeedo;
-  doc["tempSpeed"] = tempSpeed;
-  doc["testRPM"] = testRPM;
-  doc["tempRPM"] = tempRPM;
-  doc["testCal"] = testCal;
-  doc["tempDutyCycle"] = tempDutyCycle;
+  doc["speedTestOn"] = speedTestOn;
+  doc["speedTestKph"] = speedTestKph;
+  doc["rpmTestOn"] = testRPM;
+  doc["rpmTestRpm"] = tempRPM;
+  doc["calibrationModeOn"] = calibrationModeOn;
+  doc["calibrationProbeDuty"] = calibrationProbeDuty;
   doc["maxRPM"] = maxRPM;
   doc["clusterRPMLimit"] = clusterRPMLimit;
-  doc["motorCalibration"] = motorPerformanceVal;
+  doc["presetId"] = presetId;
   doc["maxSpeed"] = maxSpeed;
-  doc["maxFreqHall"] = maxFreqHall;
-  doc["speedOffset"] = speedOffset;
-  doc["speedOffsetPositive"] = speedOffsetPositive;
-  doc["useGlobalSpeedOffset"] = useGlobalSpeedOffset;
+  doc["sensorPulsesPerKm"] = hallPulsesPerKm;
+  doc["inputSmoothingMs"] = inputSmoothingMs;
+  doc["globalSpeedOffsetKph"] = globalSpeedOffsetKph;
   doc["useSpeedOffsetCurve"] = useSpeedOffsetCurve;
   JsonArray speedCurveOffsets = doc["speedOffsetCurveOffsets"].to<JsonArray>();
   for (uint8_t i = 0; i < SPEED_OFFSET_CURVE_POINTS; i++)
   {
     speedCurveOffsets.add(speedOffsetCurveOffsets[i]);
   }
-  doc["averageFilterHall"] = averageFilterHall;
   doc["averageFilterRPM"] = averageFilterRPM;
-  doc["averageFilter"] = averageFilterHall;
   doc["gpsUpdateRateHz"] = gpsUpdateRateHz;
-  doc["speedOffsetType"] = useSpeedOffsetCurve ? "Curve" : (useGlobalSpeedOffset ? "Global" : "Off");
-  doc["currentSpeedOffset"] = currentSpeedOffset;
 
   // Speed source shown in the dropdown: the one the speed task is really using
   doc["speedType"] = activeSpeedSourceName();
@@ -217,56 +303,49 @@ void handleGetSettings(AsyncWebServerRequest *request)
 
   doc["reverseDirection"] = reverseDirection;
 
-  // Closed-loop feedback (PID)
+  // S3 drive trim (the DevKit has no motor feedback)
   doc["feedbackEnable"] = feedbackEnable;
-  doc["pidKp"] = pidKp;
-  doc["pidKi"] = pidKi;
-  doc["pidKd"] = pidKd;
   doc["feedbackDeadband"] = feedbackDeadband;
   doc["feedbackMinSpeed"] = feedbackMinSpeed;
-  doc["feedbackMaxFreq"] = feedbackMaxFreq;
 
   // Board identity + optional hardware blocks. The UI hides every control whose
   // hardware isn't on this board (voltage control, rail sense, VR, speed bias).
-  doc["boardId"] = SPP_BOARD_ID;
   doc["boardName"] = SPP_BOARD_NAME;
-  doc["hasVoltageCtrl"] = (bool)SPP_HAS_VOLTAGE_CTRL;
-  doc["hasRailSense"] = (bool)SPP_HAS_RAIL_SENSE;
+  doc["isVoltageBoard"] = (bool)SPP_HAS_VOLTAGE_CTRL;
   doc["hasVR"] = (bool)SPP_HAS_VR;
   doc["hasSpeedBias"] = (bool)SPP_HAS_SPEED_BIAS;
 
 #if SPP_HAS_VOLTAGE_CTRL
   // Buck voltage control (S3 board)
-  doc["boardHasVoltageControl"] = true;
-  doc["boardIdStrapOk"] = boardIdStrapOk;
-  doc["voltageControlEnable"] = voltageControlEnable;
   doc["railFloorV"] = RAIL_V_FLOOR;   // hardware rail window (V)
   doc["railCeilV"] = RAIL_V_CEIL;
-  doc["railSenseOk"] = railFitValid;
   doc["boardTestCode"] = boardTestCode;
-  doc["topSpeedCaptured"] = (driveCalCount > 0);
-  doc["vcPwmNominal"] = vcPwmNominal;
-  doc["vcRailMaxV"] = vcRailMaxV;
-  doc["vcTrimGain"] = vcTrimGain;
-  doc["vcTrimLimit"] = vcTrimLimit;
+  doc["pwmNominal"] = pwmNominal;
+  doc["railMaxV"] = railMaxV;
+  doc["railMinV"] = railMinV;
+  doc["trimGain"] = trimGain;
+  doc["trimLimit"] = trimLimit;
   doc["driveMaxV"] = driveMaxV();
+  doc["calibrationDriveV"] = calibrationDriveV; // the calibration drive kept (each change is capped at +0.5 V)
   addDriveCal(doc);
-#else
-  doc["boardHasVoltageControl"] = false;
 #endif
   addCalText(doc);
 
 #if SPP_HAS_VR
   // VR (variable-reluctance) speed input
-  doc["maxFreqVR"] = maxFreqVR;
-  doc["averageFilterVR"] = averageFilterVR;
+  doc["vrPulsesPerKm"] = vrPulsesPerKm;
 #endif
 #if SPP_HAS_SPEED_BIAS
   doc["speedInputBias"] = speedInputBias; // 0 none, 1 pull-up, 2 pull-down
 #endif
 
-  doc["FW_VERSION"] = FW_VERSION;
+  doc["fwVersion"] = FW_VERSION;
+}
 
+void handleGetSettings(AsyncWebServerRequest *request)
+{
+  JsonDocument doc;
+  fillSettings(doc);
   String response;
   serializeJson(doc, response);
   request->send(200, "application/json", response);
@@ -280,12 +359,11 @@ void handleGetStatus(AsyncWebServerRequest *request)
   doc["vehicleRPM"] = vehicleRPM;
   doc["hallRPM"] = vehicleRPMHall;
   doc["canRPM"] = vehicleRPMCAN;
-  doc["vehicleSpeed"] = vehicleSpeed;
+  doc["inputSpeedKph"] = inputSpeedKph;   // the selected source, in every mode (V5.09)
+  doc["vehicleSpeed"] = vehicleSpeed;     // what drives the needle (the test speed in Speed Test)
   doc["hallSpeed"] = hallSpeed;
-  doc["vehicleSpeedHall"] = vehicleSpeedHall;
 #if SPP_HAS_VR
   doc["vrSpeed"] = vrSpeed;
-  doc["vehicleSpeedVR"] = vehicleSpeedVR;
 #endif
   doc["ecuSpeed"] = ecuSpeed;
   doc["absSpeed"] = absSpeed;
@@ -300,22 +378,23 @@ void handleGetStatus(AsyncWebServerRequest *request)
   doc["activeRpmSource"] = useRPMCAN ? "CAN" : "Hall";
 
   // Test mode status
-  doc["testSpeedo"] = testSpeedo;
-  doc["tempSpeed"] = tempSpeed;
-  doc["testRPM"] = testRPM;
-  doc["tempRPM"] = tempRPM;
-  doc["testCal"] = testCal;
-  doc["tempDutyCycle"] = tempDutyCycle;
-  doc["appliedDutyCycle"] = appliedDutyCycle;
-  doc["speedOffsetType"] = useSpeedOffsetCurve ? "Curve" : (useGlobalSpeedOffset ? "Global" : "Off");
-  doc["currentSpeedOffset"] = currentSpeedOffset;
-  doc["averageFilterHall"] = averageFilterHall;
-  doc["averageFilterRPM"] = averageFilterRPM;
+  doc["speedTestOn"] = speedTestOn;
+  doc["speedTestKph"] = speedTestKph;
+  doc["rpmTestOn"] = testRPM;
+  doc["rpmTestRpm"] = tempRPM;
+  doc["calibrationModeOn"] = calibrationModeOn;
+  doc["calibrationProbeDuty"] = calibrationProbeDuty;
+  doc["motorDutyApplied"] = motorDutyApplied;
+  doc["needleTargetSpeed"] = needleTargetSpeed;
+  doc["hallFrequencyHz"] = hallFrequencyHz;
+#if SPP_HAS_VR
+  doc["vrFrequencyHz"] = vrFrequencyHz;
+#endif
+  doc["speedOffsetApplied"] = speedOffsetApplied;
 
   // System status
   doc["hasCAN"] = hasCAN;
   doc["hasGPS"] = hasGPS;
-  doc["convertToMPH"] = convertToMPH;
   doc["broadcastSpeedEnabled"] = broadcastSpeedEnabled;
   doc["broadcastSpeedValue"] = broadcastSpeedValue;
   doc["aftermarketSpeed"] = aftermarketSpeed;
@@ -325,11 +404,8 @@ void handleGetStatus(AsyncWebServerRequest *request)
   doc["gpsFrequency"] = getGPSUpdateFrequency();
   doc["gpsAutoApplySecs"] = gpsAutoApplySecondsRemaining();
 
-  // Closed-loop feedback (PID) live status
-  doc["feedbackEnable"] = feedbackEnable;
-  doc["reverseDirection"] = reverseDirection;
+  // Motor feedback (S3 drive trim) live status
   doc["measuredSpeed"] = measuredSpeed;
-  doc["pidCorrection"] = pidCorrection;
   doc["measuredFreqHz"] = measuredFreqHz;
   doc["feedbackAvailable"] = feedbackAvailable;
   doc["feedbackMissing"] = feedbackMissing;
@@ -337,8 +413,6 @@ void handleGetStatus(AsyncWebServerRequest *request)
 #if SPP_HAS_VOLTAGE_CTRL
   // Buck voltage control + drive calibration (live, S3 board)
   addVoltageStatus(doc);
-#else
-  doc["boardHasVoltageControl"] = false;
 #endif
   addCalText(doc);
 
@@ -370,7 +444,7 @@ void handleGetCalibrations(AsyncWebServerRequest *request)
     item["name"] = String("\u2605 Custom: ") + customCalName;
   }
 
-  doc["currentCalibrationId"] = motorPerformanceVal;
+  doc["selected"] = presetId;
 
   String response;
   serializeJson(doc, response);
@@ -383,10 +457,8 @@ void handleGetCalibrations(AsyncWebServerRequest *request)
 void handleGetCalCurve(AsyncWebServerRequest *request)
 {
   JsonDocument doc;
-  doc["pwmMax"]          = PWM_DUTY_MAX;
-  doc["maxSpeed"]        = maxSpeed;
-  doc["calibrationText"] = getCalibrationText(motorPerformanceVal);
-  doc["custom"]          = (motorPerformanceVal == CUSTOM_CAL_ID && customCalValid);
+  doc["calibrationText"] = getCalibrationText(presetId);
+  doc["custom"]          = (presetId == CUSTOM_CAL_ID && customCalValid);
 
   JsonArray speeds = doc["speed"].to<JsonArray>();
   JsonArray duties = doc["duty"].to<JsonArray>();
@@ -409,7 +481,7 @@ void handleGetCalCurve(AsyncWebServerRequest *request)
   // or reference marks sampled on the curve for a preset. Both lie on the curve.
   JsonArray anchorSpeeds = doc["anchorSpeed"].to<JsonArray>();
   JsonArray anchorDuties = doc["anchorDuty"].to<JsonArray>();
-  if (motorPerformanceVal == CUSTOM_CAL_ID && customCalValid)
+  if (presetId == CUSTOM_CAL_ID && customCalValid)
   {
     for (uint8_t i = 0; i < customCalCount; i++)
     {
@@ -438,14 +510,10 @@ void handleGetCalCurve(AsyncWebServerRequest *request)
 static void fillCalState(JsonDocument &doc)
 {
   doc["name"]     = customCalName;
-  doc["unit"]     = customCalUnitMph ? "mph" : "kmh";
-  doc["convertToMPH"] = convertToMPH;   // lets the UI mirror an auto-enabled MPH cluster
+  doc["clusterInMph"] = clusterInMph;
   doc["count"]    = customCalCount;
-  doc["valid"]    = customCalValid;
-  doc["selected"] = (motorPerformanceVal == CUSTOM_CAL_ID);
-  doc["duty"]     = (uint16_t)tempDutyCycle;
-  doc["pwmMax"]   = PWM_DUTY_MAX;
-  doc["maxSpeed"] = maxSpeed;
+  doc["selected"] = (presetId == CUSTOM_CAL_ID);
+  doc["duty"]     = (uint16_t)calibrationProbeDuty;
 
   JsonArray pts = doc["points"].to<JsonArray>();
   for (uint8_t i = 0; i < customCalCount; i++)
@@ -490,6 +558,11 @@ void handlePostCal(AsyncWebServerRequest *request, uint8_t *data, size_t len, si
   }
   memcpy(body + index, data, len);
   if (index + len != total) return; // wait for complete payload
+  if (!request->contentType().startsWith("application/json"))
+  {
+    request->send(415, "application/json", "{\"error\":\"JSON only\"}");
+    return;
+  }
 
   JsonDocument doc;
   if (deserializeJson(doc, body, total))
@@ -505,35 +578,60 @@ void handlePostCal(AsyncWebServerRequest *request, uint8_t *data, size_t len, si
     return;
   }
 
+  // V5.08 (mirrors SpeedPulser): jogging only drives the motor in Calibration Mode,
+  // so a point captured outside it stores a duty the needle never showed; and with
+  // the custom cal selected any point change moves the running needle.
+  const bool editOp = strcmp(op, "jog") == 0 || strcmp(op, "addPoint") == 0 ||
+                      strcmp(op, "deletePoint") == 0 || strcmp(op, "clearPoints") == 0 ||
+                      strcmp(op, "apply") == 0 || strcmp(op, "save") == 0;
+#if SPP_HAS_VOLTAGE_CTRL
+  // The Calibration Builder is the DevKit's: on the S3 it would select a PWM table
+  // that never drives the motor (V5.09: only jog / addPoint were refused).
+  if (editOp)
+  {
+    request->send(409, "application/json", "{\"error\":\"Not on the S3 board: use Drive Calibration\"}");
+    return;
+  }
+#endif
+  if (editOp && !calibrationModeOn)
+  {
+    request->send(409, "application/json", "{\"error\":\"Tick Calibration Mode first\"}");
+    return;
+  }
   if (strcmp(op, "jog") == 0)
   {
+    // DevKit: past max wraps to 0, below 0 wraps to max, so the first calibration
+    // step (pot at minimum, duty at maximum) is one press away.
     int32_t delta = doc["delta"] | 0;
     int32_t range = (int32_t)PWM_DUTY_MAX + 1;
-    int32_t next = ((int32_t)tempDutyCycle + delta) % range;
+    int32_t next = ((int32_t)calibrationProbeDuty + delta) % range;
     if (next < 0) next += range;
-    tempDutyCycle = next;
-  }
-  else if (strcmp(op, "setDuty") == 0)
-  {
-    int32_t duty = doc["duty"] | 0;
-    if (duty < 0) duty = 0;
-    if (duty > (int32_t)PWM_DUTY_MAX) duty = PWM_DUTY_MAX;
-    tempDutyCycle = duty;
+    calibrationProbeDuty = next;
   }
   else if (strcmp(op, "addPoint") == 0)
   {
-    uint16_t speed = doc["speed"] | 0;
-    uint16_t duty  = doc["duty"].isNull() ? (uint16_t)tempDutyCycle : doc["duty"].as<uint16_t>();
-    if (!calAddPoint(speed, duty))
+    const long speedIn = doc["speed"] | 0L; // 65537 must not wrap round to 1
+    const uint16_t speed = speedIn >= 1 && speedIn <= 400 ? (uint16_t)speedIn : 0;
+    const uint16_t duty = (uint16_t)calibrationProbeDuty; // the duty the needle is showing now
+    const char *err = nullptr;
+    if (!calAddPoint(speed, duty, err))
     {
-      request->send(409, "application/json", "{\"error\":\"Point list full\"}");
+      JsonDocument e;
+      e["error"] = err;
+      String errBody;
+      serializeJson(e, errBody);
+      request->send(409, "application/json", errBody);
       return;
     }
   }
   else if (strcmp(op, "deletePoint") == 0)
   {
-    uint8_t idx = doc["index"] | 0;
-    calDeletePoint(idx);
+    if (doc["index"].isNull())
+    {
+      request->send(400, "application/json", "{\"error\":\"Missing index\"}");
+      return;
+    }
+    calDeletePoint(doc["index"].as<uint8_t>());
   }
   else if (strcmp(op, "clearPoints") == 0)
   {
@@ -543,27 +641,22 @@ void handlePostCal(AsyncWebServerRequest *request, uint8_t *data, size_t len, si
   {
     const char *name = doc["name"];
     if (name) calSetName(name);
-    customCalUnitMph = convertToMPH;
+    customCalUnitMph = clusterInMph;
   }
-  else if (strcmp(op, "apply") == 0)
+  else if (strcmp(op, "apply") == 0 || strcmp(op, "save") == 0)
   {
-    buildCustomCalTable();
-    if (customCalValid)
+    // Both save the points and record the dial unit (V5.08, mirrors SpeedPulser):
+    // Apply used to select the custom cal without saving the points (dead speedo at
+    // the next ignition-on) and without the unit (the dial flipped back to mph).
+    if (customCalCount < 2)
     {
-      motorPerformanceVal = CUSTOM_CAL_ID;
-      updateMotorPerformance = true;
+      request->send(409, "application/json", "{\"error\":\"Capture at least 2 points first\"}");
+      return;
     }
-  }
-  else if (strcmp(op, "save") == 0)
-  {
-    customCalUnitMph = convertToMPH;
+    customCalUnitMph = clusterInMph;
     calSaveToNvs();
-    buildCustomCalTable();
-    if (customCalValid)
-    {
-      motorPerformanceVal = CUSTOM_CAL_ID; // persisted by the periodic writeEEP
-      updateMotorPerformance = true;
-    }
+    presetId = CUSTOM_CAL_ID; // persisted by the periodic writeEEP
+    updateMotorPerformance = true;
   }
   else if (strcmp(op, "export") == 0)
   {
@@ -592,6 +685,16 @@ void handlePostCal(AsyncWebServerRequest *request, uint8_t *data, size_t len, si
     {
 #if SPP_HAS_VOLTAGE_CTRL
       const char *err = nullptr;
+      if (!calibrationModeOn)
+      {
+        request->send(409, "application/json", "{\"error\":\"Enable Calibration Mode first (Calibration page)\"}");
+        return;
+      }
+      if (autoFillRunning())
+      {
+        request->send(409, "application/json", "{\"error\":\"Auto Fill is running: stop it first\"}");
+        return;
+      }
       if (!driveCalImportJson(json, err))
       {
         JsonDocument e;
@@ -613,9 +716,19 @@ void handlePostCal(AsyncWebServerRequest *request, uint8_t *data, size_t len, si
 #endif
       return;
     }
-    if (!json || !calImportJson(json))
+#if SPP_HAS_VOLTAGE_CTRL
+    request->send(409, "application/json",
+                  "{\"error\":\"This is a PWM calibration (DevKit): the S3 uses drive marks\"}");
+    return;
+#endif
+    const char *importErr = nullptr;
+    if (!json || !calImportJson(json, importErr))
     {
-      request->send(400, "application/json", "{\"error\":\"Import failed: not a SpeedPulser calibration file\"}");
+      JsonDocument e;
+      e["error"] = importErr ? importErr : "Import failed: not a SpeedPulser calibration file";
+      String errBody;
+      serializeJson(e, errBody);
+      request->send(400, "application/json", errBody);
       return;
     }
   }
@@ -625,13 +738,7 @@ void handlePostCal(AsyncWebServerRequest *request, uint8_t *data, size_t len, si
     return;
   }
 
-  // A custom cal captured in MPH implies the cluster reads MPH; auto-enable the
-  // runtime "Cluster in MPH" conversion whenever such a cal is the active one.
-  if (motorPerformanceVal == CUSTOM_CAL_ID && customCalValid && customCalUnitMph) {
-    convertToMPH = true;
-  }
-
-  DEBUG_WIFI("cal op: %s (count=%u duty=%u)", op, (unsigned)customCalCount, (unsigned)tempDutyCycle);
+  DEBUG_WIFI("cal op: %s (count=%u duty=%u)", op, (unsigned)customCalCount, (unsigned)calibrationProbeDuty);
 
   JsonDocument state;
   fillCalState(state);
@@ -642,9 +749,14 @@ void handlePostCal(AsyncWebServerRequest *request, uint8_t *data, size_t len, si
 
 void handlePostControl(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
 {
-  if (index + len != total) return; // wait for complete body
+  uint8_t *body = collectJsonBody(request, data, len, index, total, 512);
+  if (!body) return;
   JsonDocument doc;
-  deserializeJson(doc, data, len);
+  if (deserializeJson(doc, body, total))
+  {
+    request->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+    return;
+  }
 
   String key = doc["key"];
   String value = doc["value"].as<String>();
@@ -652,14 +764,9 @@ void handlePostControl(AsyncWebServerRequest *request, uint8_t *data, size_t len
   DEBUG_WIFI("POST /api/control - %s = %s", key.c_str(), value.c_str());
 
   // Parse and handle setting changes
-  if (key == "hasNeedleSweep")
+  if (key == "needleSweepOnBoot")
   {
-    hasNeedleSweep = (value == "true" || value == "1");
-  }
-
-  if (key == "linearSpeedSweep")
-  {
-    linearSpeedSweep = (value == "true" || value == "1");
+    needleSweepOnBoot = (value == "true" || value == "1");
   }
 
   if (key == "coilType")
@@ -667,9 +774,18 @@ void handlePostControl(AsyncWebServerRequest *request, uint8_t *data, size_t len
     coilType = (value == "true" || value == "1");
   }
 
-  if (key == "convertToMPH")
+  if (key == "clusterInMph")
   {
-    convertToMPH = (value == "true" || value == "1");
+    // A custom PWM cal's speeds are dial readings in the unit it was captured in.
+    const bool mph = (value == "true" || value == "1");
+    if (!SPP_HAS_VOLTAGE_CTRL && presetId == CUSTOM_CAL_ID && customCalValid && mph != customCalUnitMph)
+    {
+      request->send(409, "application/json", customCalUnitMph
+          ? "{\"error\":\"The custom calibration was captured in mph: pick a preset or capture it again in km/h\"}"
+          : "{\"error\":\"The custom calibration was captured in km/h: pick a preset or capture it again in mph\"}");
+      return;
+    }
+    clusterInMph = mph;
   }
 
   if (key == "broadcastSpeedEnabled")
@@ -704,7 +820,7 @@ void handlePostControl(AsyncWebServerRequest *request, uint8_t *data, size_t len
 
   if (key == "broadcastSpeedScale")
   {
-    broadcastSpeedScale = value.toFloat();
+    broadcastSpeedScale = constrain(value.toFloat(), -CAN_SCALE_MAX, CAN_SCALE_MAX); // V5.09: a typo can't overflow the speed
   }
 
   if (key == "broadcastSpeedOffset")
@@ -741,7 +857,7 @@ void handlePostControl(AsyncWebServerRequest *request, uint8_t *data, size_t len
 
   if (key == "aftermarketSpeedScale")
   {
-    aftermarketSpeedScale = value.toFloat();
+    aftermarketSpeedScale = constrain(value.toFloat(), -CAN_SCALE_MAX, CAN_SCALE_MAX);
   }
 
   if (key == "aftermarketSpeedOffset")
@@ -753,112 +869,125 @@ void handlePostControl(AsyncWebServerRequest *request, uint8_t *data, size_t len
   {
     if (key == "dsgRatio" + String(i))
     {
-      float v = value.toFloat();
-      if (v > 0.0f) dsgGearRatio[i] = v;
+      dsgGearRatio[i] = constrain(value.toFloat(), DSG_RATIO_MIN, DSG_RATIO_MAX); // V5.09: was only > 0
     }
   }
 
   if (key == "dsgFinal14")
   {
-    float v = value.toFloat();
-    if (v > 0.0f) dsgFinalDrive14 = v;
+    dsgFinalDrive14 = constrain(value.toFloat(), DSG_RATIO_MIN, DSG_RATIO_MAX);
   }
 
   if (key == "dsgFinal56")
   {
-    float v = value.toFloat();
-    if (v > 0.0f) dsgFinalDrive56 = v;
+    dsgFinalDrive56 = constrain(value.toFloat(), DSG_RATIO_MIN, DSG_RATIO_MAX);
   }
 
   if (key == "dsgTireCirc")
   {
-    float v = value.toFloat();
-    if (v > 0.0f) dsgTireCirc = v;
+    dsgTireCirc = constrain(value.toFloat(), DSG_TIRE_CIRC_MIN, DSG_TIRE_CIRC_MAX);
   }
 
-  if (key == "sweepSpeed")
+  // Every value is range-checked (V5.06): a cached old page or a hand-made request
+  // can't stall the chip (tach timer) or over-drive the needle.
+  if (key == "needleSweepSpeed")
   {
-    sweepSpeed = value.toInt();
+    needleSweepSpeed = (uint8_t)constrain(value.toInt(), 1L, 50L);
   }
 
   if (key == "stepRPM")
   {
-    stepRPM = value.toInt();
+    stepRPM = constrain(value.toInt(), 1L, 50L); // the page's slider range (V5.09: was 1-100)
   }
 
   if (key == "stepSpeed")
   {
-    stepSpeed = value.toInt();
+    stepSpeed = constrain(value.toInt(), 1L, 50L);
   }
 
-  if (key == "testSpeedo")
+#if SPP_HAS_VOLTAGE_CTRL
+  if ((key == "speedTestOn" || key == "calibrationModeOn" || key == "rpmTestOn") && boardTestActive)
   {
-    testSpeedo = (value == "true" || value == "1");
+    // The Test Board owns the motor while it runs (V5.09, as SpeedPulser: Speed
+    // Test used to be accepted and Calibration Mode silently ignored).
+    request->send(409, "application/json", "{\"error\":\"Board test running\"}");
+    return;
   }
+#endif
 
-  if (key == "tempSpeed")
+  if (key == "speedTestOn")
   {
-    long requestedSpeed = value.toInt();
-    if (requestedSpeed >= 0 && requestedSpeed <= maxSpeed)
+    speedTestOn = (value == "true" || value == "1");
+    if (speedTestOn && calibrationModeOn)
     {
-      tempSpeed = requestedSpeed;
+      // One test mode at a time: Speed Test switches Calibration Mode off.
+#if SPP_HAS_VOLTAGE_CTRL
+      autoFillStop("Stopped: Speed Test was switched on");
+#endif
+      calibrationModeOn = false;
     }
+    if (!speedTestOn)
+      speedTestKph = 0;
   }
 
-  if (key == "testRPM")
+  if (key == "speedTestKph")
+  {
+    speedTestKph = constrain(value.toInt(), 0L, (long)maxSpeed);
+  }
+
+  if (key == "rpmTestOn")
   {
     testRPM = (value == "true" || value == "1");
   }
 
-  if (key == "testCal")
+  if (key == "calibrationModeOn")
   {
+    const bool wasCal = calibrationModeOn;
+    calibrationModeOn = (value == "true" || value == "1");
 #if SPP_HAS_VOLTAGE_CTRL
-    const bool wasCal = testCal;
-    if (!boardTestActive) // the Test Board owns the motor while it runs
-      testCal = (value == "true" || value == "1");
-    // S3 calibration always starts with the motor stopped (drive 0): the user
-    // raises the drive until the needle sits on a mark.
-    if (testCal && !wasCal)
+    if (!calibrationModeOn)
+      autoFillStop("Stopped: Calibration Mode was turned off");
+#endif
+    if (calibrationModeOn)
     {
-      tempDriveV = 0.0f;
-      resetDriveControl();
+      speedTestOn = false; // one test mode at a time
+      speedTestKph = 0;
+      if (!wasCal)
+      {
+        // Calibration always starts with the motor stopped: the user raises it.
+        calibrationProbeDuty = 0;
+#if SPP_HAS_VOLTAGE_CTRL
+        calibrationDriveV = 0.0f;
+        resetDriveControl();
+#endif
+      }
     }
-    if (!testCal && wasCal && voltageControlEnable)
-    {
+#if SPP_HAS_VOLTAGE_CTRL
+    if (!calibrationModeOn && wasCal)
       applyMotorDrive(0.0f);
-    }
-#else
-    testCal = (value == "true" || value == "1");
 #endif
   }
 
   if (key == "maxSpeed")
   {
-    maxSpeed = value.toInt();
-#if SPP_HAS_VOLTAGE_CTRL
-    syncFeedbackMaxFreq(); // the captured marks are in cluster units: keep Hz-at-maxSpeed in step
-#endif
+    maxSpeed = (uint16_t)constrain(value.toInt(), 20L, 400L);
+    updateInputGlitchFilters();
   }
 
-  if (key == "maxFreqHall")
+  if (key == "sensorPulsesPerKm")
   {
-    maxFreqHall = value.toInt();
+    hallPulsesPerKm = constrain(value.toFloat(), SENSOR_PULSES_PER_KM_MIN, SENSOR_PULSES_PER_KM_MAX);
+    updateInputGlitchFilters();
   }
 
-  if (key == "speedOffset")
+  if (key == "inputSmoothingMs")
   {
-    long newOffset = value.toInt();
-    speedOffset = (uint8_t)constrain(newOffset, 0, 50);
+    inputSmoothingMs = (uint16_t)constrain(value.toInt(), (long)INPUT_SMOOTHING_MS_MIN, (long)INPUT_SMOOTHING_MS_MAX);
   }
 
-  if (key == "speedOffsetPositive")
+  if (key == "globalSpeedOffsetKph")
   {
-    speedOffsetPositive = (value == "true" || value == "1");
-  }
-
-  if (key == "useGlobalSpeedOffset")
-  {
-    useGlobalSpeedOffset = (value == "true" || value == "1");
+    globalSpeedOffsetKph = (int16_t)constrain(value.toInt(), -50L, 50L);
   }
 
   if (key == "useSpeedOffsetCurve")
@@ -868,40 +997,29 @@ void handlePostControl(AsyncWebServerRequest *request, uint8_t *data, size_t len
 
   if (key == "curveOffset0")
   {
-    speedOffsetCurveOffsets[0] = (int16_t)value.toInt();
-    normaliseSpeedOffsetCurve();
+    speedOffsetCurveOffsets[0] = (int16_t)constrain(value.toInt(), -20L, 20L);
   }
 
   if (key == "curveOffset1")
   {
-    speedOffsetCurveOffsets[1] = (int16_t)value.toInt();
-    normaliseSpeedOffsetCurve();
+    speedOffsetCurveOffsets[1] = (int16_t)constrain(value.toInt(), -20L, 20L);
   }
 
   if (key == "curveOffset2")
   {
-    speedOffsetCurveOffsets[2] = (int16_t)value.toInt();
-    normaliseSpeedOffsetCurve();
+    speedOffsetCurveOffsets[2] = (int16_t)constrain(value.toInt(), -20L, 20L);
   }
 
   if (key == "curveOffset3")
   {
-    speedOffsetCurveOffsets[3] = (int16_t)value.toInt();
-    normaliseSpeedOffsetCurve();
+    speedOffsetCurveOffsets[3] = (int16_t)constrain(value.toInt(), -20L, 20L);
   }
 
   if (key == "curveOffset4")
   {
-    speedOffsetCurveOffsets[4] = (int16_t)value.toInt();
-    normaliseSpeedOffsetCurve();
+    speedOffsetCurveOffsets[4] = (int16_t)constrain(value.toInt(), -20L, 20L);
   }
 
-  if (key == "averageFilter" || key == "averageFilterHall")
-  {
-    long requestedSamples = value.toInt();
-    averageFilterHall = (uint8_t)constrain(requestedSamples, 1, 10);
-    resetHallMedianFilter();
-  }
 
   if (key == "averageFilterRPM")
   {
@@ -910,45 +1028,33 @@ void handlePostControl(AsyncWebServerRequest *request, uint8_t *data, size_t len
     resetRPMMedianFilter();
   }
 
-  if (key == "tempRPM")
+  if (key == "rpmTestRpm")
   {
-    tempRPM = value.toInt();
-  }
-
-  if (key == "tempDutyCycle")
-  {
-    long requestedDuty = value.toInt();
-    if (requestedDuty > 385)
-    {
-      requestedDuty = 0;
-    }
-    else if (requestedDuty < 0)
-    {
-      requestedDuty = 385;
-    }
-    tempDutyCycle = requestedDuty;
+    tempRPM = constrain(value.toInt(), 0L, 12000L); // RPM Test (the tach is scaled to clusterRPMLimit)
   }
 
   if (key == "maxRPM")
   {
-    maxRPM = value.toInt();
+    // Tach full scale (Hz). The tach timer interrupts twice per period, so this is
+    // capped: 60000 here (from a hand-made request) stalled the chip.
+    maxRPM = (uint16_t)constrain(value.toInt(), 10L, 1000L);
   }
 
   if (key == "clusterRPMLimit")
   {
-    clusterRPMLimit = value.toInt();
+    clusterRPMLimit = (uint16_t)constrain(value.toInt(), 1000L, 12000L);
   }
 
-  if (key == "motorCalibration")
+  if (key == "presetId")
   {
-    motorPerformanceVal = value.toInt();
-    updateMotorArray();
-  }
-
-  if (key == "motorCalSelection")
-  {
-    motorPerformanceVal = value.toInt();
-    updateMotorArray();
+    const long id = value.toInt();
+    if ((id >= 1 && id <= getCalibrationCount()) || (id == CUSTOM_CAL_ID && customCalCount >= 2))
+    {
+      presetId = (uint8_t)id;
+      if (presetId == CUSTOM_CAL_ID)
+        calSaveToNvs(); // the periodic save stores presetId: the points must be saved too
+      updateMotorPerformance = true; // the speed task swaps the table (not mid-tick from here)
+    }
   }
 
   if (key == "speedType")
@@ -1038,59 +1144,40 @@ void handlePostControl(AsyncWebServerRequest *request, uint8_t *data, size_t len
 
   if (key == "reverseDirection")
   {
+    if (!motorIsStopped())
+    {
+      request->send(409, "application/json", "{\"error\":\"Stop the motor first (no speed, Speed Test off, drive 0)\"}");
+      return;
+    }
     reverseDirection = (value == "true" || value == "1");
     applyDirection(); // apply the new direction immediately
   }
 
-  // ---- Closed-loop feedback (PID) ----
+#if SPP_HAS_VOLTAGE_CTRL
+  // ---- S3 drive trim (the DevKit has no motor feedback: V5.06 removed the PID) ----
   if (key == "feedbackEnable")
   {
     feedbackEnable = (value == "true" || value == "1");
-    resetPid(); // clear accumulators whenever the loop is toggled
-  }
-
-  if (key == "pidKp")
-  {
-    pidKp = constrain(value.toFloat(), 0.0f, 10.0f);
-  }
-
-  if (key == "pidKi")
-  {
-    pidKi = constrain(value.toFloat(), 0.0f, 20.0f);
-  }
-
-  if (key == "pidKd")
-  {
-    pidKd = constrain(value.toFloat(), 0.0f, 10.0f);
+    resetDriveControl();
   }
 
   if (key == "feedbackDeadband")
   {
-    feedbackDeadband = constrain(value.toFloat(), 0.0f, 20.0f);
+    feedbackDeadband = constrain(value.toFloat(), 0.0f, 5.0f);
   }
 
   if (key == "feedbackMinSpeed")
   {
-    feedbackMinSpeed = (uint16_t)constrain(value.toInt(), 0, (long)maxSpeed);
+    feedbackMinSpeed = (uint16_t)constrain(value.toInt(), 0L, 100L);
   }
-
-  if (key == "feedbackMaxFreq")
-  {
-    feedbackMaxFreq = (uint16_t)constrain(value.toInt(), 1, 2000);
-  }
+#endif
 
 #if SPP_HAS_VR
   // ---- VR (variable-reluctance) speed input ----
-  if (key == "maxFreqVR")
+  if (key == "vrPulsesPerKm")
   {
-    maxFreqVR = value.toInt();
-  }
-
-  if (key == "averageFilterVR")
-  {
-    long requestedSamples = value.toInt();
-    averageFilterVR = (uint8_t)constrain(requestedSamples, 1, 10);
-    samplesVR.clear();
+    vrPulsesPerKm = constrain(value.toFloat(), SENSOR_PULSES_PER_KM_MIN, SENSOR_PULSES_PER_KM_MAX);
+    updateInputGlitchFilters();
   }
 #endif
 
@@ -1105,48 +1192,94 @@ void handlePostControl(AsyncWebServerRequest *request, uint8_t *data, size_t len
 
 #if SPP_HAS_VOLTAGE_CTRL
   // ---- Buck voltage control (S3 board) ----
-  if (key == "voltageControlEnable")
+  if (key == "calibrationDriveV")
   {
-    voltageControlEnable = (value == "true" || value == "1");
-    resetDriveControl();
-    // Disabling voltage control reverts to legacy PWM behaviour on the fixed ~9 V
-    // the duty presets were captured on; the buck stays enabled so the rail is present.
-    if (!voltageControlEnable)
+    // Calibration drive (V) from the UI's -/+ buttons; applied by the speed task on
+    // its next 100 ms tick. Lowering is unrestricted, but one request may raise it
+    // by at most CAL_DRIVE_MAX_STEP_V (the largest button step): a cached old page
+    // or a second browser can't jump the motor voltage and over-drive the gauge
+    // (V5.05, from SpeedPulser V5.03). Refused while Auto Fill owns the drive.
+    if (!calibrationModeOn)
     {
-      setMotorRailVolts(RAIL_V_LEGACY);
+      request->send(409, "application/json", "{\"error\":\"Enable Calibration Mode first\"}");
+      return;
     }
+    if (autoFillRunning())
+    {
+      request->send(409, "application/json", "{\"error\":\"Auto Fill is running\"}");
+      return;
+    }
+    float want = constrain(value.toFloat(), 0.0f, driveMaxV());
+    if (want > calibrationDriveV + CAL_DRIVE_MAX_STEP_V)
+    {
+      DEBUG_WIFI("tempDriveV %.2f -> %.2f refused, limited to +%.1f V", calibrationDriveV, want, CAL_DRIVE_MAX_STEP_V);
+      want = calibrationDriveV + CAL_DRIVE_MAX_STEP_V;
+    }
+    calibrationDriveV = want;
   }
 
-  if (key == "tempDriveV")
+  if ((key == "railMinV" || key == "pwmNominal" || key == "railMaxV") && (!calibrationModeOn || autoFillRunning()))
   {
-    // Calibration drive (V) from the UI's -/+ buttons and slider; applied by the
-    // speed task on its next 100 ms tick.
-    tempDriveV = constrain(value.toFloat(), 0.0f, driveMaxV());
+    // They change how every mark's drive splits into rail x PWM, so the needle moves:
+    // Calibration Mode only (V5.08, mirrors SpeedPulser), not while Auto Fill measures.
+    request->send(409, "application/json", autoFillRunning() ? "{\"error\":\"Auto Fill is running\"}"
+                                                              : "{\"error\":\"Tick Calibration Mode first (Setup, step 4)\"}");
+    return;
   }
 
-  if (key == "vcPwmNominal")
+  if (key == "railMinV")
   {
-    vcPwmNominal = constrain(value.toFloat(), 0.2f, 1.0f);
+    railMinV = constrain(value.toFloat(), RAIL_V_FLOOR, railMaxV);
+    resetDriveControl();
   }
 
-  if (key == "vcRailMaxV")
+  if (key == "pwmNominal")
   {
-    vcRailMaxV = constrain(value.toFloat(), RAIL_V_FLOOR, RAIL_V_CEIL);
+    pwmNominal = constrain(value.toFloat(), 0.2f, 1.0f);
   }
 
-  if (key == "vcTrimGain")
+  if (key == "railMaxV")
   {
-    vcTrimGain = constrain(value.toFloat(), 0.0f, 5.0f);
+    railMaxV = constrain(value.toFloat(), RAIL_V_FLOOR, RAIL_V_CEIL);
+    if (railMinV > railMaxV)
+      railMinV = railMaxV; // Minimum Rail can never sit above Maximum Rail
   }
 
-  if (key == "vcTrimLimit")
+  if (key == "trimGain")
   {
-    vcTrimLimit = constrain(value.toFloat(), 0.0f, 0.5f);
-    driveTrim = constrain(driveTrim, -vcTrimLimit, vcTrimLimit);
+    trimGain = constrain(value.toFloat(), 0.0f, 5.0f);
+  }
+
+  if (key == "trimLimit")
+  {
+    trimLimit = constrain(value.toFloat(), 0.0f, 0.5f);
+    driveTrim = constrain(driveTrim, -trimLimit, trimLimit);
   }
 #endif // SPP_HAS_VOLTAGE_CTRL
 
-  request->send(200);
+  // The reply (V5.09, as SpeedPulser): {"status":"ok","value":<the value kept>}, or
+  // 400 for a key this board doesn't have. It used to be the whole settings object
+  // (~100 keys plus every mark on each drive-button press) and "ok" even for a typo.
+  JsonDocument all;
+  fillSettings(all);
+  JsonDocument reply;
+  if (key.startsWith("curveOffset") && key.length() == 12 && key[11] >= '0' && key[11] < '0' + SPEED_OFFSET_CURVE_POINTS)
+    reply["value"] = speedOffsetCurveOffsets[key[11] - '0'];
+  else if (!all[key].isNull())
+    reply["value"] = all[key];
+  else
+  {
+    request->send(400, "application/json", "{\"error\":\"Unknown setting\"}");
+    return;
+  }
+  reply["status"] = "ok";
+#if SPP_HAS_VOLTAGE_CTRL
+  if (key == "railMaxV")
+    reply["railMinV"] = railMinV; // Minimum Rail follows a lower Maximum Rail
+#endif
+  String response;
+  serializeJson(reply, response);
+  request->send(200, "application/json", response);
 }
 
 #if SPP_HAS_VOLTAGE_CTRL
@@ -1167,16 +1300,10 @@ static void sendActionError(AsyncWebServerRequest *request, int code, const char
 void handleGetBoardTest(AsyncWebServerRequest *request)
 {
   JsonDocument doc;
-  doc["boardHasVoltageControl"] = true;
-  doc["boardIdStrapOk"] = boardIdStrapOk;
   doc["running"] = (bool)boardTestActive;
   doc["code"] = boardTestCode;
   doc["text"] = boardTestText(boardTestCode);
   doc["pass"] = (boardTestCode == BT_PASS);
-  doc["railSenseOk"] = railFitValid;
-  doc["fitV0"] = railFitV0;
-  doc["fitSlope"] = railFitSlope;
-  doc["motorRailV"] = motorRailV;
   JsonArray pts = doc["points"].to<JsonArray>();
   for (uint8_t i = 0; i < BOARD_TEST_POINTS; i++)
   {
@@ -1192,22 +1319,42 @@ void handleGetBoardTest(AsyncWebServerRequest *request)
 
 void handlePostAction(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
 {
-  if (index + len != total) return; // wait for complete body
+  uint8_t *body = collectJsonBody(request, data, len, index, total, 512);
+  if (!body) return;
   JsonDocument doc;
-  deserializeJson(doc, data, len);
+  if (deserializeJson(doc, body, total))
+  {
+    request->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+    return;
+  }
   String action = doc["action"];
 
   if (action == "needleSweep")
   {
-    tempNeedleSweep = true;
+    // The sweep suspends the tasks for a few seconds: only with the car stopped.
+    if (!motorIsStopped() || calibrationModeOn
+#if SPP_HAS_VOLTAGE_CTRL
+        || boardTestActive || autoFillRunning()
+#endif
+    )
+    {
+      request->send(409, "application/json", "{\"error\":\"Only with the car stopped and no test running\"}");
+      return;
+    }
+    needleSweepRequested = true;
   }
 
 #if SPP_HAS_VOLTAGE_CTRL
   if (action == "boardTest")
   {
-    if (testCal || testSpeedo || tempNeedleSweep)
+    if (calibrationModeOn || speedTestOn || needleSweepRequested || !motorIsStopped())
     {
-      sendActionError(request, 409, "Turn off Speed Test / Calibration Mode first");
+      sendActionError(request, 409, "Stop the motor and turn off Speed Test / Calibration Mode first");
+      return;
+    }
+    if (railMaxV < BOARD_TEST_MIN_TOP_V)
+    {
+      sendActionError(request, 409, "Test Board needs Maximum rail of 6 V or more (Advanced, Motor Voltage)");
       return;
     }
     if (!startBoardTest())
@@ -1217,17 +1364,24 @@ void handlePostAction(AsyncWebServerRequest *request, uint8_t *data, size_t len,
     }
   }
 
-  if (action == "calAddPoint" || action == "calDeletePoint" || action == "calClearPoints")
+  if (action == "calAddPoint" || action == "calDeletePoint" || action == "calClearPoints" || action == "calSetSource")
   {
-    // Drive calibration marks. Each answers with the updated table.
+    // Drive calibration marks. Each answers with the updated table. Changing the
+    // table while driving would jump the needle: Calibration Mode only.
+    if (autoFillRunning())
+    {
+      sendActionError(request, 409, "Auto Fill is running: stop it first");
+      return;
+    }
+    if (!calibrationModeOn)
+    {
+      sendActionError(request, 409, "Enable Calibration Mode first");
+      return;
+    }
     if (action == "calAddPoint")
     {
-      if (!testCal)
-      {
-        sendActionError(request, 409, "Enable Calibration Mode first");
-        return;
-      }
-      const uint8_t r = driveCalCapture(doc["speed"] | 0);
+      const long speed = doc["speed"] | 0L; // 65537 must not wrap round to 1
+      const uint8_t r = driveCalCapture(speed >= 1 && speed <= 400 ? (uint16_t)speed : 0);
       if (r != DCAL_OK)
       {
         sendActionError(request, 409, driveCalErrorText(r));
@@ -1237,6 +1391,15 @@ void handlePostAction(AsyncWebServerRequest *request, uint8_t *data, size_t len,
     else if (action == "calDeletePoint")
     {
       driveCalDelete(doc["index"] | 255);
+    }
+    else if (action == "calSetSource")
+    {
+      // Tap a mark's eye / auto pill: Auto Fill keeps eye marks and replaces auto ones.
+      if (!driveCalSetSource(doc["index"] | 255, (doc["auto"] | false) ? DCAL_SRC_AUTO : DCAL_SRC_EYE))
+      {
+        sendActionError(request, 400, "No such mark");
+        return;
+      }
     }
     else
     {
@@ -1250,51 +1413,57 @@ void handlePostAction(AsyncWebServerRequest *request, uint8_t *data, size_t len,
     request->send(200, "application/json", body);
     return;
   }
+
+  if (action == "calAutoFill" || action == "calAutoFillStop" || action == "calRestore")
+  {
+    // V5.05 Auto Fill: start / stop, and Restore Previous (swap with the backup).
+    const char *err = "OK";
+    bool ok = true;
+    if (action == "calAutoFill")
+    {
+      ok = autoFillStart(err);
+    }
+    else if (action == "calAutoFillStop")
+    {
+      autoFillStop("Stopped");
+    }
+    else if (autoFillRunning())
+    {
+      ok = false;
+      err = "Auto Fill is running: stop it first";
+    }
+    else if (!calibrationModeOn)
+    {
+      ok = false;
+      err = "Enable Calibration Mode first";
+    }
+    else
+    {
+      ok = driveCalRestoreBackup(err);
+    }
+    JsonDocument out;
+    if (ok)
+      out["status"] = "ok";
+    else
+      out["error"] = err;
+    addDriveCal(out);
+    String body;
+    serializeJson(out, body);
+    request->send(ok ? 200 : 409, "application/json", body);
+    return;
+  }
 #endif
 
-  request->send(200);
-}
-
-void handlePostTestRPM(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
-{
-  if (index + len != total) return; // wait for complete body
-  JsonDocument doc;
-  deserializeJson(doc, data, len);
-
-  if (doc["enabled"].is<bool>())
+  if (action == "clearResetLog")
   {
-    testRPM = doc["enabled"];
+    resetLogClear();
   }
-
-  if (doc["value"].is<int>())
+  else if (action != "needleSweep" && action != "boardTest")
   {
-    tempRPM = doc["value"];
+    request->send(400, "application/json", "{\"error\":\"Unknown action\"}"); // V5.09: was "ok"
+    return;
   }
-
-  request->send(200);
-}
-
-void handlePostTestSpeed(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
-{
-  if (index + len != total) return; // wait for complete body
-  JsonDocument doc;
-  deserializeJson(doc, data, len);
-
-  if (doc["enabled"].is<bool>())
-  {
-    testSpeedo = doc["enabled"];
-  }
-
-  if (doc["value"].is<int>())
-  {
-    long requestedSpeed = doc["value"];
-    if (requestedSpeed >= 0 && requestedSpeed <= maxSpeed)
-    {
-      tempSpeed = requestedSpeed;
-    }
-  }
-
-  request->send(200);
+  request->send(200, "application/json", "{\"status\":\"ok\"}");
 }
 
 void setupUI()
@@ -1316,33 +1485,34 @@ void setupUI()
   server.on("/api/calibrations", HTTP_GET, handleGetCalibrations);
   server.on("/api/calcurve", HTTP_GET, handleGetCalCurve);
   server.on("/api/cal", HTTP_GET, handleGetCal);
+  server.on("/api/resetlog", HTTP_GET, [](AsyncWebServerRequest *request) {
+    JsonDocument doc; // start-up log (V5.09, as SpeedPulser)
+    resetLogToJson(doc);
+    String response;
+    serializeJson(doc, response);
+    request->send(200, "application/json", response);
+  });
 #if SPP_HAS_VOLTAGE_CTRL
   server.on("/api/boardtest", HTTP_GET, handleGetBoardTest); // Test Board result (start it via /api/action)
 #endif
 
   // API routes for receiving commands
-  server.on("/api/control", HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr, [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
+  server.on("/api/control", HTTP_POST, answerEmptyPost, nullptr, [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
             { handlePostControl(request, data, len, index, total); });
 
   // Custom calibration builder operations
-  server.on("/api/cal", HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr, [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
+  server.on("/api/cal", HTTP_POST, answerEmptyPost, nullptr, [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
             { handlePostCal(request, data, len, index, total); });
 
-  server.on("/api/action", HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr, [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
+  server.on("/api/action", HTTP_POST, answerEmptyPost, nullptr, [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
             { handlePostAction(request, data, len, index, total); });
 
-  // Separate endpoints for RPM and Speed tests
-  server.on("/api/testRPM", HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr, [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
-            { handlePostTestRPM(request, data, len, index, total); });
-
-  server.on("/api/testSpeed", HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr, [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
-            { handlePostTestSpeed(request, data, len, index, total); });
-
-    // New endpoint: Set GPS update rate
-    server.on("/api/gpsRate", HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr, [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-      if (index + len != total) return;
+  // GPS update rate
+    server.on("/api/gpsRate", HTTP_POST, answerEmptyPost, nullptr, [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      uint8_t *body = collectJsonBody(request, data, len, index, total, 256);
+      if (!body) return;
       JsonDocument doc;
-      deserializeJson(doc, data, len);
+      if (deserializeJson(doc, body, total)) { request->send(400); return; }
       uint8_t rate = doc["rate"];
       String resp;
       bool ok = setGPSUpdateRate(rate, resp);
@@ -1398,18 +1568,6 @@ void connectWifi()
 #endif
 }
 
-void disconnectWifi()
-{
-  DEBUG_WIFI("Number of connections: %u", WiFi.softAPgetStationNum());
-
-  if (WiFi.softAPgetStationNum() == 0)
-  {
-    DEBUG_WIFI("No connections, turning off");
-    WiFi.disconnect(true, false);
-    WiFi.mode(WIFI_OFF);
-  }
-}
-
 void updateLabels()
 {
   // Update CAN health status based on last received message
@@ -1448,6 +1606,16 @@ bool powerIsBusy()
 // ACTIVE -> REDUCED: close the web server cleanly before the radio drops.
 void powerOnEnterReduced()
 {
+  // Nobody can reach the page once the AP is off, so nothing may stay in a test
+  // mode (V5.08, mirrors SpeedPulser): Speed Test would hold the needle off the
+  // source, Calibration Mode the motor at the calibration drive, until a power cycle.
+#if SPP_HAS_VOLTAGE_CTRL
+  autoFillStop("Stopped: WiFi went to sleep");
+#endif
+  speedTestOn = false;
+  speedTestKph = 0;
+  testRPM = false;
+  calibrationModeOn = false;
   server.end();
   wifiManagerStopAP();
 }

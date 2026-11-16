@@ -23,7 +23,9 @@
 #define baudSerial 115200
 
 #ifndef enableDebug
-#define enableDebug 1        // ** MASTER ** 0 = silence ALL serial debug
+#define enableDebug 0        // ** MASTER ** 0 = silence ALL serial debug. V5.06: releases ship
+                             // with 0 (with 1, the per-frame CAN print at 115200 baud
+                             // blocked the CAN task on a busy bus and dropped frames)
 #endif
 
 #define debugSys     1       // [SYS]   boot / tasks / general / 1 Hz telemetry
@@ -51,21 +53,82 @@
 #define ChassisCANDebug     (enableDebug && debugCAN)
 
 // System Configuration
-#define eepRefresh 5000
-#define labelRefresh 200
-#define wifiDisable 60000
 #define wifiHostName "SpeedPulserPro"
 // V5.00 - S3 board (rev6) support on the V4.02 base + voltage-injection Test Board and one-point calibration
 // V5.01 - drive calibration (multi-mark, ported from SpeedPulser V5.01): open-loop drive + gentle feedback trim
 // V5.02 - RPM hall input passed through 1:1 in Hz; per-input glitch threshold from each input's full scale
 // V5.03 - speed source picks exactly one input; over-range speed holds at Max Speed; Global Speed Offset sign now saves
-#define FW_VERSION "5.04"
+// V5.04 - MQB DSG theoretical speed over UDS corrected (DID 0x100A on 0x7E1/0x7E9, raw/10)
+// V5.05 - motor side mirrors SpeedPulser V5.05: timed tacho, Minimum Rail, ref-model trim, Auto Fill
+// V5.06 - audit pass mirroring SpeedPulser V5.06: pulses-per-km inputs, safety fixes, DevKit PID removed, UI in Setup steps
+// V5.07 - even needle sweep through the calibration (mirrors SpeedPulser V5.07)
+// V5.08 - second audit pass mirroring SpeedPulser V5.08: calibration safety, Auto Fill rebuilds visibly, GPS / CAN fixes, UI tidy
+// V5.09 - web UI shared with SpeedPulser (same API names), small audit fixes, start-up log, tuning constants here
+#define FW_VERSION "5.09"
+
+// Needle sweep (SpeedPulserPro_io.cpp), the same as SpeedPulser
+#define SWEEP_TICK_MS 10           // output update rate while sweeping
+#define SWEEP_EASE 0.2f            // last fraction of the climb spent slowing to a stop at the top (0..1)
+#define SWEEP_TOP_HOLD_MS 400      // pause at the top before coming back (no tacho)
+#define SWEEP_TOP_WAIT_MAX_MS 1500 // with a tacho: wait at the top until the motor is there, but no longer than this
+#define SWEEP_TOP_ARRIVED 0.97f    // "there" = the tacho is within 3 % of the top mark's Hz
+#define SWEEP_TOP_DWELL_MS 150     // then rest on the mark this long
+#define SWEEP_RATE_REF 17.0f       // Speed / Tach needle rate that runs at exactly Sweep pace
+
+// ===== Tuning (V5.09) =====
+// Every value here was set on the bench for the TY3816B motor and a VW / Audi speedo;
+// change them for different hardware. Each one is explained where it is used.
+// Elsewhere: rail and drive limits in SpeedPulserPro_voltage.h, the drive table size in
+// SpeedPulserPro_driveCal.h.
+
+// Speed input glitch filter: half a period at Maximum speed, kept within these
+#define INPUT_GLITCH_MIN_US 200        // 2.5 kHz: nothing real is faster
+#define INPUT_GLITCH_MAX_US 3000       // the V5.05 fixed limit: no slower sensor needs more
+
+// Motor tacho + feedback trim (SpeedPulserPro_control.cpp)
+#define FB_PULSES_PER_REV 5       // TY3816B tacho: the interval pattern repeats every 5 pulses
+constexpr uint32_t FB_GLITCH_US = 1000;     // tacho edges closer than this are line noise (top speed ~254 Hz = 3.9 ms)
+constexpr uint32_t FB_STALL_US = 600000UL; // no edge for 0.6 s: stopped (the motor's floor is ~6 Hz = 0.17 s)
+constexpr uint32_t FB_SPAN_US = 200000UL;  // average over at least this much time (whole turns)
+constexpr float FB_MEAS_ALPHA = 0.5f;      // EMA weight for the measured-Hz low-pass
+constexpr float FB_REF_TAU_S = 0.35f;     // the motor + measurement follow a step with this time constant (bench)
+constexpr float FB_REF_SETTLED = 0.05f; // integrate once the model is within 5 % of the target
+constexpr uint8_t FB_LOST_TICKS = 15;      // 1.5 s of control ticks (a start from rest reads 0 for up to ~1 s)
+constexpr float FB_LOST_MIN_HZ = 9.0f;     // below this a real motor can read 0 (its floor)
+constexpr float FB_PLAUSIBLE = 0.5f;       // integrate only within ±50 % of the model
+constexpr float CAL_DRIVE_MAX_STEP_V = 0.5f; // one Calibration Mode drive request may raise the drive by this much
+
+// Auto Fill (SpeedPulserPro_autoFill.cpp)
+constexpr uint16_t AF_LOW_GRID[] = {10, 20, 30, 40}; // the motor bends most down here
+constexpr uint16_t AF_STEPS[] = {10, 15, 20, 25, 30, 40, 50}; // spacing above 40, first that fits
+constexpr uint16_t AF_MIN_GAP = 5;     // no auto mark this close to an eye mark
+constexpr float AF_MIN_HZ = 9.0f;      // motor floor is ~6-8 Hz at a 4.8 V rail: keep auto marks clear of it
+constexpr float AF_SKIP_HZ = 25.0f;    // an auto mark below this that can't be held is left out
+constexpr float AF_TOL_HZ = 0.15f;     // done when within max(this, AF_TOL_FRAC x target)
+constexpr float AF_TOL_FRAC = 0.005f;
+constexpr float AF_ACCEPT_FRAC = 0.02f; // after AF_MAX_ITERS the best try must be this close
+constexpr uint8_t AF_MAX_ITERS = 8;
+constexpr uint8_t AF_MAX_STALLS = 6;
+constexpr float AF_SLOPE0 = 36.0f;     // Hz per V of drive (TY3816B at a 4.8 V rail), refined as it goes
+constexpr float AF_SLOPE_MIN = 8.0f, AF_SLOPE_MAX = 150.0f;
+constexpr float AF_STEP_FRAC = 0.25f;  // largest drive change per try (fraction of the drive)
+constexpr float AF_STEP_MIN_V = 0.05f;
+constexpr uint16_t AF_SETTLE_START = 25; // ticks (100 ms): first mark, from rest
+constexpr uint16_t AF_SETTLE_LOW = 16;   // after a change, below 25 Hz (slower measurement)
+constexpr uint16_t AF_SETTLE = 12;
+constexpr uint16_t AF_HOLD_LOW = 20;     // averaging, below 25 Hz
+constexpr uint16_t AF_HOLD = 10;
 
 // Speed Input Configuration
-#define incomingType 0
-#define DEFAULT_AVERAGE_FILTER_HALL 6
 #define DEFAULT_AVERAGE_FILTER_RPM 6
 #define durationReset 1500
+#define LOOP_REST_MS 10            // loop() rests this long each pass (V5.09)
+#define GPS_MIN_SPEED_KPH 3       // GPS speed below this reads 0 (standstill noise)
+#define CAN_SCALE_MAX 1000.0f     // CAN speed scale limit (+/-): a typo can't overflow the speed (V5.09)
+#define DSG_RATIO_MIN 0.1f        // DSG gear ratios and final drives, accepted range (V5.09)
+#define DSG_RATIO_MAX 20.0f
+#define DSG_TIRE_CIRC_MIN 0.5f    // tyre circumference (m), accepted range
+#define DSG_TIRE_CIRC_MAX 4.0f
 #define SPEED_OVER_RANGE_LOOPS 10 // speed task loops (10 x 50 ms = 0.5 s) a source must stay above Max Speed before the needle parks at Max Speed
 
 // ===========================================================================
@@ -148,11 +211,8 @@
 #define baudGPS 9600 // default low baud rate for Neo-6M GPS module (can be raised to 115200 after init)
 
 // Motor Configuration
-#define speedMultiplier 1
-#define mphFactor 0.621371
 
 // DSG Configuration
-#define PI 
 #define LEVER_P 0x8
 #define LEVER_R 0x7
 #define LEVER_N 0x6
@@ -161,8 +221,6 @@
 #define LEVER_TIPTRONIC_ON 0xE
 #define LEVER_TIPTRONIC_UP 0xA
 #define LEVER_TIPTRONIC_DOWN 0xB
-#define gearPause 20
-#define rpmPause 50
 
 // DSG speed smoothing: gear and RPM arrive on separate CAN frames, so during a
 // shift they are momentarily inconsistent and the calculated speed spikes/bucks.

@@ -4,6 +4,10 @@
 #include "freertos/semphr.h"
 #include <math.h>
 
+#if serialDebugGPS
+static void printFloat(float val, bool valid, int len, int prec); // debug print helper (end of file)
+#endif
+
 static unsigned long lastGPSData = 0;
 static const unsigned long GPS_TIMEOUT = 10000; // 10 seconds
 static unsigned long charsProcessedPrevious = 0;
@@ -73,7 +77,8 @@ bool gpsAutoRateApplyPending()
   if (gpsPendingRateApply)
   {
     gpsPendingRateApply = false;
-    return true;
+    // 1 Hz is what the module runs at from power-up: nothing to send (V5.08).
+    return gpsUpdateRateHz > 1;
   }
   return false;
 }
@@ -522,8 +527,8 @@ void parseGPS()
   if (millis() - lastGPSData > GPS_TIMEOUT)
   {
     gpsUnavailable = true;
-    hasError = true;
     hasGPS = false;
+    gpsSpeed = 0; // V5.06: an unplugged module used to leave the last speed on the needle
     return;
   }
 
@@ -532,8 +537,8 @@ void parseGPS()
   {
     gpsSatStableStartMs = 0; // Reset stability timer if satellites lost.
     gpsUnavailable = false;
-    hasError = false;
     hasGPS = false;
+    gpsSpeed = 0; // V5.06: no fix (tunnel) used to hold the last speed on the needle
     return;
   }
 
@@ -562,10 +567,12 @@ void parseGPS()
     }
 
     gpsUnavailable = false;
-    hasError = false;
     hasGPS = true;
 
-    gpsSpeed = int(gps.speed.kmph());
+    // A speed older than 1.5 s means the fix stopped updating: read 0, don't hold it.
+    gpsSpeed = (gps.speed.isValid() && gps.speed.age() < 1500) ? (uint16_t)lroundf(gps.speed.kmph()) : 0;
+    if (gpsSpeed < GPS_MIN_SPEED_KPH)
+      gpsSpeed = 0; // a parked GPS wanders 1-2 km/h: don't flick the needle (V5.08)
 #if serialDebugGPS
     Serial.print(F("[GPS] Satellites: "));
     Serial.println(gps.satellites.value());

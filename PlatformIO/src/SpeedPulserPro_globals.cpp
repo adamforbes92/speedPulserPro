@@ -13,32 +13,24 @@ uint8_t analyzerProtocol = ANALYZER_PROTOCOL_GVRET;
 // Global Object Definitions
 // ============================================================================
 // LEDC PWM is configured via driver/ledc.h - no object needed
-RunningMedian samples = RunningMedian(10); // for median filtering of speed input (Hall)
 RunningMedian samplesRPM = RunningMedian(10); // for median filtering of RPM input
-#if SPP_HAS_VR
-RunningMedian samplesVR = RunningMedian(10); // for median filtering of speed input (VR)
-#endif
 HardwareSerial ss(2);
 TinyGPSPlus gps;
-Preferences pref;
+Preferences settingsStore;
 AsyncWebServer server(80);
-hw_timer_t* timer0 = NULL;
 TaskHandle_t taskCANRxHandle = NULL;
 
 // ============================================================================
 // RPM and PWM Variables
 // ============================================================================
-bool rpmTrigger = true;
 long frequencyRPM = 20;
-long pwmFrequency = 10000;
-long dutyCycle = 0;
-int pwmResolution = 12;
-unsigned long dutyCycleIncoming = 0;
+uint16_t needleTargetSpeed = 0;  // what the needle should show now (dial units)
+float hallFrequencyHz = 0.0f;   // hall speed input (Hz), averaged
 float rpmInputHz = 0.0f;
 #if SPP_HAS_VR
-volatile unsigned long dutyCycleIncomingVR = 0;
+float vrFrequencyHz = 0.0f;     // VR speed input (Hz), averaged
 #endif
-uint16_t appliedDutyCycle = 0;
+uint16_t motorDutyApplied = 0;
 
 // Motor direction: false = normal (pinMotorDirection LOW), true = reverse (HIGH)
 bool reverseDirection = false;
@@ -50,16 +42,10 @@ uint8_t speedInputBias = SPEED_BIAS_NONE; // S3 board: speed-input pull-up/down 
 // ============================================================================
 // Closed-Loop Motor Feedback (PID)
 // ============================================================================
-volatile uint32_t feedbackCount = 0;
-bool feedbackEnable = false;
-float pidKp = 0.15f;
-float pidKi = 1.3f;
-float pidKd = 0.0f;
-float feedbackDeadband = 1.5f;    // PID deadband (Hz); within this error P/D are silenced (integral still trims). 0 = off
-uint16_t feedbackMaxFreq = 254;   // bench-baked: motor tacho Hz at maxSpeed
-uint16_t feedbackMinSpeed = 40;   // kph; below this target the loop runs open-loop
+bool feedbackEnable = true;       // S3 drive trim (SpeedPulser V5.04 bench-tuned defaults)
+float feedbackDeadband = 0.3f;    // trim ignores errors smaller than this (Hz)
+uint16_t feedbackMinSpeed = 8;    // no trim below this needle speed (dial units)
 uint16_t measuredSpeed = 0;
-int16_t pidCorrection = 0;
 float measuredFreqHz = 0.0f;
 float measuredFreqRawHz = 0.0f;
 bool feedbackAvailable = false;   // true once a real tacho signal (GPIO feedback) has been seen this session
@@ -71,11 +57,9 @@ bool feedbackMissing = false;     // true when the motor runs but no feedback si
 uint16_t vehicleRPMCAN = 0;
 uint16_t vehicleRPM = 0;
 uint16_t vehicleRPMHall = 0;
-uint16_t calcSpeed = 0;
+float inputSpeedKph = 0.0f;       // the selected source's speed (km/h), in every mode (V5.09)
 uint16_t vehicleSpeed = 0;
 uint16_t vehicleSpeedHall = 0;
-uint16_t vehicleSpeedCAN = 0;
-uint16_t vehicleSpeedGPS = 0;
 uint16_t hallSpeed = 0;
 #if SPP_HAS_VR
 uint16_t vehicleSpeedVR = 0;
@@ -91,14 +75,14 @@ uint16_t tp20Speed = 0;
 // ============================================================================
 // Motor Performance and Limits
 // ============================================================================
-uint16_t motorPerformance[385];
+uint16_t presetSpeedTable[385];
 bool updateMotorPerformance = false;
-uint8_t motorPerformanceVal = 1;
-uint16_t maxFreqHall = 200;
-uint16_t maxFreqCAN = 200;
+uint8_t presetId = 1;
+float hallPulsesPerKm = SENSOR_PULSES_PER_KM_DEFAULT; // hall speed sensor (3600 = 1 Hz per km/h)
 #if SPP_HAS_VR
-uint16_t maxFreqVR = 200;
+float vrPulsesPerKm = SENSOR_PULSES_PER_KM_DEFAULT;   // VR speed sensor
 #endif
+uint16_t inputSmoothingMs = INPUT_SMOOTHING_MS_DEFAULT;
 uint16_t maxSpeed = 200;
 uint16_t maxRPM = 230;
 uint16_t clusterRPMLimit = 7000;
@@ -106,39 +90,32 @@ uint16_t clusterRPMLimit = 7000;
 // ============================================================================
 // Speed Offset and Calibration
 // ============================================================================
-uint8_t speedOffset = 0;
-bool speedOffsetPositive = false;
-bool useGlobalSpeedOffset = true;
+int16_t globalSpeedOffsetKph = 0;  // fixed offset added to every speed (km/h, + or -)
 bool useSpeedOffsetCurve = false;
-int16_t speedOffsetCurveOffsets[SPEED_OFFSET_CURVE_POINTS] = {0, 0, 0, 0, 0};
-int16_t currentSpeedOffset = 0;
+int16_t speedOffsetCurveOffsets[SPEED_OFFSET_CURVE_POINTS] = {0, 0, 0, 0, 0}; // at 25/75/125/175/225 km/h
+float speedOffsetApplied = 0.0f;   // offset applied to the current speed (km/h)
 float stepRPM = 14;
 float stepSpeed = 17;
-uint8_t averageFilterHall = DEFAULT_AVERAGE_FILTER_HALL;
 uint8_t averageFilterRPM = DEFAULT_AVERAGE_FILTER_RPM;
-#if SPP_HAS_VR
-uint8_t averageFilterVR = DEFAULT_AVERAGE_FILTER_HALL;
-#endif
 float filteredRPMHz = 0.0f;
 
 // ============================================================================
 // Test Variables
 // ============================================================================
-bool testSpeedo = false;
+bool speedTestOn = false;
 bool testRPM = false;
-bool testCal = false;
-long tempSpeed = 0;
+bool calibrationModeOn = false;
+long speedTestKph = 0;
 long tempRPM = 0;
-long tempDutyCycle = 0;
-bool tempNeedleSweep = false;
+long calibrationProbeDuty = 0;
+bool needleSweepRequested = false;
 
 // ============================================================================
 // Configuration Variables
 // ============================================================================
-bool hasNeedleSweep = false;
-bool linearSpeedSweep = true;
+bool needleSweepOnBoot = false;
 bool coilType = true;
-bool convertToMPH = false;
+bool clusterInMph = false;
 bool broadcastSpeedEnabled = false;
 uint32_t broadcastSpeedID = HALDEX_ID;
 uint8_t broadcastSpeedDLC = 8;
@@ -149,8 +126,7 @@ float broadcastSpeedScale = 0.781f; // ~1/1.28 — default Haldex scaling
 int16_t broadcastSpeedOffset = 0;
 uint8_t broadcastSpeedData[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 uint16_t broadcastSpeedValue = 0;
-uint8_t sweepSpeed = 18;
-uint8_t speedType = 0;
+uint8_t needleSweepSpeed = 18;
 
 // ============================================================================
 // Speed Input Selection
@@ -191,31 +167,19 @@ float dsgTireCirc = 1.885f; // PI * 0.6m rolling diameter
 // ============================================================================
 // Vehicle Status Variables
 // ============================================================================
-bool vehicleEML = false;
-bool vehicleEPC = false;
-bool vehicleReverse = false;
-bool vehiclePark = false;
 
 // ============================================================================
 // Timing Variables
 // ============================================================================
-uint32_t lastMillis = 0;
-uint32_t lastMillis2 = 0;
 uint32_t lastCAN = 0;
-unsigned long lastPulse = 0;
 unsigned long lastPulseRPM = 0;
-#if SPP_HAS_VR
-volatile unsigned long lastPulseVR = 0;
-#endif
 
 // ============================================================================
 // System Status Variables
 // ============================================================================
-bool hasError = false;
 bool hasCAN = false;
 bool hasGPS = false;
 bool gpsUnavailable = false;
 bool ledOnboard = false;
 int ledCounter = 0;
-int rawCount = 0;
 int rawCountRPM = 0;

@@ -63,7 +63,7 @@ static bool tp20SendKWP(uint8_t seq, const uint8_t *payload, uint8_t len)
 // kwpBuf must be at least 64 bytes.
 static uint8_t tp20CollectResponse(uint8_t *kwpBuf, uint8_t kwpBufLen, uint32_t timeoutMs)
 {
-    uint32_t deadline    = millis() + timeoutMs;
+    const uint32_t start = millis(); // elapsed time (V5.09): "now >= deadline" broke at the 49.7-day wrap
     uint8_t  collected   = 0;
     uint8_t  expectedLen = 0;
     bool     started     = false;
@@ -71,9 +71,9 @@ static uint8_t tp20CollectResponse(uint8_t *kwpBuf, uint8_t kwpBufLen, uint32_t 
     twai_message_t frame;
 
     for (;;) {
-        uint32_t now = millis();
-        if (now >= deadline) break;
-        uint32_t remaining = deadline - now;
+        const uint32_t elapsed = millis() - start;
+        if (elapsed >= timeoutMs) break;
+        uint32_t remaining = timeoutMs - elapsed;
 
         if (xQueueReceive(tp20RxQueue, &frame, pdMS_TO_TICKS(remaining < 20u ? remaining : 20u)) != pdTRUE)
             continue;
@@ -90,6 +90,7 @@ static uint8_t tp20CollectResponse(uint8_t *kwpBuf, uint8_t kwpBufLen, uint32_t 
         if (type == 0x02u) {
             if (frame.data[1] == 0x00u && !started) {
                 // First data frame: [2x][00][len][payload...]
+                if (frame.data_length_code < 3u) continue; // too short to hold a header (V5.09)
                 expectedLen = frame.data[2];
                 uint8_t chunk = (uint8_t)(frame.data_length_code - 3u);
                 if (collected + chunk > kwpBufLen) break;
@@ -98,6 +99,7 @@ static uint8_t tp20CollectResponse(uint8_t *kwpBuf, uint8_t kwpBufLen, uint32_t 
                 started = true;
             } else if (started) {
                 // Consecutive data frame: [2x][payload...]
+                if (frame.data_length_code < 1u) continue; // empty frame: nothing to copy (V5.09)
                 uint8_t chunk = (uint8_t)(frame.data_length_code - 1u);
                 if (collected + chunk > kwpBufLen) chunk = kwpBufLen - collected;
                 memcpy(&kwpBuf[collected], &frame.data[1], chunk);
@@ -146,9 +148,9 @@ static bool tp20Connect()
 
     // Wait for positive response on 0x202 (0x200 + module_addr)
     twai_message_t rsp;
-    uint32_t deadline = millis() + 1000u;
+    uint32_t waitStart = millis();
     bool gotSetupAck = false;
-    while (millis() < deadline) {
+    while (millis() - waitStart < 1000u) {
         if (xQueueReceive(tp20RxQueue, &rsp, pdMS_TO_TICKS(20)) == pdTRUE) {
             if (rsp.identifier == TP20_DSG_SETUP_RX &&
                 rsp.data_length_code >= 2 &&
@@ -165,8 +167,8 @@ static bool tp20Connect()
     uint8_t chanParam[8] = {0xA0u, 0x0Fu, 0x8Au, 0xFFu, 0x32u, 0xFFu, 0x00u, 0x00u};
     if (!canSend(TP20_TX_ID, chanParam, 8)) return false;
 
-    deadline = millis() + 500u;
-    while (millis() < deadline) {
+    waitStart = millis();
+    while (millis() - waitStart < 500u) {
         if (xQueueReceive(tp20RxQueue, &rsp, pdMS_TO_TICKS(20)) == pdTRUE) {
             if (rsp.identifier == TP20_RX_ID &&
                 rsp.data_length_code >= 1 &&
@@ -215,8 +217,13 @@ void taskTP20(void *arg)
 
         // Connected - poll measuring block 01 continuously
         uint32_t lastPollMs = 0;
+        uint32_t lastGoodReplyMs = millis(); // V5.06: ~1 s of bad / no replies = speed 0 + reconnect
 
         while (useTP20 && hasCAN) {
+            if (millis() - lastGoodReplyMs > 1000u) {
+                tp20Speed = 0;
+                break;
+            }
             uint32_t now = millis();
             if ((now - lastPollMs) < 100u) {
                 vTaskDelay(pdMS_TO_TICKS(10));
@@ -242,6 +249,7 @@ void taskTP20(void *arg)
             tp20Speed = (uint16_t)((float)raw / TP20_SPEED_SCALE_DIV + 0.5f);
 
             DEBUG_UDS("TP2.0 raw=%u  speed=%u km/h", raw, tp20Speed);
+            lastGoodReplyMs = millis();
         }
 
         // Lost connection or disabled
@@ -301,8 +309,16 @@ void taskUDS(void *arg)
 
         // ── Session open: poll speed DID, send TesterPresent every 375 ms ──
         uint32_t lastTP = millis();
+        // V5.06: a gearbox that stops answering (reset, session dropped) used to
+        // leave its last speed on the needle for ever. ~1 s without a good reply:
+        // speed 0, and the outer loop opens a new session.
+        uint32_t lastGoodReplyMs = millis();
 
         while (useUDS && hasCAN) {
+            if (millis() - lastGoodReplyMs > 1000u) {
+                udsSpeed = 0;
+                break;
+            }
             if ((millis() - lastTP) >= 375u) {
                 // TesterPresent with suppress-positive-response bit
                 const uint8_t tpReq[] = {UDS_SID_TESTER_PRESENT, 0x80u};
@@ -344,14 +360,15 @@ void taskUDS(void *arg)
                 // (See SpeedPulserPro_uds.h - confirm raw/10 on the car.)
                 if (pciLen >= 5u) {
                     int16_t rawSpeed = (int16_t)(((uint16_t)rsp.data[5] << 8) | rsp.data[4]);
-                    int16_t kmh = rawSpeed / 10;         // 0.1 km/h per LSB
-                    udsSpeed = (kmh > 0) ? (uint16_t)kmh : 0;
+                    // 0.1 km/h per LSB, rounded
+                    udsSpeed = (rawSpeed > 0) ? (uint16_t)((rawSpeed + 5) / 10) : 0;
                 } else {
                     // Single-byte km/h (OBD2-style) fallback
                     udsSpeed = rsp.data[4];
                 }
 
                 DEBUG_UDS("DID 0x%04X  speed=%u km/h", respDID, udsSpeed);
+                lastGoodReplyMs = millis();
                 break;
             }
 

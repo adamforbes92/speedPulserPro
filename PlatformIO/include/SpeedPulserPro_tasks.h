@@ -30,9 +30,8 @@ void taskDiagnostics(void *parameter);
 // Task management functions
 void tasksInit();
 void tasksSuspendAll();
+void requestSettingsSave(); // wake the settings task: save now (board test result, table change)
 void tasksResumeAll();
-void tasksCleanup();
-void setBroadcastSpeedTaskEnabled(bool enabled);
 
 // Task priorities (configMAX_PRIORITIES - 1 is highest)
 #define TASK_PRIORITY_EEPROM 1
@@ -43,12 +42,12 @@ void setBroadcastSpeedTaskEnabled(bool enabled);
 #define TASK_PRIORITY_RPM 3
 #define TASK_PRIORITY_BROADCAST 2
 
-// Stack sizes (in 32-bit words, not bytes)
-#define STACK_SIZE_EEPROM 2048
+// Stack sizes in BYTES (ESP-IDF xTaskCreate takes bytes, not words)
+#define STACK_SIZE_EEPROM 4096 // V5.08: was 2048, tight for ~90 NVS writes incl. the drive-table blob
 #define STACK_SIZE_UI 3072
 #define STACK_SIZE_GPS 8192
 #define STACK_SIZE_DSG 2048
-#define STACK_SIZE_SPEED 3072
+#define STACK_SIZE_SPEED 6144 // V5.05: Auto Fill saves the backup table (JSON + NVS) from this task
 #define STACK_SIZE_RPM 2048
 #define STACK_SIZE_BROADCAST 2048
 

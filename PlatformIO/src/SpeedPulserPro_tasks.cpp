@@ -9,6 +9,7 @@
 #include "SpeedPulserPro_uds.h"
 #include "SpeedPulserPro_io.h"
 #include "SpeedPulserPro_voltage.h"
+#include "SpeedPulserPro_driveCal.h"
 
 // Task handles
 TaskHandle_t taskEEPHandle = NULL;
@@ -36,9 +37,17 @@ void taskWriteEEP(void *parameter)
     writeEEP();
     DEBUG_EEP("Settings written to EEPROM");
 
-    // Delay before next write
-    vTaskDelay(pdMS_TO_TICKS(DELAY_EEPROM));
+    // Wait for the next write; requestSettingsSave() cuts the wait short (V5.09).
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(DELAY_EEPROM));
   }
+}
+
+// Save now rather than within 5 s (V5.09): a board test result or a calibration
+// table change was lost if the power went in those 5 s.
+void requestSettingsSave()
+{
+  if (taskEEPHandle != NULL)
+    xTaskNotifyGive(taskEEPHandle);
 }
 
 /**
@@ -112,21 +121,22 @@ void taskParseDSG(void *parameter)
 }
 
 /**
- * Task: Process vehicle speed from selected source
- * Called every DELAY_SPEED milliseconds (50ms)
- * Handles Hall sensor averaging, source selection, speed offset, and test mode
+ * Task: speed source -> needle target -> motor, every DELAY_SPEED (50 ms).
+ *
+ * V5.06 (mirrors SpeedPulser V5.06): the hall / VR inputs are timed pulse by pulse
+ * and averaged over the Smoothing time, km/h = Hz x 3600 / pulses per km (no more
+ * integer map() onto Max Speed + block median). The offset, then km/h -> mph, are
+ * applied in floating point and rounded once (toNeedleTarget). On the S3 the drive
+ * calibration runs on the 100 ms tick; the DevKit writes the preset duty. The DevKit's
+ * legacy PID and the S3's "Voltage Control off" mode are gone.
  */
 void taskProcessSpeed(void *parameter)
 {
   DEBUG_SPD("Speed processing task started");
-#if SPP_HAS_VR
-  int rawCountVR = 0;                              // VR median-filter fill counter
-#endif
-  uint16_t lastValidVehicleSpeed = 0;
-  uint8_t overRangeCount = 0;                     // loops in a row the selected source has read above Max Speed
-  bool prevTestSpeedo = false;                    // Speed Test edge detect (global on/off gate)
-  TickType_t lastTick = xTaskGetTickCount();     // 100 ms measure + control cadence
-  TickType_t motorRunSince = 0;                  // when the motor started running with no feedback yet
+  float lastValidSpeedKph = 0.0f;
+  uint8_t overRangeCount = 0;                 // loops in a row the selected source has read above Max Speed
+  TickType_t lastTick = xTaskGetTickCount();  // 100 ms measure + control cadence
+  TickType_t motorRunSince = 0;               // when the motor started running with no tacho seen yet
 
   while (1)
   {
@@ -141,275 +151,103 @@ void taskProcessSpeed(void *parameter)
 
     // One 100 ms tick for everything that measures or closes a loop: the tacho
     // (and on the S3 the rail) are read here in EVERY mode, so the read-outs never
-    // freeze, and the control laws below run on the same tick with the fresh reading.
+    // freeze, and the drive control below runs on the same tick with the fresh reading.
     const bool tick = (xTaskGetTickCount() - lastTick) >= pdMS_TO_TICKS(100);
     if (tick)
     {
       lastTick = xTaskGetTickCount();
-#if SPP_HAS_VOLTAGE_CTRL
+#if SPP_HAS_VOLTAGE_CTRL // the DevKit has no tacho or rail to measure
       updateMotorRail();
-#endif
       updateMeasuredFreq();
+      autoFillTick(); // Auto Fill sets the calibration drive (no-op unless running)
+#endif
     }
 
-#if SPP_HAS_VOLTAGE_CTRL
-    // S3 board with voltage control engaged: the motor is driven from the drive
-    // calibration (rail + PWM together) instead of the legacy duty tables.
-    const bool voltageMode = voltageControlEnable;
-#else
-    const bool voltageMode = false; // DevKit: PWM motor drive only
-    (void)voltageMode;
-#endif
-
-    // Speed Test acts as a global on/off: the instant it is switched OFF, drop the
-    // held test speed and clear the hall state so the needle returns to rest (or the
-    // live source) instead of sitting at the last test value.
-    if (prevTestSpeedo && !testSpeedo)
-    {
-      lastValidVehicleSpeed = 0;
-      vehicleSpeed = 0;
-      dutyCycle = 0;
-      dutyCycleIncoming = 0;
-      vehicleSpeedHall = 0;
-      hallSpeed = 0;
+    // Speed sensors, measured in every mode so the read-outs never freeze.
+    hallFrequencyHz = measureHallFrequency();
+    const float hallKph = hallFrequencyHz * 3600.0f / hallPulsesPerKm;
+    hallSpeed = (uint16_t)lroundf(hallKph);
+    vehicleSpeedHall = hallSpeed;
 #if SPP_HAS_VR
-      vehicleSpeedVR = 0;
-      vrSpeed = 0;
-      dutyCycleIncomingVR = 0;
-      rawCountVR = 0;
-      samplesVR.clear();
-      resetVRPulseCounter();
+    vrFrequencyHz = measureVRFrequency();
+    const float vrKph = vrFrequencyHz * 3600.0f / vrPulsesPerKm;
+    vrSpeed = (uint16_t)lroundf(vrKph);
+    vehicleSpeedVR = vrSpeed;
 #endif
-      currentSpeedOffset = 0;
-      resetHallMedianFilter();
-      resetHallPulseCounter();
+
 #if SPP_HAS_VOLTAGE_CTRL
-      if (voltageMode)
-      {
-        resetDriveControl();
-        applyMotorDrive(0.0f); // motor off, rail back to minimum
-      }
-      else
-#endif
-      {
-        setMotorDutyRaw(0);
-      }
-    }
-    prevTestSpeedo = testSpeedo;
-
-    // PID may only run when feedback is actually available. If the user enables it
-    // but the PCB has no feedback trace (legacy board) the loop stays open-loop, so
-    // an unaware user can't accidentally drive a closed loop with no measurement.
-    const bool pidActive = feedbackEnable && feedbackAvailable;
-
-    // Feedback-availability signalling for the UI: once the motor has been running
-    // for a moment with no tacho signal seen, mark it missing so the dashboard can
-    // show "N/A" instead of "--". Clears automatically once feedback appears.
-    const TickType_t FB_DETECT_TICKS = pdMS_TO_TICKS(1500);
-    if (appliedDutyCycle > 0)
+    // S3: once the motor has run for a moment with no tacho seen, tell the UI the
+    // feedback signal is missing. The DevKit has no tacho wired.
+    if (motorDutyApplied > 0)
     {
       if (motorRunSince == 0)
-      {
         motorRunSince = xTaskGetTickCount();
-      }
     }
     else
     {
       motorRunSince = 0;
     }
-    feedbackMissing = (!feedbackAvailable && motorRunSince != 0 &&
-                       (xTaskGetTickCount() - motorRunSince) > FB_DETECT_TICKS);
-
-    // Handle Hall sensor pulse processing and averaging
-    if (!testSpeedo && !testCal)
-    {
-      // Windowed frequency: read-and-clear the accumulator once per loop so the
-      // reading is a true average over the window instead of one jittery edge-to-edge
-      // period. Returns <0 when no fresh edges arrived — hold the last value then.
-      float hallHz = readHallHz();
-
-      if ((millis() + 10 - lastPulse) > durationReset)
-      {
-        dutyCycle = 0;
-        dutyCycleIncoming = 0;
-        vehicleSpeedHall = 0;
-        hallSpeed = 0;
-        currentSpeedOffset = 0;
-        resetHallMedianFilter();
-        resetHallPulseCounter();
-      }
-      else if (hallHz >= 0.0f)
-      {
-        dutyCycleIncoming = (unsigned long)(hallHz + 0.5f);
-        uint16_t mappedSpeed = map(dutyCycleIncoming, 0, maxFreqHall, 0, maxSpeed);
-
-        if (averageFilterHall <= 1)
-        {
-          hallSpeed = mappedSpeed;
-          vehicleSpeedHall = hallSpeed;
-          resetHallMedianFilter();
-        }
-        else
-        {
-          if (rawCount < averageFilterHall)
-          {
-            samples.add(mappedSpeed);
-            rawCount++;
-          }
-
-          if (rawCount >= averageFilterHall)
-          {
-            hallSpeed = (uint16_t)samples.getMedian();
-            vehicleSpeedHall = hallSpeed;
-            resetHallMedianFilter();
-          }
-        }
-      }
-    }
-
-#if SPP_HAS_VR
-    // Handle VR (variable-reluctance) pulse processing and averaging — counted and
-    // mapped exactly like the hall input, but with its own frequency/filter state.
-    if (!testSpeedo && !testCal)
-    {
-      float vrHz = readVRHz();
-
-      if ((millis() + 10 - lastPulseVR) > durationReset)
-      {
-        vehicleSpeedVR = 0;
-        vrSpeed = 0;
-        dutyCycleIncomingVR = 0;
-        rawCountVR = 0;
-        samplesVR.clear();
-        resetVRPulseCounter();
-      }
-      else if (vrHz >= 0.0f)
-      {
-        dutyCycleIncomingVR = (unsigned long)(vrHz + 0.5f);
-        uint16_t mappedSpeed = map(dutyCycleIncomingVR, 0, maxFreqVR, 0, maxSpeed);
-
-        if (averageFilterVR <= 1)
-        {
-          vrSpeed = mappedSpeed;
-          vehicleSpeedVR = vrSpeed;
-          rawCountVR = 0;
-          samplesVR.clear();
-        }
-        else
-        {
-          if (rawCountVR < averageFilterVR)
-          {
-            samplesVR.add(mappedSpeed);
-            rawCountVR++;
-          }
-
-          if (rawCountVR >= averageFilterVR)
-          {
-            vrSpeed = (uint16_t)samplesVR.getMedian();
-            vehicleSpeedVR = vrSpeed;
-            rawCountVR = 0;
-            samplesVR.clear();
-          }
-        }
-      }
-    }
-#endif // SPP_HAS_VR
-
-    // Calibration mode drives the raw 12-bit hardware duty directly (0..PWM_DUTY_MAX)
-    if (testCal)
-    {
-#if SPP_HAS_VOLTAGE_CTRL
-      if (voltageMode)
-      {
-        // Drive calibration: the user sets the drive directly (rail first, then
-        // PWM below Minimum Rail) until the needle sits on a mark, then captures it.
-        if (tick)
-        {
-          const uint16_t d = applyMotorDrive(tempDriveV);
-          dutyCycle = d;
-          tempDutyCycle = d;
-          pidCorrection = 0;
-        }
-      }
-      else
+    feedbackMissing = motorRunSince != 0 &&
+                      ((!feedbackAvailable && (xTaskGetTickCount() - motorRunSince) > pdMS_TO_TICKS(1500)) ||
+                       (tachoSignalLost() && !calibrationModeOn));
+#else
+    (void)motorRunSince;
 #endif
-      {
-        dutyCycle = constrain(tempDutyCycle, 0, (long)PWM_DUTY_MAX);
-        setMotorDutyRaw((uint32_t)dutyCycle);
-      }
-      // The tacho readout stays live (measured on the tick above) so measured
-      // speed shows and feedbackAvailable can latch while building a calibration.
+
+    // The selected source's speed, in every mode (V5.09): the CAN broadcast, the
+    // "car stopped" checks and the dashboard use this, not the Speed Test value or
+    // a speed frozen by Calibration Mode. Only one source should be on, but if two
+    // are, the LAST one below wins; activeSpeedSourceName() in _wifi.cpp checks them
+    // in the same order so the web page agrees.
+    float sourceKph = 0.0f;
+    if (useHall)
+      sourceKph = hallKph;
+#if SPP_HAS_VR
+    if (useVR)
+      sourceKph = vrKph;
+#endif
+    if (useECU)
+      sourceKph = ecuSpeed;
+    if (useABS)
+      sourceKph = absSpeed;
+    if (useDSG)
+      sourceKph = dsgSpeed;
+    if (useGPS)
+      sourceKph = gpsSpeed;
+    if (useUDS)
+      sourceKph = udsSpeed;
+    if (useTP20)
+      sourceKph = tp20Speed;
+    if (useAftermarket)
+      sourceKph = aftermarketSpeed;
+    inputSpeedKph = sourceKph > (float)maxSpeed ? (float)maxSpeed : sourceKph;
+
+    // Calibration Mode: the user (or Auto Fill) sets the motor directly — the drive
+    // in volts on the S3, the raw 12-bit duty on the DevKit.
+    if (calibrationModeOn)
+    {
+      needleTargetSpeed = 0;
+#if SPP_HAS_VOLTAGE_CTRL
+      if (tick)
+        applyMotorDrive(calibrationDriveV);
+#else
+      setMotorDutyRaw((uint32_t)constrain(calibrationProbeDuty, 0L, (long)PWM_DUTY_MAX));
+#endif
       vTaskDelay(pdMS_TO_TICKS(DELAY_SPEED));
       continue;
     }
 
-    // Process test mode or select active speed source
-    if (testSpeedo)
+    float speedKph = 0.0f;
+    if (speedTestOn)
     {
-      long requestedTestSpeed = tempSpeed;
-      if (requestedTestSpeed >= 0 && requestedTestSpeed <= maxSpeed)
-      {
-        vehicleSpeed = (uint16_t)requestedTestSpeed;
-        lastValidVehicleSpeed = vehicleSpeed;
-      }
-      else
-      {
-        vehicleSpeed = constrain(lastValidVehicleSpeed, 0, maxSpeed);
-      }
-      dutyCycle = applyConfiguredSpeedOffset(vehicleSpeed);
-      if (convertToMPH)
-      {
-        dutyCycle = dutyCycle * mphFactor;
-      }
+      speedKph = (float)constrain(speedTestKph, 0L, (long)maxSpeed);
     }
     else
     {
-      uint16_t rawVehicleSpeed = 0;
-      // Only one source should be on, but if two are, the LAST one below wins.
-      // activeSpeedSourceName() in _wifi.cpp checks them in the same order so the web page agrees.
-      if (useHall)
+      if (sourceKph <= (float)maxSpeed)
       {
-        rawVehicleSpeed = hallSpeed;
-      }
-#if SPP_HAS_VR
-      if (useVR)
-      {
-        rawVehicleSpeed = vrSpeed;
-      }
-#endif
-      if (useECU)
-      {
-        rawVehicleSpeed = ecuSpeed;
-      }
-      if (useABS)
-      {
-        rawVehicleSpeed = absSpeed;
-      }
-      if (useDSG)
-      {
-        rawVehicleSpeed = dsgSpeed;
-      }
-      if (useGPS)
-      {
-        rawVehicleSpeed = gpsSpeed;
-      }
-      if (useUDS)
-      {
-        rawVehicleSpeed = udsSpeed;
-      }
-      if (useTP20)
-      {
-        rawVehicleSpeed = tp20Speed;
-      }
-      if (useAftermarket)
-      {
-        rawVehicleSpeed = aftermarketSpeed;
-      }
-
-      if (rawVehicleSpeed <= maxSpeed)
-      {
-        vehicleSpeed = rawVehicleSpeed;
-        lastValidVehicleSpeed = vehicleSpeed;
+        speedKph = sourceKph;
+        lastValidSpeedKph = speedKph;
         overRangeCount = 0;
       }
       else if (overRangeCount < SPEED_OVER_RANGE_LOOPS)
@@ -417,67 +255,31 @@ void taskProcessSpeed(void *parameter)
         // Above Max Speed for a moment: treat it as a spike (CAN error value, GPS glitch)
         // and hold the last good speed
         overRangeCount++;
-        vehicleSpeed = constrain(lastValidVehicleSpeed, 0, maxSpeed);
+        speedKph = lastValidSpeedKph;
       }
       else
       {
         // Still above Max Speed after 0.5 s: it's real, so park the needle at Max Speed.
-        // Up to V5.02 it held the last good speed for ever, which is 0 straight after
-        // boot, so an ECU sending more than Max Speed never moved the needle at all
-        vehicleSpeed = maxSpeed;
-      }
-
-      dutyCycle = applyConfiguredSpeedOffset(vehicleSpeed);
-      if (convertToMPH)
-      {
-        dutyCycle = dutyCycle * mphFactor;
+        speedKph = (float)maxSpeed;
       }
     }
+    vehicleSpeed = (uint16_t)lroundf(speedKph);
+    needleTargetSpeed = toNeedleTarget(speedKph);
 
 #if enableDebug && debugSpeed
     if (vehicleSpeed > 0)
-    {
-      DEBUG_SPD("vehicleSpeed=%d km/h  dutyCycle=%ld", vehicleSpeed, dutyCycle);
-    }
+      DEBUG_SPD("vehicleSpeed=%u km/h  needle=%u", vehicleSpeed, needleTargetSpeed);
 #endif
 
-    // Feed-forward base duty: interpolate the requested speed to a 12-bit hardware
-    // duty (finer than the raw calibration grid), mirroring SpeedPulser.
-    // A resolved speed of 0 must park the needle at rest: applyConfiguredSpeedOffset()
-    // adds a positive offset even at 0, so gate on vehicleSpeed to keep the motor off
-    // when Speed Test is disabled (or the slider/source reads 0).
-    uint32_t baseDuty = (vehicleSpeed == 0) ? 0 : speedToPwmDuty((uint16_t)dutyCycle);
-
-    // Drive calibration (S3, voltage control on), closed-loop PID trim, or plain
-    // open-loop write. The drive and the PID run on the fixed 100 ms tick regardless
-    // of the 50 ms task period, so the integral maths stay time-consistent.
 #if SPP_HAS_VOLTAGE_CTRL
-    if (voltageMode)
-    {
-      // Open-loop drive from the calibration marks (+ the optional slow feedback
-      // trim). Runs even at target 0 so the motor stops and the rail parks at min.
-      if (tick)
-      {
-        uint16_t vcTarget = (vehicleSpeed == 0) ? 0 : (uint16_t)dutyCycle;
-        applyDriveControl(vcTarget);
-      }
-    }
-    else
+    // Drive from the calibration marks (+ the slow feedback trim), on the 100 ms
+    // tick. Runs at target 0 too so the motor stops and the rail parks at the floor.
+    if (tick)
+      applyDriveControl(needleTargetSpeed);
+#else
+    setMotorDutyRaw(needleTargetSpeed == 0 ? 0 : speedToPwmDuty(needleTargetSpeed));
 #endif
-    if (pidActive)
-    {
-      if (tick)
-      {
-        int16_t trimmedDuty = applyFeedbackTrim((uint16_t)dutyCycle, (uint16_t)baseDuty);
-        setMotorDutyRaw((uint32_t)trimmedDuty);
-      }
-    }
-    else
-    {
-      setMotorDutyRaw(baseDuty);
-    }
 
-    // Delay before next processing
     vTaskDelay(pdMS_TO_TICKS(DELAY_SPEED));
   }
 }
@@ -622,13 +424,13 @@ void taskDiagnostics(void *parameter)
           (unsigned long)(millis() / 1000UL),
           (unsigned)ESP.getFreeHeap(),
           (unsigned)ESP.getMinFreeHeap());
-    DEBUG_SPD("vehicle=%u  hall=%u  can=%u  gps=%u  dsg=%u  duty=%ld",
-              vehicleSpeed, vehicleSpeedHall, vehicleSpeedCAN,
-              vehicleSpeedGPS, dsgSpeed, dutyCycle);
+    DEBUG_SPD("vehicle=%u  hall=%u (%.1f Hz)  gps=%u  dsg=%u  needle=%u  duty=%u",
+              vehicleSpeed, hallSpeed, hallFrequencyHz, gpsSpeed, dsgSpeed,
+              needleTargetSpeed, motorDutyApplied);
     DEBUG_RPM("vehicleRPM=%u  hallRPM=%u  canRPM=%u  freqRPM=%ld",
               vehicleRPM, vehicleRPMHall, vehicleRPMCAN, frequencyRPM);
-    DEBUG_FB("enable=%d  measured=%u kph  freq=%.1f Hz  correction=%d",
-             feedbackEnable ? 1 : 0, measuredSpeed, measuredFreqHz, pidCorrection);
+    DEBUG_FB("enable=%d  measured=%u  freq=%.1f Hz",
+             feedbackEnable ? 1 : 0, measuredSpeed, measuredFreqHz);
     DEBUG_DSG("speed=%u kph  gear=%u", dsgSpeed, gear);
 
     vTaskDelay(pdMS_TO_TICKS(1000));
@@ -774,11 +576,6 @@ void tasksInit()
   }
 }
 
-void setBroadcastSpeedTaskEnabled(bool /*enabled*/)
-{
-  // No-op: the task runs continuously and checks broadcastSpeedEnabled each cycle.
-}
-
 /**
  * Suspend all background tasks
  * Useful when performing critical operations
@@ -828,51 +625,3 @@ void tasksResumeAll()
   DEBUG("All tasks resumed");
 }
 
-/**
- * Clean up and delete all tasks
- * Called at shutdown
- */
-void tasksCleanup()
-{
-  if (taskEEPHandle != NULL)
-  {
-    vTaskDelete(taskEEPHandle);
-    taskEEPHandle = NULL;
-  }
-  if (taskUIUpdateHandle != NULL)
-  {
-    vTaskDelete(taskUIUpdateHandle);
-    taskUIUpdateHandle = NULL;
-  }
-  if (taskGPSHandle != NULL)
-  {
-    vTaskDelete(taskGPSHandle);
-    taskGPSHandle = NULL;
-  }
-  if (taskDSGHandle != NULL)
-  {
-    vTaskDelete(taskDSGHandle);
-    taskDSGHandle = NULL;
-  }
-  if (taskSpeedHandle != NULL)
-  {
-    vTaskDelete(taskSpeedHandle);
-    taskSpeedHandle = NULL;
-  }
-  if (taskRPMHandle != NULL)
-  {
-    vTaskDelete(taskRPMHandle);
-    taskRPMHandle = NULL;
-  }
-  if (taskBroadcastSpeedHandle != NULL)
-  {
-    vTaskDelete(taskBroadcastSpeedHandle);
-    taskBroadcastSpeedHandle = NULL;
-  }
-  if (taskDiagHandle != NULL)
-  {
-    vTaskDelete(taskDiagHandle);
-    taskDiagHandle = NULL;
-  }
-  DEBUG("All tasks cleaned up");
-}

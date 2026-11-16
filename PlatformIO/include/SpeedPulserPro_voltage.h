@@ -22,11 +22,11 @@
 //
 // V5.01 — DRIVE (ported from SpeedPulser V5.01): the motor is commanded with one
 // number, the drive in volts (rail volts x PWM fraction, 0..Maximum Rail). Down to
-// Minimum Rail x Nominal PWM the PWM is held at Nominal and only the rail moves
-// (smooth low-voltage running); below that the rail sits at Minimum Rail and the
-// PWM falls to zero, so the drive (Minimum Rail is fixed at RAIL_V_FLOOR, the most
-// rail-only range there is) reaches all the way to a stopped needle. Calibration
-// captures needle marks against drive (see SpeedPulserPro_driveCal.h).
+// Minimum Rail x Nominal PWM the PWM is held at Nominal and only the rail moves;
+// below that the rail sits at Minimum Rail and the PWM falls to zero, so the drive
+// reaches all the way to a stopped needle. V5.05: Minimum Rail is a setting
+// (default 4.8 V, see SpeedPulserPro_voltage.cpp). Calibration captures needle
+// marks against drive (see SpeedPulserPro_driveCal.h).
 // ---------------------------------------------------------------------------
 
 // ===== Rail model (rev6 values — identical network to SpeedPulser V5) =====
@@ -39,8 +39,12 @@
 #define RAIL_V_FLOOR       3.0f     // ~100 % V_ADJ duty: lowest rail the injection can reach
 #define RAIL_V_CEIL       12.0f     // firmware ceiling: motor rating, C21's voltage rating, and the
                                     // ADC read-back saturates at ~12.2 V (2.5 V at the pin)
-#define RAIL_V_LEGACY      9.0f     // rail held when voltage control is OFF: the duty presets
-                                    // were captured on the old fixed ~9 V supply
+#define RAIL_V_MAX_DEFAULT 8.0f    // V5.08 Maximum Rail default (new units): room for 240-300 km/h dials, raise to 12 V if needed
+#define RAIL_OV_MARGIN_V   2.0f     // over-voltage: the rail this far above its command...
+#define RAIL_OV_TICKS      5        // ...for this many 100 ms reads (0.5 s)...
+#define RAIL_OV_SETTLE_MS  3000     // ...with the command steady this long (a lowered rail falls slowly)
+#define RAIL_V_MIN_DEFAULT 4.8f    // V5.05 Minimum Rail default (SpeedPulser V5.04): the TY3816B's driver
+                                    // needs ~4.75 V+ to run smoothly at low speed (bench, 2026-11-15)
 
 // ===== Rail read-back divider (V_MOT_SENSE) =====
 #define RAIL_SENSE_R_TOP_K 39.0f    // R33 (kΩ) rail -> IO4
@@ -50,21 +54,23 @@
 extern bool  boardHasVoltageControl;  // always true on an S3 build (the PCB defines it, not a strap)
 extern bool  boardIdStrapOk;          // BOARD_ID (IO7, R12 1k) read LOW at boot — sanity check only
 extern bool  buckEnabled;             // true once the buck supply has been enabled
-extern float lastVoltageCmd;          // last commanded rail as 0..1 of RAIL_V_FLOOR..RAIL_V_CEIL (charts)
+extern volatile bool railTripped;    // rail read too high: motor + buck off until a reboot (latched)
+extern float railTripV;              // the rail reading that tripped it
 extern float lastRailCmdV;            // last commanded motor rail (V)
 extern float lastPwmFrac;             // last motor PWM fraction applied by the drive (0..1)
 extern float lastDriveV;              // last drive applied (V = rail x PWM)
 extern float motorRailV;              // measured motor rail (V), smoothed (V_MOT_SENSE)
 
-// User configuration (persisted in EEP)
-extern bool  voltageControlEnable;   // master toggle; when off the rail holds RAIL_V_LEGACY and runs legacy PWM
-extern float vcPwmNominal;           // PWM fraction held while the rail does the work
-extern float vcRailMaxV;             // highest rail used (V); the drive tops out at this x 100 % PWM
-extern float vcTrimGain;             // feedback trim: relative drive change per second per unit relative Hz error
-extern float vcTrimLimit;            // feedback trim authority (fraction of the calibrated drive, e.g. 0.2 = ±20 %)
+// User configuration (persisted). The S3 board always runs on the drive
+// calibration (V5.06: the "Voltage Control off" fixed-rail mode is gone).
+extern float pwmNominal;           // PWM fraction held while the rail does the work
+extern float railMaxV;             // highest rail used (V); the drive tops out at this x 100 % PWM
+extern float railMinV;             // rail held at the low end (V) while the PWM falls to zero
+extern float trimGain;             // feedback trim: relative drive change per second per unit relative Hz error
+extern float trimLimit;            // feedback trim authority (fraction of the calibrated drive, e.g. 0.2 = ±20 %)
 
 // Calibration: drive applied in calibration mode (V)
-extern float tempDriveV;
+extern float calibrationDriveV;
 
 // ===== Board test (Test Board button) =====
 enum BoardTestCode : uint8_t {
@@ -75,6 +81,10 @@ enum BoardTestCode : uint8_t {
     BT_NO_RESPONSE  = 4,  // rail is there but does not follow V_ADJ
     BT_OUT_OF_RANGE = 5,  // follows V_ADJ but far from the expected voltages (check R6/R11/R8/R9/R32)
 };
+#define BOARD_TEST_BOTTOM_V 5.0f   // Test Board steps: from here...
+#define BOARD_TEST_TOP_V 10.0f     // ...up to this, or Maximum rail if that is lower...
+#define BOARD_TEST_MIN_TOP_V 6.0f  // ...which must be at least this
+#define BOARD_TEST_HANDOVER_MS 150 // the speed task stands back within one loop (50 ms)
 #define BOARD_TEST_POINTS 3
 extern volatile bool boardTestActive;   // true while the test owns the motor/rail (speed task yields)
 extern uint8_t boardTestCode;           // BoardTestCode of the last run (persisted)

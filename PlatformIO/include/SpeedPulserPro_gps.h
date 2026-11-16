@@ -5,7 +5,6 @@
 
 
 void parseGPS();
-static void printFloat(float val, bool valid, int len, int prec);
 
 // Initialize GPS serial at default baud on startup (9600). Returns selected baud.
 unsigned long initGPS();

@@ -6,7 +6,7 @@
 
 // ===== Motor PWM (mirrors SpeedPulser) =====
 // Hardware PWM runs at 12-bit (4096 levels) for fine low-speed granularity, while the
-// calibration tables (motorPerformance[]) stay in their captured legacy 10-bit type.
+// calibration tables (presetSpeedTable[]) stay in their captured legacy 10-bit type.
 // DUTY_SCALE_SHIFT bridges the two; PWM_DUTY_MAX is full-scale (100% = ~4.0 V).
 #define PWM_RESOLUTION   12
 #define CAL_RESOLUTION   10
@@ -27,30 +27,33 @@
 #define VADJ_DUTY_MAX      ((1u << VADJ_RESOLUTION) - 1)
 #endif
 
-// Input signal handlers
-void incomingHz();
-void incomingMotorSpeed();
+// ===== Speed sensor inputs (V5.06, mirrors SpeedPulser V5.06) =====
+// Hall (and VR on the S3): each interrupt keeps its pulse times; the speed task
+// averages them over inputSmoothingMs. Speed (km/h) = Hz x 3600 / pulses per km.
+#define INPUT_TIMEOUT_MS 1500          // no pulse for this long = stopped...
+#define INPUT_TIMEOUT_MAX_MS 5000      // ...longer for a slow sensor (V5.09), up to this:
+#define INPUT_TIMEOUT_SLOW_KPH 10.0f   //    INPUT_TIMEOUT_SLOW_PERIODS pulse periods at this speed
+#define INPUT_TIMEOUT_SLOW_PERIODS 2.5f
+#define KPH_TO_MPH 0.621371f
+void incomingHz();                     // hall speed interrupt
+float measureHallFrequency();          // hall input (Hz), averaged; 0 = stopped
+#if SPP_HAS_VR
+void incomingVR();                     // VR speed interrupt (S3)
+float measureVRFrequency();            // VR input (Hz), averaged; 0 = stopped
+#endif
+void updateInputGlitchFilters();       // call when a pulses-per-km setting or maxSpeed changes
+uint16_t toNeedleTarget(float speedKph); // km/h -> offset -> dial units (what the needle shows)
 
-// Windowed input-frequency readers — read-and-clear the ISR accumulators and return
-// the averaged frequency in Hz, or <0 when no fresh edges arrived (hold last value).
-float readHallHz();
+// Engine RPM input (windowed): read-and-clear, Hz or <0 when no fresh edges arrived.
+void incomingMotorSpeed();
 float readRPMHz();
-void resetHallPulseCounter(); // full reset (incl. edge reference) on timeout/test transitions
 void resetRPMPulseCounter();
 
-#if SPP_HAS_VR
-// Variable-reluctance speed input (S3 board only) — counted like the hall input
-void incomingVR();
-float readVRHz();
-void resetVRPulseCounter();
-#endif
-
-// Closed-loop motor feedback (PID)
-void feedbackPulse();                                       // motor feedback ISR
-void resetPid();                                            // clear PID accumulators
-float updateMeasuredFreq();                                 // measure + publish motor tacho frequency (Hz) — 100 ms cadence
-int16_t applyFeedbackTrim(uint16_t targetSpeed, uint16_t baseDuty); // PID duty correction (uses this tick's measurement)
-float speedToTachoHz(float speed);                          // tacho Hz expected at a dial speed (drive table, else legacy linear)
+// Motor tacho (S3 board)
+void feedbackPulse();                  // motor tacho interrupt
+float updateMeasuredFreq();            // measure + publish the tacho frequency (Hz), 100 ms cadence
+bool tachoSignalLost();                // S3: the tacho went silent while the motor should turn (feedback dropped)
+float speedToTachoHz(float speed);     // tacho Hz expected at a dial speed (drive table; 0 without one)
 
 // RPM output setup and frequency control
 void setupTimer();
@@ -61,7 +64,6 @@ uint16_t findClosestMatch(uint16_t val);
 uint32_t speedToPwmDuty(uint16_t speedKph); // speed -> interpolated 12-bit hardware duty
 
 #if SPP_HAS_VOLTAGE_CTRL
-void syncFeedbackMaxFreq();               // re-derive feedbackMaxFreq (Hz at maxSpeed) from the drive table
 // Last ~1 s of tacho: mean, spread ((max-min)/mean, %) and drift (newer half-second
 // mean minus older half-second mean, Hz).
 bool feedbackHzWindow(float &meanHz, float &spreadPct, float &driftHz);
@@ -85,16 +87,10 @@ inline bool feedbackHzSteady(float meanHz, float spreadPct, float driftHz)
 // S3 board: open-loop drive from the calibration table + optional slow feedback trim
 uint16_t applyDriveControl(uint16_t targetSpeed); // returns the raw PWM duty applied
 void resetDriveControl();                 // drop the feedback trim
-extern float driveTrim;                   // feedback trim on the calibrated drive (fraction, ±vcTrimLimit)
+extern float driveTrim;                   // feedback trim on the calibrated drive (fraction, ±trimLimit)
 #endif
 
-// Speed offset helpers
-void normaliseSpeedOffsetCurve();
-int16_t getCurveOffsetForSpeed(uint16_t speedKph);
-uint16_t applyConfiguredSpeedOffset(uint16_t speedKph);
-
-// Filter buffer management
-void resetHallMedianFilter();
+// RPM filter buffer
 void resetRPMMedianFilter();
 
 #endif

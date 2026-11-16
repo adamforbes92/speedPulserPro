@@ -1,2096 +1,1399 @@
-document.addEventListener('DOMContentLoaded', initApp);
+'use strict';
+// SpeedPulser / SpeedPulser Pro web UI: ONE file, the same in both projects (V5.09).
+// Copy it to both data/ folders unchanged. It talks to the JSON API in
+// speedPulser_webserver.cpp / SpeedPulserPro_wifi.cpp, which use the same names.
+// Every setting control carries data-key="<API key>"; the value shown is always the
+// one the unit replied it kept (clamped or refused values snap back).
+// What a product or board doesn't have (Pro: CAN, GPS, tach, speed sources;
+// SpeedPulser: nothing extra) simply isn't in its index.html, and every part of
+// this file that needs such an element skips itself when it isn't there.
 
-let settingsLoaded = false;
-let currentCalibrationId = 1;
+const STATUS_POLL_MS = 250;
+const PWM_DUTY_MAX = 4095;
+const CUSTOM_CAL_ID = 200;
+const IS_PRO = /Pro/.test(document.title); // only for names: the page markup decides the rest
+const PREFS_KEY = IS_PRO ? 'speedPulserProUi' : 'speedPulserUi'; // per-browser: open cards, dial gauges
 
-// Tab navigation
-function initApp() {
-  initNavigation();
-  initControls();
-  initGaugeUI();
-  initCalBuilder();
-  initVoltageCal();
-  // list, settings, cal builder state, the curve, then (S3 only) the Test Board result
-  fetchCalibrations().then(fetchSettings).then(refreshCalState).then(fetchCalCurve)
-    .then(() => { if (boardHasVc) fetchBoardTest(); });
-  fetchStatus();    // Initial status fetch
-  setInterval(fetchStatus, 200);  // Continue fetching live data only
-  window.addEventListener('resize', scheduleCalDraw);
+let settings = {};            // last full settings from the unit
+let isVoltageBoard = false;   // S3 board (buck voltage control) vs DevKit (PWM only)
+let dialUnit = 'km/h';        // what the needle reads
+let lastStatus = {};          // last /api/status
+
+document.addEventListener('DOMContentLoaded', init);
+
+async function init() {
+  initTabs();
+  initCards();
+  initSliderTouchGuard();
+  initFocusRelease();
+  initSettingControls();
+  initSensorPresets();
+  initButtons();
+  initGpsRate();
+  initDriveCalibration();
+  initCalibrationBuilder();
+  initExportImport();
+  initStartupLog();
+  // Keep trying until the unit answers: until then nothing board-specific can show.
+  while (!(await loadPresets()) || !(await loadSettings())) {
+    showOffline();
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  await refreshCalibrationBuilder();
+  initGaugeOptions(); // after the settings: the board decides which dials are offered
+  await loadCalCurve();
+  await loadBoardTest();
+  await loadStartupLog();
+  pollStatus();
+  window.addEventListener('resize', scheduleChartDraw);
 }
 
-async function fetchCalibrations() {
-  const selectEl = document.getElementById('motorCalibration');
-  if (!selectEl) {
-    return;
-  }
-
+// ===================================================================
+// API
+// ===================================================================
+// GET when body is undefined, POST JSON otherwise. A refused POST shows the
+// unit's reason. Resolves to { ok, data } and never throws.
+async function api(path, body) {
+  const isPost = body !== undefined;
   try {
-    const response = await fetch('/api/calibrations');
-    const data = await response.json();
-    const calibrations = Array.isArray(data.calibrations) ? data.calibrations : [];
-
-    selectEl.innerHTML = '';
-
-    calibrations.forEach(item => {
-      const id = String(item.id);
-      const option = document.createElement('option');
-      option.value = id;
-      option.textContent = `${id}: ${item.name}`;
-      selectEl.appendChild(option);
-    });
-
-    if (calibrations.length === 0) {
-      const option = document.createElement('option');
-      option.value = '1';
-      option.textContent = '1: Default calibration';
-      selectEl.appendChild(option);
-    }
-
-    currentCalibrationId = parseInt(data.currentCalibrationId || 1, 10) || 1;
-    selectEl.value = String(currentCalibrationId);
-    const calibrationStatusEl = document.getElementById('calibrationStatus');
-    if (calibrationStatusEl && !calModeVoltage) {
-      const selectedOption = selectEl.options[selectEl.selectedIndex];
-      calibrationStatusEl.textContent = selectedOption ? `Cal: ${selectedOption.textContent}` : 'Cal: --';
-    }
+    const response = await fetch(path, isPost
+      ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+      : {});
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok && isPost) showNotification(data.error || data.message || ('Error ' + response.status), 'error');
+    return { ok: response.ok, data };
   } catch (error) {
-    console.log('Error fetching calibrations:', error);
+    if (isPost) showNotification('Unit not reachable', 'error');
+    return { ok: false, data: { error: 'Unit not reachable' } };
   }
 }
+const setSetting = (key, value) => api('/api/control', { key, value });
+const runAction = (action, extra) => api('/api/action', Object.assign({ action }, extra || {}));
+const calibrationOp = (op, extra) => api('/api/cal', Object.assign({ op }, extra || {}));
 
-function updateSpeedOffsetStatus(mode, offsetValue) {
-  const offsetTypeEl = document.getElementById('speedOffsetType');
-  const currentOffsetEl = document.getElementById('currentSpeedOffset');
-
-  if (offsetTypeEl) {
-    offsetTypeEl.textContent = mode || '--';
-  }
-
-  if (currentOffsetEl) {
-    if (offsetValue === undefined || offsetValue === null || Number.isNaN(Number(offsetValue))) {
-      currentOffsetEl.textContent = '--';
-    } else {
-      const n = Number(offsetValue);
-      currentOffsetEl.textContent = (n > 0 ? '+' : '') + n;
-    }
-  }
+function showNotification(message, type = 'success') {
+  const note = document.createElement('div');
+  note.className = 'notification ' + (type === 'error' ? 'error' : 'ok');
+  note.textContent = message;
+  document.body.appendChild(note);
+  setTimeout(() => { note.classList.add('fade'); setTimeout(() => note.remove(), 300); }, 3000);
 }
 
-// Show the global offset slider OR the 5-point curve, never both.
-function applyOffsetCurveVisibility(enabled) {
-  const globalSec = document.getElementById('globalOffsetSection');
-  const curveSec = document.getElementById('offsetCurveSection');
-  if (globalSec) globalSec.style.display = enabled ? 'none' : '';
-  if (curveSec) curveSec.style.display = enabled ? '' : 'none';
+const byId = (id) => document.getElementById(id);
+function setText(id, text) { const el = byId(id); if (el) el.textContent = text; }
+function setPill(el, cls, text) {
+  if (!el) return;
+  el.className = 'pill' + (cls ? ' ' + cls : '');
+  el.textContent = text;
+}
+const fixed = (value, digits) => (value === undefined || value === null) ? '--' : Number(value).toFixed(digits);
+const signed = (value, digits) => (Number(value) > 0 ? '+' : '') + fixed(value, digits);
+
+// ===================================================================
+// Tabs, cards, per-browser preferences
+// ===================================================================
+function loadPrefs() {
+  try { return JSON.parse(localStorage.getItem(PREFS_KEY)) || {}; } catch (e) { return {}; }
+}
+function savePrefs(prefs) {
+  try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch (e) { /* private window */ }
 }
 
-function initNavigation() {
-  const tabs = document.querySelectorAll(".nav-tab");
-  const pages = document.querySelectorAll(".page");
+function initTabs() {
+  const tabs = document.querySelectorAll('.nav-tab');
+  tabs.forEach((tab) => tab.addEventListener('click', () => {
+    tabs.forEach((t) => t.classList.toggle('active', t === tab));
+    document.querySelectorAll('.page').forEach((page) =>
+      page.classList.toggle('active', page.id === tab.dataset.page + '-page'));
+    if (tab.dataset.page === 'dashboard') scheduleChartDraw(); // the canvas can't measure itself while hidden
+    if (tab.dataset.page === 'diagnostics') loadStartupLog();
+  }));
+}
 
-  tabs.forEach((tab) => {
-    tab.addEventListener("click", () => {
-      const page = tab.dataset.page;
-
-      tabs.forEach((t) => t.classList.remove("active"));
-      tab.classList.add("active");
-
-      pages.forEach((p) => p.classList.remove("active"));
-      document.getElementById(`${page}-page`).classList.add("active");
-
-      // The curve canvas can't measure itself while its tab is hidden, so
-      // redraw once the Dashboard page becomes visible.
-      if (page === 'dashboard') scheduleCalDraw();
+// Setup cards start open (it's a walk-through); Advanced / Diagnostics start
+// closed except those marked data-open-by-default. Each card remembers its state.
+function initCards() {
+  const prefs = loadPrefs();
+  prefs.cards = prefs.cards || {};
+  document.querySelectorAll('.card.collapsible').forEach((card) => {
+    const defaultOpen = card.hasAttribute('data-open-by-default') || !!card.closest('#setup-page');
+    const open = card.id in prefs.cards ? prefs.cards[card.id] : defaultOpen;
+    card.classList.toggle('collapsed', !open);
+    const heading = card.querySelector('h2');
+    if (heading) heading.addEventListener('click', () => {
+      card.classList.toggle('collapsed');
+      prefs.cards[card.id] = !card.classList.contains('collapsed');
+      savePrefs(prefs);
+      scheduleChartDraw();
     });
   });
 }
 
-function initControls() {
-    // GPS Rate controls
-    const gpsRateSelect = document.getElementById('gpsRateSelect');
-    const setGpsRateBtn = document.getElementById('setGpsRateBtn');
-    const gpsRateResponse = document.getElementById('gpsRateResponse');
-    // Always populate dropdown for robustness
-    if (gpsRateSelect) {
-      const validRates = [1, 5, 10, 16];
-      gpsRateSelect.innerHTML = '';
-      validRates.forEach(rate => {
-        const opt = document.createElement('option');
-        opt.value = rate;
-        opt.textContent = rate + ' Hz';
-        gpsRateSelect.appendChild(opt);
-      });
-    }
-    if (setGpsRateBtn && gpsRateSelect) {
-      setGpsRateBtn.addEventListener('click', async () => {
-        const rate = parseInt(gpsRateSelect.value, 10);
-        gpsRateResponse.textContent = 'Sending...';
-        window.gpsRateUserMessageUntil = Date.now() + 4000;
-        try {
-          const resp = await fetch('/api/gpsRate', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ rate })
-          });
-          const data = await resp.json();
-          gpsRateResponse.textContent = data.message || (data.success ? 'Success' : 'Failed');
-          gpsRateResponse.style.color = data.success ? '#007a3d' : '#b00020';
-          window.gpsRateUserMessageUntil = Date.now() + 4000;
-        } catch (e) {
-          gpsRateResponse.textContent = 'Error sending command.';
-          gpsRateResponse.style.color = '#b00020';
-          window.gpsRateUserMessageUntil = Date.now() + 4000;
-        }
-      });
-    }
-  // Dashboard controls
-  const testBtn = document.getElementById('testNeedleSweep');
-  if (testBtn) {
-    testBtn.addEventListener('click', () => pushAction('needleSweep'));
-  }
+// ===================================================================
+// Settings
+// ===================================================================
+const DISPLAY_FORMAT = {
+  inputSmoothingMs: (v) => v + ' ms',
+  feedbackDeadband: (v) => Number(v).toFixed(1) + ' Hz',
+  trimGain: (v) => Number(v).toFixed(2),
+  trimLimit: (v) => '±' + Math.round(Number(v) * 100) + '%',
+  pwmNominal: (v) => Math.round(Number(v) * 100) + '%',
+  railMinV: (v) => Number(v).toFixed(1) + ' V',
+  railMaxV: (v) => Number(v).toFixed(1) + ' V',
+  globalSpeedOffsetKph: (v) => (Number(v) > 0 ? '+' : '') + v,
+};
+for (let i = 0; i < 5; i++) DISPLAY_FORMAT['curveOffset' + i] = DISPLAY_FORMAT.globalSpeedOffsetKph;
 
-  const resetMaxRPMBtn = document.getElementById('resetMaxRPM');
-  if (resetMaxRPMBtn) {
-    resetMaxRPMBtn.addEventListener('click', () => {
-      const slider = document.getElementById('maxRPM');
-      const display = document.getElementById('maxRPM-display');
-      slider.value = 230;
-      display.textContent = '230';
-      pushControl('maxRPM', 230);
-    });
-  }
+// Sliders that act live while being dragged (one request in flight, latest wins).
+const LIVE_SLIDERS = new Set(['speedTestKph', 'rpmTestRpm', 'needleSweepSpeed']);
+const liveSliderState = {};
 
-  const resetClusterRPMLimitBtn = document.getElementById('resetClusterRPMLimit');
-  if (resetClusterRPMLimitBtn) {
-    resetClusterRPMLimitBtn.addEventListener('click', () => {
-      const slider = document.getElementById('clusterRPMLimit');
-      const display = document.getElementById('clusterRPMLimit-display');
-      slider.value = 7000;
-      display.textContent = '7000';
-      pushControl('clusterRPMLimit', 7000);
-    });
-  }
-
-  const dutyUpBtn = document.getElementById('dutyUpBtn');
-  if (dutyUpBtn) {
-    dutyUpBtn.addEventListener('click', () => {
-      const display = document.getElementById('tempDutyCycle-display');
-      const currentDuty = parseInt(display.textContent || '0', 10);
-      const newDuty = currentDuty >= 385 ? 0 : currentDuty + 1;
-      display.textContent = String(newDuty);
-      pushControl('tempDutyCycle', newDuty);
-    });
-  }
-
-  const dutyDownBtn = document.getElementById('dutyDownBtn');
-  if (dutyDownBtn) {
-    dutyDownBtn.addEventListener('click', () => {
-      const display = document.getElementById('tempDutyCycle-display');
-      const currentDuty = parseInt(display.textContent || '0', 10);
-      const newDuty = currentDuty <= 0 ? 385 : currentDuty - 1;
-      display.textContent = String(newDuty);
-      pushControl('tempDutyCycle', newDuty);
-    });
-  }
-
-  // Configuration controls
-  const configInputs = [
-    'hasNeedleSweep',
-    'sweepSpeed',
-    'stepSpeed',
-    'stepRPM',
-    'coilType',
-    'convertToMPH',
-    'motorCalibration',
-    'maxSpeed',
-    'maxFreqHall',
-    'maxFreqVR',
-    'speedInputBias',
-    'useGlobalSpeedOffset',
-    'speedOffsetPositive',
-    'speedOffset'
-  ];
-  configInputs.forEach(id => {
-    const el = document.getElementById(id);
-    if (el) {
-      el.addEventListener('change', () => {
-        const value = el.type === 'checkbox' ? el.checked : el.value;
-        const ctrlPromise = pushControl(id, value);
-
-        if (id === 'motorCalibration') {
-          // With voltage control on the preset isn't what drives the motor, so the
-          // banner keeps saying "Voltage" (the device reports it on the next poll).
-          const selectedOption = el.options[el.selectedIndex];
-          const calibrationStatusEl = document.getElementById('calibrationStatus');
-          if (selectedOption && calibrationStatusEl && !calModeVoltage) {
-            calibrationStatusEl.textContent = `Cal: ${selectedOption.textContent}`;
-          }
-          // Refresh the curve only after the device has applied the new cal.
-          if (ctrlPromise && ctrlPromise.then) ctrlPromise.then(fetchCalCurve); else fetchCalCurve();
-        }
-
-        if (id === 'convertToMPH') {
-          applyMphState(el.checked);
-        }
-      });
-
-      if (el.type === 'range') {
-        el.addEventListener('input', () => {
-          const displayEl = document.getElementById(id + '-display');
-          if (displayEl) {
-            displayEl.textContent = el.value;
-          }
-          pushControl(id, el.value);
-        });
-      }
-    }
+// force: also the control being edited (the reply to its own change: a refused or
+// clamped value must show where it was typed).
+function showSetting(key, value, force) {
+  if (value === undefined || value === null) return;
+  document.querySelectorAll('[data-key="' + key + '"]').forEach((el) => {
+    if (el.type === 'checkbox') { el.checked = !!value; return; }
+    if (!force && document.activeElement === el && el.type !== 'range') return; // don't fight typing
+    if ('bool' in el.dataset) el.value = String(!!value);
+    else if ('hex' in el.dataset) el.value = typeof value === 'number' ? value.toString(16).toUpperCase() : value;
+    else el.value = value;
   });
+  const format = DISPLAY_FORMAT[key];
+  document.querySelectorAll('[data-display-for="' + key + '"]').forEach((el) => {
+    el.textContent = format ? format(value) : value;
+  });
+}
 
-  const resetMaxFreqHallBtn = document.getElementById('resetMaxFreqHall');
-  const maxFreqHallEl = document.getElementById('maxFreqHall');
-  if (resetMaxFreqHallBtn && maxFreqHallEl) {
-    resetMaxFreqHallBtn.addEventListener('click', () => {
-      maxFreqHallEl.value = 200;
-      const displayEl = document.getElementById('maxFreqHall-display');
-      if (displayEl) displayEl.textContent = '200';
-      pushControl('maxFreqHall', 200);
-    });
+function readControl(el) {
+  if (el.type === 'checkbox') return el.checked;
+  if ('bool' in el.dataset) return el.value === 'true';
+  if ('hex' in el.dataset) return el.value.trim();
+  if (el.type === 'range' || el.type === 'number') return Number(el.value);
+  if (el.tagName === 'SELECT' && el.value !== '' && !Number.isNaN(Number(el.value))) return Number(el.value);
+  return el.value; // speed / RPM source names
+}
+
+async function commitSetting(key, value) {
+  const before = settings[key];
+  const result = await setSetting(key, value);
+  if (!result.ok) {
+    showSetting(key, before, true); // refused: put the control back
+    return false;
   }
+  settings[key] = result.data.value;
+  showSetting(key, result.data.value, true); // the kept value, also in the box being edited
+  if (result.data.railMinV !== undefined) { settings.railMinV = result.data.railMinV; showSetting('railMinV', result.data.railMinV); }
+  afterSettingChanged(key);
+  return true;
+}
 
-  // CAN Analyzer - SavvyCAN: WiFi and Serial are mutually exclusive
-  const analyzerModeEl = document.getElementById('analyzerMode');
-  const analyzerSerialEl = document.getElementById('analyzerSerial');
-  if (analyzerModeEl && analyzerSerialEl) {
-    analyzerModeEl.addEventListener('change', () => {
-      if (analyzerModeEl.checked) {
-        analyzerSerialEl.checked = false;
-        pushControl('analyzerSerial', false);
-      }
-      pushControl('analyzerMode', analyzerModeEl.checked);
-    });
-    analyzerSerialEl.addEventListener('change', () => {
-      if (analyzerSerialEl.checked) {
-        analyzerModeEl.checked = false;
-        pushControl('analyzerMode', false);
-      }
-      pushControl('analyzerSerial', analyzerSerialEl.checked);
-    });
-  }
+function sendLiveSlider(key, value) {
+  const state = liveSliderState[key] = liveSliderState[key] || {};
+  state.latest = value;
+  if (state.busy) return;
+  state.busy = true;
+  setSetting(key, state.latest).finally(() => {
+    state.busy = false;
+    if (state.latest !== value) sendLiveSlider(key, state.latest);
+  });
+}
 
-  const calibrationInputs = ['useSpeedOffsetCurve', 'curveOffset0', 'curveOffset1', 'curveOffset2', 'curveOffset3', 'curveOffset4'];
-  calibrationInputs.forEach(id => {
-    const el = document.getElementById(id);
-    if (!el) {
-      return;
-    }
-
+function initSettingControls() {
+  document.querySelectorAll('[data-key]').forEach((el) => {
+    const key = el.dataset.key;
     el.addEventListener('change', () => {
-      const value = el.type === 'checkbox' ? el.checked : el.value;
-      pushControl(id, value);
-      if (id === 'useSpeedOffsetCurve') {
-        applyOffsetCurveVisibility(el.checked);
+      // An emptied box would send 0 (e.g. 100 pulses per km: the needle pinned at maximum).
+      if (el.type === 'number' && (el.value.trim() === '' || !Number.isFinite(Number(el.value)))) {
+        showSetting(key, settings[key], true);
+        return;
       }
-    });
-
-    if (el.type === 'range') {
-      el.addEventListener('input', () => {
-        const displayEl = document.getElementById(id + '-display');
-        if (displayEl) {
-          displayEl.textContent = el.value;
-        }
-        pushControl(id, el.value);
-      });
-    }
-  });
-
-  const filterInputs = ['averageFilterHall', 'averageFilterRPM', 'averageFilterVR'];
-  filterInputs.forEach(id => {
-    const el = document.getElementById(id);
-    if (!el) {
-      return;
-    }
-
-    el.addEventListener('change', () => {
-      pushControl(id, el.value);
-    });
-
-    el.addEventListener('input', () => {
-      const displayEl = document.getElementById(id + '-display');
-      if (displayEl) {
-        displayEl.textContent = el.value;
-      }
-      pushControl(id, el.value);
-    });
-  });
-
-  // Advanced test controls
-  const advancedInputs = [
-    'testRPM', 'tempRPM', 'testSpeedo', 'tempSpeed', 'maxRPM', 'clusterRPMLimit', 'testCal',
-    'broadcastSpeedEnabled', 'broadcastSpeedID', 'broadcastSpeedDLC',
-    'broadcastSpeedLowByte', 'broadcastSpeedHighByte', 'broadcastSpeedLittleEndian',
-    'broadcastSpeedScale', 'broadcastSpeedOffset',
-    'broadcastSpeedData0', 'broadcastSpeedData1', 'broadcastSpeedData2', 'broadcastSpeedData3',
-    'broadcastSpeedData4', 'broadcastSpeedData5', 'broadcastSpeedData6', 'broadcastSpeedData7',
-    'aftermarketSpeedID', 'aftermarketSpeedLowByte', 'aftermarketSpeedHighByte',
-    'aftermarketSpeedLittleEndian', 'aftermarketSpeedScale', 'aftermarketSpeedOffset',
-    'dsgRatio1', 'dsgRatio2', 'dsgRatio3', 'dsgRatio4', 'dsgRatio5', 'dsgRatio6',
-    'dsgFinal14', 'dsgFinal56', 'dsgTireCirc'
-  ];
-  advancedInputs.forEach(id => {
-    const el = document.getElementById(id);
-    if (el) {
-      el.addEventListener('change', () => {
-        let value;
-        if (el.type === 'checkbox') {
-          value = el.checked;
-        } else if (id === 'broadcastSpeedID' || id === 'aftermarketSpeedID') {
-          value = el.value.trim();
-        } else if (id === 'broadcastSpeedLittleEndian' || id === 'aftermarketSpeedLittleEndian') {
-          value = el.value === 'true';
-        } else {
-          value = el.type === 'number' || el.type === 'range' ? Number(el.value) : el.value;
-        }
-
-        // Use separate API endpoints for RPM and Speed tests
-        if (id === 'testRPM') {
-          pushTestRPM(el.checked, parseInt(document.getElementById('tempRPM').value || 0));
-        } else if (id === 'tempRPM') {
-          const testRPMCheckbox = document.getElementById('testRPM');
-          pushTestRPM(testRPMCheckbox.checked, parseInt(el.value || 0));
-        } else if (id === 'testSpeedo') {
-          pushTestSpeed(el.checked, parseInt(document.getElementById('tempSpeed').value || 0));
-        } else if (id === 'tempSpeed') {
-          const testSpeedCheckbox = document.getElementById('testSpeedo');
-          pushTestSpeed(testSpeedCheckbox.checked, parseInt(el.value || 0));
-        } else {
-          pushControl(id, value);
-        }
-      });
-
-      // For sliders, also update live display and send immediately on input
-      if (el.type === 'range') {
-        el.addEventListener('input', () => {
-          const displayId = id + '-display';
-          const displayEl = document.getElementById(displayId);
-          if (displayEl) {
-            displayEl.textContent = el.value;
-          }
-          if (id === 'tempRPM') {
-            const testRPMCheckbox = document.getElementById('testRPM');
-            pushTestRPM(testRPMCheckbox.checked, parseInt(el.value || 0));
-          } else if (id === 'tempSpeed') {
-            const testSpeedCheckbox = document.getElementById('testSpeedo');
-            pushTestSpeed(testSpeedCheckbox.checked, parseInt(el.value || 0));
-          } else {
-            pushControl(id, el.value);
-          }
-        });
-      }
-    }
-  });
-
-  // Speed source dropdown
-  const speedSourceEl = document.getElementById('speedSource');
-  function updateCustomCANVisibility() {
-    const card = document.getElementById('customCANInputCard');
-    if (card && speedSourceEl) {
-      card.style.display = speedSourceEl.value === 'Custom CAN' ? '' : 'none';
-    }
-    const dsgCard = document.getElementById('dsgCalcCard');
-    if (dsgCard && speedSourceEl) {
-      dsgCard.style.display = speedSourceEl.value === 'DSG' ? '' : 'none';
-    }
-  }
-  if (speedSourceEl) {
-    speedSourceEl.addEventListener('change', () => {
-      pushControl('speedType', speedSourceEl.value);
-      updateCustomCANVisibility();
-    });
-  }
-
-  const rpmSourceEl = document.getElementById('rpmSource');
-  if (rpmSourceEl) {
-    rpmSourceEl.addEventListener('change', () => {
-      pushControl('rpmType', rpmSourceEl.value);
-    });
-  }
-
-  // Closed-loop feedback (PID) controls
-  const feedbackEnableEl = document.getElementById('feedbackEnable');
-  if (feedbackEnableEl) {
-    feedbackEnableEl.addEventListener('change', () => {
-      pushControl('feedbackEnable', feedbackEnableEl.checked);
-    });
-  }
-
-  const reverseDirectionEl = document.getElementById('reverseDirection');
-  if (reverseDirectionEl) {
-    reverseDirectionEl.addEventListener('change', () => {
-      pushControl('reverseDirection', reverseDirectionEl.checked);
-    });
-  }
-
-  const feedbackMinSpeedEl = document.getElementById('feedbackMinSpeed');
-  if (feedbackMinSpeedEl) {
-    feedbackMinSpeedEl.addEventListener('input', () => {
-      const displayEl = document.getElementById('feedbackMinSpeed-display');
-      if (displayEl) displayEl.textContent = feedbackMinSpeedEl.value;
-      pushControl('feedbackMinSpeed', feedbackMinSpeedEl.value);
-    });
-  }
-
-  ['pidKp', 'pidKi', 'pidKd'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) {
-      el.addEventListener('change', () => pushControl(id, el.value));
-    }
-  });
-
-  const feedbackDeadbandEl = document.getElementById('feedbackDeadband');
-  if (feedbackDeadbandEl) {
-    feedbackDeadbandEl.addEventListener('input', () => {
-      const displayEl = document.getElementById('feedbackDeadband-display');
-      if (displayEl) displayEl.textContent = feedbackDeadbandEl.value;
-      pushControl('feedbackDeadband', feedbackDeadbandEl.value);
-    });
-  }
-
-  const pidDefaults = { pidKp: 0.15, pidKi: 1.3, pidKd: 0, feedbackDeadband: 1.5, feedbackMinSpeed: 40 };
-  const resetPidBtn = document.getElementById('resetPidDefaults');
-  if (resetPidBtn) {
-    resetPidBtn.addEventListener('click', () => {
-      Object.entries(pidDefaults).forEach(([id, val]) => {
-        const el = document.getElementById(id);
-        if (el) el.value = val;
-        const displayEl = document.getElementById(id + '-display');
-        if (displayEl) displayEl.textContent = val;
-        pushControl(id, val);
-      });
-    });
-  }
-
-  // Motor Voltage Control (S3 board). Tuning sliders / toggle that map 1:1 to
-  // firmware control keys: push on change, update the -display span live.
-  const vcInputs = ['voltageControlEnable', 'vcPwmNominal', 'vcRailMaxV',
-                    'vcTrimGain', 'vcTrimLimit'];
-  vcInputs.forEach(id => {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.addEventListener('change', () => {
-      const value = el.type === 'checkbox' ? el.checked : el.value;
-      pushControl(id, value);
+      const value = readControl(el);
+      if (key === 'clusterInMph' && !confirmUnitChange(value)) { el.checked = !value; return; }
+      commitSetting(key, value);
     });
     if (el.type === 'range') {
       el.addEventListener('input', () => {
-        updateVcSliderDisplay(id, el.value);
-        if (id === 'vcRailMaxV') setDriveMax(el.value);
+        const format = DISPLAY_FORMAT[key];
+        document.querySelectorAll('[data-display-for="' + key + '"]').forEach((d) => {
+          d.textContent = format ? format(el.value) : el.value;
+        });
+        if (LIVE_SLIDERS.has(key)) sendLiveSlider(key, Number(el.value));
       });
     }
   });
-
-  initCollapsibleCards();
 }
 
-// Turn every settings page into a scannable accordion: each card header
-// collapses/expands its body, and ALL cards start collapsed for a clean UI.
-// The Dashboard is left open so live data + the curve are always visible.
-function initCollapsibleCards() {
-  // OTA is intentionally excluded — its card stays open (matches SpeedPulser).
-  const pages = ['configuration', 'advanced', 'calibration', 'diag'];
-  pages.forEach(pageId => {
-    document.querySelectorAll(`#${pageId}-page .card`).forEach(card => {
-      const header = card.querySelector('h2');
-      if (!header) return;
-      card.classList.add('collapsible', 'collapsed');
-      header.addEventListener('click', () => card.classList.toggle('collapsed'));
+// Marks are captured in the dial's unit: switching it reads them in the other.
+function confirmUnitChange(toMph) {
+  if (!isVoltageBoard || !(settings.driveCal || []).length) return true;
+  return confirm('Your calibration marks were captured with the dial in ' + (toMph ? 'km/h' : 'mph') +
+                 '. Changing the unit means capturing them again (then Auto Fill). Change it?');
+}
+
+// Changing these changes other settings too (one test mode at a time, the source
+// switches, the drive range): read them all back.
+const RELOAD_AFTER = new Set(['speedType', 'rpmType', 'analyzerMode', 'analyzerSerial', 'railMinV', 'railMaxV',
+                              'pwmNominal', 'calibrationModeOn', 'speedTestOn', 'rpmTestOn', 'presetId', 'clusterInMph']);
+
+// What follows a change, beyond showing the kept value.
+function afterSettingChanged(key) {
+  if (key === 'clusterInMph') { applyDialUnit(settings.clusterInMph); renderDriveMarks(settings.driveCal, settings.driveCalHz); }
+  if (key === 'maxSpeed' || key.endsWith('PulsesPerKm')) { updateSensorHints(); applyGaugeRanges(); applySliderLimits(); }
+  if (key === 'maxSpeed' || key === 'presetId') loadCalCurve();
+  if (key === 'useSpeedOffsetCurve') applyOffsetMode();
+  if (key === 'speedType') applySpeedSource();
+  if (key === 'calibrationModeOn' && settings.calibrationModeOn) setCalibrationDrive(0, false); // the unit restarts the motor stopped
+  if (key === 'speedTestOn' && !settings.speedTestOn) showSetting('speedTestKph', 0);
+  if (RELOAD_AFTER.has(key)) loadSettings();
+}
+
+async function loadSettings() {
+  const { ok, data } = await api('/api/settings');
+  if (ok) applySettings(data);
+  return ok;
+}
+
+// Show a full settings object (GET /api/settings, or any /api/control reply).
+function applySettings(data) {
+  settings = Object.assign(settings, data);
+  isVoltageBoard = !!data.isVoltageBoard;
+  if (data.fwVersion) setText('firmwareBadge', 'V' + data.fwVersion);
+  applyBoardType(data);
+  applyDialUnit(!!data.clusterInMph);
+  Object.keys(data).forEach((key) => showSetting(key, data[key]));
+  (data.speedOffsetCurveOffsets || []).forEach((v, i) => { settings['curveOffset' + i] = v; showSetting('curveOffset' + i, v); });
+  const gpsRate = byId('gpsRateSelect');
+  if (gpsRate && data.gpsUpdateRateHz !== undefined && document.activeElement !== gpsRate) gpsRate.value = data.gpsUpdateRateHz;
+  applyOffsetMode();
+  applySpeedSource();
+  updateSensorHints();
+  applySliderLimits();
+  applyGaugeRanges();
+  if (isVoltageBoard) {
+    setDriveRange(data.driveMaxV);
+    document.querySelectorAll('[data-key="railMinV"],[data-key="railMaxV"]').forEach((el) => {
+      if (data.railFloorV !== undefined) el.min = data.railFloorV;
+      if (data.railCeilV !== undefined) el.max = data.railCeilV;
+    });
+    renderBoardTestPill(data.boardTestCode, false);
+    renderDriveMarks(data.driveCal, !!data.driveCalHz);
+    setRestoreAvailable(data.calBackup);
+    autoFillRailNote = Number(data.railMinV) < 4.7
+      ? 'Minimum rail is ' + Number(data.railMinV).toFixed(1) + ' V: set it to 4.8 V (Advanced) before Auto Fill for smooth low speeds.'
+      : '';
+  } else if (data.presetId !== undefined) {
+    byId('presetSelect').value = data.presetId; // value only: never re-send the preset
+  }
+  applyCalibrationLocks();
+}
+
+// Board-specific parts stay hidden until the board is known, then the body
+// classes show the ones this board has (see style.css): .vc-only / .legacy-only
+// (S3 voltage control or DevKit PWM), .vr-only (VR input), .bias-only (input bias).
+function applyBoardType(data) {
+  const body = document.body;
+  body.classList.add('board-known');
+  body.classList.toggle('voltage-board', isVoltageBoard);
+  if (data.hasVR !== undefined) body.classList.toggle('has-vr', !!data.hasVR);
+  if (data.hasSpeedBias !== undefined) body.classList.toggle('has-bias', !!data.hasSpeedBias);
+  if (data.hasVR === false) { // a hidden <option> still shows on some phones: remove it
+    const vrOption = document.querySelector('#speedSourceSelect option[value="VR"]');
+    if (vrOption) vrOption.remove();
+  }
+  setText('boardTypeValue', data.boardName
+    ? data.boardName + (isVoltageBoard ? ' (voltage control)' : ' (PWM only)')
+    : (isVoltageBoard ? 'Voltage board (V5)' : 'Legacy (PWM only)'));
+  setText('liveMotorLabel', isVoltageBoard ? 'Motor drive' : 'Motor duty');
+  setText('liveMotorUnit', isVoltageBoard ? 'V' : '%');
+  updateChartChrome();
+}
+
+function applyDialUnit(mph) {
+  dialUnit = mph ? 'mph' : 'km/h';
+  document.querySelectorAll('.unit-dial').forEach((el) => { el.textContent = dialUnit; });
+}
+
+function applyOffsetMode() {
+  const curve = !!settings.useSpeedOffsetCurve;
+  byId('globalOffsetGroup').hidden = curve;
+  byId('offsetCurveGroup').hidden = !curve;
+}
+
+// Only the settings of the picked speed source are shown.
+function applySpeedSource() {
+  document.querySelectorAll('.source-group').forEach((group) => {
+    group.hidden = group.dataset.source !== settings.speedType;
+  });
+}
+
+// The test sliders can't go past what the unit accepts.
+function applySliderLimits() {
+  const speedSlider = document.querySelector('[data-key="speedTestKph"]');
+  if (speedSlider && settings.maxSpeed) speedSlider.max = settings.maxSpeed;
+  const rpmSlider = document.querySelector('[data-key="rpmTestRpm"]');
+  if (rpmSlider && settings.clusterRPMLimit) rpmSlider.max = settings.clusterRPMLimit;
+}
+
+// ===== Hall / VR sensor presets =====
+function initSensorPresets() {
+  document.querySelectorAll('.sensor-preset').forEach((preset) => {
+    const key = preset.dataset.presetFor;
+    const input = document.querySelector('input[data-key="' + key + '"]');
+    preset.addEventListener('change', () => {
+      if (preset.value === 'custom') { input.focus(); return; }
+      input.value = preset.value;
+      commitSetting(key, Number(preset.value));
     });
   });
 }
 
-/* =======================================================================
-   Per-tile dial gauges (ported from the OpenHaldex theme). RPM and the two
-   speed readouts can render as 270 degree dials, toggled in Display Options.
-   ======================================================================= */
-const GAUGE_TILES = [
-  { id: 'rpm', label: 'RPM (Final)', min: 0, max: 8000, unit: 'RPM' },
-  { id: 'speed', label: 'Speed (Final)', min: 0, max: 300, unit: 'km/h' },
-  { id: 'measuredSpeed', label: 'Measured Speed', min: 0, max: 300, unit: 'km/h' },
-];
-const TG_R = 40;
-const TG_CIRC = 2 * Math.PI * TG_R;
-const TG_ARC = TG_CIRC * 0.75;
-const TG_GAP = TG_CIRC - TG_ARC;
-const GAUGE_PREFS_KEY = 'speedPulserProGaugePrefs';
-const GAUGE_DEFAULTS = { tiles: ['rpm', 'speed', 'measuredSpeed'] };
-let gaugePrefs = loadGaugePrefs();
-
-function loadGaugePrefs() {
-  try {
-    const raw = localStorage.getItem(GAUGE_PREFS_KEY);
-    if (raw) {
-      const p = JSON.parse(raw);
-      return { tiles: Array.isArray(p.tiles) ? p.tiles : GAUGE_DEFAULTS.tiles.slice() };
-    }
-  } catch (e) { /* defaults */ }
-  return { tiles: GAUGE_DEFAULTS.tiles.slice() };
-}
-function saveGaugePrefs() {
-  try { localStorage.setItem(GAUGE_PREFS_KEY, JSON.stringify(gaugePrefs)); } catch (e) {}
-}
-function ensureTileGauge(tile) {
-  if (tile.querySelector('.tile-gauge')) return;
-  const wrap = document.createElement('div');
-  wrap.className = 'tile-gauge';
-  wrap.innerHTML =
-    `<svg viewBox="0 0 100 100" aria-hidden="true">` +
-    `<circle class="tg-track" cx="50" cy="50" r="${TG_R}" transform="rotate(135 50 50)" ` +
-    `stroke-dasharray="${TG_ARC.toFixed(2)} ${TG_GAP.toFixed(2)}"/>` +
-    `<circle class="tg-fill" cx="50" cy="50" r="${TG_R}" transform="rotate(135 50 50)" ` +
-    `stroke-dasharray="0 ${TG_CIRC.toFixed(2)}"/>` +
-    `<text class="tg-val" x="50" y="52" text-anchor="middle">--</text>` +
-    `<text class="tg-unit" x="50" y="66" text-anchor="middle"></text>` +
-    `<text class="tg-min" x="24" y="92" text-anchor="middle">0</text>` +
-    `<text class="tg-max" x="76" y="92" text-anchor="middle">0</text>` +
-    `</svg>`;
-  tile.appendChild(wrap);
-}
-function applyGaugePrefs() {
-  GAUGE_TILES.forEach((t) => {
-    const el = document.getElementById(t.id);
-    if (!el) return;
-    const tile = el.closest('.gauge');
-    if (!tile) return;
-    ensureTileGauge(tile);
-    const on = gaugePrefs.tiles.includes(t.id);
-    tile.classList.toggle('as-gauge', on);
-    if (on) {
-      const unitEl = tile.querySelector('.tg-unit');
-      const srcUnit = tile.querySelector('.gauge-unit');
-      if (unitEl) unitEl.textContent = srcUnit ? srcUnit.textContent.trim() : t.unit;
-      const minEl = tile.querySelector('.tg-min');
-      const maxEl = tile.querySelector('.tg-max');
-      if (minEl) minEl.textContent = t.min;
-      if (maxEl) maxEl.textContent = t.max;
-    }
-  });
-}
-function updateTileGauges() {
-  GAUGE_TILES.forEach((t) => {
-    const el = document.getElementById(t.id);
-    if (!el) return;
-    const tile = el.closest('.gauge');
-    if (!tile || !tile.classList.contains('as-gauge')) return;
-    const raw = parseFloat(el.textContent);
-    const valEl = tile.querySelector('.tg-val');
-    const fillEl = tile.querySelector('.tg-fill');
-    if (!valEl || !fillEl) return;
-    const gaugeWrap = tile.querySelector('.tile-gauge');
-    if (gaugeWrap) gaugeWrap.classList.toggle('warn', el.style.color === 'orange');
-    if (Number.isNaN(raw)) {
-      valEl.textContent = '--';
-      fillEl.style.strokeDasharray = `0 ${TG_CIRC.toFixed(2)}`;
-      return;
-    }
-    valEl.textContent = el.textContent;
-    const frac = Math.max(0, Math.min(1, (raw - t.min) / (t.max - t.min || 1)));
-    fillEl.style.strokeDasharray = `${(TG_ARC * frac).toFixed(2)} ${TG_CIRC.toFixed(2)}`;
-  });
-}
-function initGaugeUI() {
-  const host = document.getElementById('gaugeCustomizer');
-  if (host) {
-    host.innerHTML = '';
-    GAUGE_TILES.forEach((t) => {
-      const label = document.createElement('label');
-      label.className = 'tile-opt';
-      const cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.checked = gaugePrefs.tiles.includes(t.id);
-      cb.addEventListener('change', () => {
-        const set = new Set(gaugePrefs.tiles);
-        if (cb.checked) set.add(t.id); else set.delete(t.id);
-        gaugePrefs.tiles = [...set];
-        saveGaugePrefs();
-        applyGaugePrefs();
-      });
-      const span = document.createElement('span');
-      span.textContent = t.label;
-      label.appendChild(cb);
-      label.appendChild(span);
-      host.appendChild(label);
+function updateSensorHints() {
+  const maxSpeed = Number(settings.maxSpeed) || 200;
+  document.querySelectorAll('.sensor-preset').forEach((preset) => {
+    const key = preset.dataset.presetFor;
+    if (settings[key] === undefined) return;
+    const pulsesPerKm = Number(settings[key]) || 3600;
+    const match = [...preset.options].find((o) => o.value !== 'custom' && Math.abs(Number(o.value) - pulsesPerKm) < 0.05);
+    preset.value = match ? match.value : 'custom';
+    document.querySelectorAll('[data-scale-hint-for="' + key + '"]').forEach((hint) => {
+      hint.textContent = (pulsesPerKm / 36).toFixed(1) + ' Hz at 100 km/h, ' +
+                         (maxSpeed * pulsesPerKm / 3600).toFixed(0) + ' Hz at Maximum speed.';
     });
-  }
-  applyGaugePrefs();
-}
-
-function applySpeedUnitLabels(useMPH) {
-  const label = useMPH ? 'MPH' : 'KMH';
-  ['speedUnit', 'speedOffsetUnit', 'measuredSpeedUnit'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.textContent = label;
   });
 }
 
-// Single source of truth for the cluster unit: keeps the Configuration toggle,
-// the Calibration Builder toggle, all unit labels and the cal-builder unit text
-// in lock-step so the two "Cluster in MPH" switches can never disagree.
-function applyMphState(useMPH) {
-  useMPH = !!useMPH;
-  applySpeedUnitLabels(useMPH);
-  const cfg = document.getElementById('convertToMPH');
-  if (cfg) cfg.checked = useMPH;
-  const calMph = document.getElementById('calConvertToMPH');
-  if (calMph) calMph.checked = useMPH;
-  const calUnitEl = document.getElementById('calUnitLabel');
-  if (calUnitEl) calUnitEl.textContent = useMPH ? 'mph' : 'km/h';
-  const vcUnitEl = document.getElementById('vcCalUnit');
-  if (vcUnitEl) vcUnitEl.textContent = useMPH ? 'mph' : 'km/h';
-  clusterUnit = useMPH ? 'mph' : 'km/h';
+// ===================================================================
+// Buttons that aren't settings
+// ===================================================================
+function initButtons() {
+  byId('needleSweepBtn').addEventListener('click', async () => {
+    if ((await runAction('needleSweep')).ok) showNotification('Needle sweep');
+  });
+  byId('boardTestBtn').addEventListener('click', async () => {
+    if (!(await runAction('boardTest')).ok) return;
+    renderBoardTestPill(0, true);
+    byId('boardTestBtn').disabled = true;
+    pollBoardTest();
+  });
+  byId('resetFeedbackBtn').addEventListener('click', async () => {
+    const defaults = { feedbackDeadband: 0.3, feedbackMinSpeed: 8, trimGain: 2.0, trimLimit: 0.40 };
+    let allOk = true;
+    for (const [key, value] of Object.entries(defaults)) allOk = (await commitSetting(key, value)) && allOk;
+    if (allOk) showNotification('Feedback defaults restored');
+  });
+  byId('testBannerStop').addEventListener('click', () => {
+    if (lastStatus.calibrationModeOn) commitSetting('calibrationModeOn', false);
+    else if (lastStatus.speedTestOn) commitSetting('speedTestOn', false);
+    else if (lastStatus.rpmTestOn) commitSetting('rpmTestOn', false);
+  });
 }
 
-async function fetchSettings() {
-  try {
-    const response = await fetch('/api/settings');
-    const data = await response.json();
+// ===== Phone focus =====
+// On a phone a slider, button or tick-box doesn't take the focus, so after typing in
+// a box the box kept it and every tap elsewhere scrolled the page back to it. Any
+// touch outside the box being typed in now lets it go, as a click does on a desktop.
+function initFocusRelease() {
+  document.addEventListener('touchstart', (event) => {
+    const active = document.activeElement;
+    if (!active || !active.matches('input:not([type="range"]):not([type="checkbox"]), textarea, select')) return;
+    if (active === event.target || active.contains(event.target)) return;
+    active.blur();
+  }, { passive: true, capture: true });
+}
 
-    // Load all settings from API once
-    document.getElementById('hasNeedleSweep').checked = data.hasNeedleSweep || false;
-    document.getElementById('broadcastSpeedEnabled').checked = data.broadcastSpeedEnabled || false;
-    document.getElementById('broadcastSpeedID').value = (data.broadcastSpeedID || 0).toString(16).toUpperCase();
-    document.getElementById('broadcastSpeedDLC').value = data.broadcastSpeedDLC ?? 8;
-    document.getElementById('broadcastSpeedLowByte').value = data.broadcastSpeedLowByte ?? 2;
-    document.getElementById('broadcastSpeedHighByte').value = data.broadcastSpeedHighByte ?? 3;
-    document.getElementById('broadcastSpeedLittleEndian').value = (data.broadcastSpeedLittleEndian !== false) ? 'true' : 'false';
-    document.getElementById('broadcastSpeedScale').value = (data.broadcastSpeedScale ?? 0.781).toFixed(3);
-    document.getElementById('broadcastSpeedOffset').value = data.broadcastSpeedOffset ?? 0;
-    for (let i = 0; i < 8; i++) {
-      const dataEl = document.getElementById(`broadcastSpeedData${i}`);
-      if (dataEl) dataEl.value = data[`broadcastSpeedData${i}`] ?? 0;
-    }
-    document.getElementById('sweepSpeed').value = data.sweepSpeed ?? 18;
-    document.getElementById('sweepSpeed-display').textContent = data.sweepSpeed ?? 18;
-    document.getElementById('stepSpeed').value = data.stepSpeed ?? 17;
-    document.getElementById('stepSpeed-display').textContent = data.stepSpeed ?? 17;
-    document.getElementById('stepRPM').value = data.stepRPM ?? 14;
-    document.getElementById('stepRPM-display').textContent = data.stepRPM ?? 14;
-    document.getElementById('coilType').checked = data.coilType || false;
-    document.getElementById('convertToMPH').checked = data.convertToMPH || false;
-    applyMphState(!!data.convertToMPH);
-    currentCalibrationId = parseInt(data.motorCalibration || currentCalibrationId || 1, 10) || 1;
-    document.getElementById('motorCalibration').value = String(currentCalibrationId);
-    document.getElementById('maxSpeed').value = data.maxSpeed || 200;
-    document.getElementById('maxSpeed-display').textContent = data.maxSpeed || 200;
-    document.getElementById('maxFreqHall').value = data.maxFreqHall || 200;
-    document.getElementById('maxFreqHall-display').textContent = data.maxFreqHall || 200;
-    const maxFreqVREl = document.getElementById('maxFreqVR');
-    if (maxFreqVREl) {
-      maxFreqVREl.value = data.maxFreqVR || 200;
-      document.getElementById('maxFreqVR-display').textContent = data.maxFreqVR || 200;
-    }
-    document.getElementById('useGlobalSpeedOffset').checked = data.useGlobalSpeedOffset !== false;
-    document.getElementById('speedOffsetPositive').checked = data.speedOffsetPositive !== false;
-    document.getElementById('speedOffset').value = data.speedOffset || 0;
-    document.getElementById('speedOffset-display').textContent = data.speedOffset || 0;
-    document.getElementById('useSpeedOffsetCurve').checked = data.useSpeedOffsetCurve || false;
-    applyOffsetCurveVisibility(!!data.useSpeedOffsetCurve);
+// ===== Phone sliders =====
+// A scroll that started on a slider used to move it (and send it). Now a slider
+// only changes on a sideways drag: a tap or an up/down swipe leaves it as it was.
+function initSliderTouchGuard() {
+  let guard = null; // { el, x, y, value, drag }
+  const rangeAt = (target) => target && target.closest && target.closest('input[type="range"]');
+  document.addEventListener('touchstart', (event) => {
+    const el = rangeAt(event.target);
+    if (!el || el.disabled) return;
+    const touch = event.touches[0];
+    guard = { el, x: touch.clientX, y: touch.clientY, value: el.value, drag: false };
+  }, { passive: true, capture: true });
+  document.addEventListener('touchmove', (event) => {
+    if (!guard || guard.drag) return;
+    const touch = event.touches[0];
+    const dx = Math.abs(touch.clientX - guard.x);
+    const dy = Math.abs(touch.clientY - guard.y);
+    if (dx > 10 && dx > dy * 1.5) guard.drag = true;
+  }, { passive: true, capture: true });
+  const hold = (event) => {
+    if (!guard || guard.drag || event.target !== guard.el) return;
+    event.stopImmediatePropagation(); // no display update, no request
+    guard.el.value = guard.value;
+  };
+  document.addEventListener('input', hold, true);
+  document.addEventListener('change', hold, true);
+  const end = () => {
+    const ended = guard;
+    if (!ended) return;
+    if (!ended.drag) ended.el.value = ended.value;
+    setTimeout(() => { if (guard === ended) guard = null; }, 100); // the change event comes after touchend
+  };
+  document.addEventListener('touchend', end, true);
+  document.addEventListener('touchcancel', end, true);
+}
 
-    const curveOffsets = Array.isArray(data.speedOffsetCurveOffsets) ? data.speedOffsetCurveOffsets : [0, 0, 0, 0, 0];
-    for (let i = 0; i < 5; i++) {
-      const offsetId = 'curveOffset' + i;
-      const offsetVal = curveOffsets[i] ?? 0;
-      const offsetEl = document.getElementById(offsetId);
-      const displayEl = document.getElementById(offsetId + '-display');
-      if (offsetEl) {
-        offsetEl.value = offsetVal;
-      }
-      if (displayEl) {
-        displayEl.textContent = offsetVal;
-      }
-    }
+// ===== Calibration Mode locks =====
+// What only works in Calibration Mode (the unit refuses it otherwise) is greyed
+// out until it is ticked, and while Auto Fill drives the motor.
+function applyCalibrationLocks() {
+  const calibrating = !!(lastStatus.calibrationModeOn ?? settings.calibrationModeOn);
+  const autoFilling = !!(lastStatus.autoFill && Number(lastStatus.autoFill.state) === 1);
+  document.querySelectorAll('.needs-cal-mode').forEach((el) => { el.disabled = !calibrating || autoFilling; });
+}
 
-    document.getElementById('averageFilterHall').value = data.averageFilterHall || data.averageFilter || 6;
-    document.getElementById('averageFilterHall-display').textContent = data.averageFilterHall || data.averageFilter || 6;
-    document.getElementById('averageFilterRPM').value = data.averageFilterRPM || data.averageFilter || 6;
-    document.getElementById('averageFilterRPM-display').textContent = data.averageFilterRPM || data.averageFilter || 6;
-    const averageFilterVREl = document.getElementById('averageFilterVR');
-    if (averageFilterVREl) {
-      averageFilterVREl.value = data.averageFilterVR || data.averageFilter || 6;
-      document.getElementById('averageFilterVR-display').textContent = data.averageFilterVR || data.averageFilter || 6;
-    }
-    const gpsRateSelect = document.getElementById('gpsRateSelect');
-    if (gpsRateSelect) {
-      const savedGpsRate = String(data.gpsUpdateRateHz ?? 1);
-      gpsRateSelect.value = Array.from(gpsRateSelect.options).some(option => option.value === savedGpsRate)
-        ? savedGpsRate
-        : '1';
-    }
-    updateSpeedOffsetStatus(data.speedOffsetType, data.currentSpeedOffset);
 
-    setCalBanner(data);
+// ===== GPS update rate =====
+let gpsRateMessageUntilMs = 0; // the reply to Set GPS Rate stays up a few seconds
 
-    // Advanced controls
-    document.getElementById('testRPM').checked = data.testRPM || false;
-    document.getElementById('tempRPM').value = data.tempRPM || 0;
-    document.getElementById('tempRPM-display').textContent = data.tempRPM || 0;
-    document.getElementById('testSpeedo').checked = data.testSpeedo || false;
-    document.getElementById('tempSpeed').value = data.tempSpeed || 0;
-    document.getElementById('tempSpeed-display').textContent = data.tempSpeed || 0;
-    document.getElementById('testCal').checked = data.testCal || false;
-    const tempDutyDisp = document.getElementById('tempDutyCycle-display');
-    if (tempDutyDisp) tempDutyDisp.textContent = data.tempDutyCycle || 0;
-    document.getElementById('maxRPM').value = data.maxRPM || 230;
-    document.getElementById('maxRPM-display').textContent = data.maxRPM || 230;
-    document.getElementById('clusterRPMLimit').value = data.clusterRPMLimit || 7000;
-    document.getElementById('clusterRPMLimit-display').textContent = data.clusterRPMLimit || 7000;
-    const analyzerModeEl = document.getElementById('analyzerMode');
-    if (analyzerModeEl) analyzerModeEl.checked = data.analyzerMode || false;
-    const analyzerSerialEl = document.getElementById('analyzerSerial');
-    if (analyzerSerialEl) analyzerSerialEl.checked = data.analyzerSerial || false;
+function initGpsRate() {
+  if (!byId('gpsRateBtn')) return; // no GPS on this product
+  byId('gpsRateBtn').addEventListener('click', async () => {
+    const rate = Number(byId('gpsRateSelect').value);
+    setText('gpsRateMessage', 'Sending…');
+    const { ok, data } = await api('/api/gpsRate', { rate });
+    setText('gpsRateMessage', data.message || data.error || (ok ? 'Done' : 'Failed'));
+    byId('gpsRateMessage').classList.toggle('warn', !ok);
+    gpsRateMessageUntilMs = Date.now() + 4000;
+    if (ok) loadSettings();
+  });
+}
 
-    // Closed-loop feedback (PID) settings
-    const feedbackEnableEl = document.getElementById('feedbackEnable');
-    if (feedbackEnableEl) feedbackEnableEl.checked = data.feedbackEnable || false;
-    const reverseDirectionEl = document.getElementById('reverseDirection');
-    if (reverseDirectionEl) reverseDirectionEl.checked = data.reverseDirection || false;
-    const feedbackMinSpeedEl = document.getElementById('feedbackMinSpeed');
-    if (feedbackMinSpeedEl) {
-      feedbackMinSpeedEl.value = data.feedbackMinSpeed ?? 40;
-      const disp = document.getElementById('feedbackMinSpeed-display');
-      if (disp) disp.textContent = data.feedbackMinSpeed ?? 40;
-    }
-    const pidKpEl = document.getElementById('pidKp');
-    if (pidKpEl) pidKpEl.value = data.pidKp ?? 0.15;
-    const pidKiEl = document.getElementById('pidKi');
-    if (pidKiEl) pidKiEl.value = data.pidKi ?? 1.3;
-    const pidKdEl = document.getElementById('pidKd');
-    if (pidKdEl) pidKdEl.value = data.pidKd ?? 0;
-    const feedbackDeadbandEl = document.getElementById('feedbackDeadband');
-    if (feedbackDeadbandEl) {
-      feedbackDeadbandEl.value = data.feedbackDeadband ?? 1.5;
-      const disp = document.getElementById('feedbackDeadband-display');
-      if (disp) disp.textContent = data.feedbackDeadband ?? 1.5;
-    }
+function renderGpsRate(data) {
+  const message = byId('gpsRateMessage');
+  if (!message) return;
+  setText('gpsFrequencyValue', fixed(data.gpsFrequency, 1));
+  if (Date.now() < gpsRateMessageUntilMs) return;
+  message.classList.remove('warn');
+  const secs = Number(data.gpsAutoApplySecs);
+  if (data.gpsUnavailable) message.textContent = 'No GPS module found.';
+  else if (secs > 0) message.textContent = settings.gpsUpdateRateHz + ' Hz is set after ' + secs + ' s of steady satellites.';
+  else message.textContent = ' ';
+}
 
-    // Speed type dropdown - map speedType to dropdown options
-    let speedTypeValue = 'Hall';  // default
-    if (data.speedType === 'VR') speedTypeValue = 'VR';
-    else if (data.speedType === 'ECU') speedTypeValue = 'ECU';
-    else if (data.speedType === 'ABS') speedTypeValue = 'ABS';
-    else if (data.speedType === 'DSG') speedTypeValue = 'DSG';
-    else if (data.speedType === 'TP2.0') speedTypeValue = 'TP2.0';
-    else if (data.speedType === 'UDS') speedTypeValue = 'UDS';
-    else if (data.speedType === 'GPS') speedTypeValue = 'GPS';
-    else if (data.speedType === 'Custom CAN') speedTypeValue = 'Custom CAN';
-    document.getElementById('speedSource').value = speedTypeValue;
-    const customCANCard = document.getElementById('customCANInputCard');
-    if (customCANCard) customCANCard.style.display = speedTypeValue === 'Custom CAN' ? '' : 'none';
-    const dsgCalcCard = document.getElementById('dsgCalcCard');
-    if (dsgCalcCard) dsgCalcCard.style.display = speedTypeValue === 'DSG' ? '' : 'none';
+// ===================================================================
+// Live status
+// ===================================================================
+let statusFailures = 0;
 
-    // Aftermarket / Custom CAN input settings
-    document.getElementById('aftermarketSpeedID').value = (data.aftermarketSpeedID || 0).toString(16).toUpperCase();
-    document.getElementById('aftermarketSpeedLowByte').value = data.aftermarketSpeedLowByte ?? 0;
-    document.getElementById('aftermarketSpeedHighByte').value = data.aftermarketSpeedHighByte ?? 1;
-    document.getElementById('aftermarketSpeedLittleEndian').value = (data.aftermarketSpeedLittleEndian !== false) ? 'true' : 'false';
-    document.getElementById('aftermarketSpeedScale').value = (data.aftermarketSpeedScale ?? 1.0).toFixed(3);
-    document.getElementById('aftermarketSpeedOffset').value = data.aftermarketSpeedOffset ?? 0;
+async function pollStatus() {
+  if (!document.hidden) {
+    const { ok, data } = await api('/api/status');
+    if (ok) { statusFailures = 0; renderStatus(data); }
+    else if (++statusFailures >= 4) showOffline(); // ~1 s without an answer
+  }
+  setTimeout(pollStatus, STATUS_POLL_MS);
+}
 
-    // DSG speed calculation settings
-    const dsgDefaults = { dsgRatio1: 3.462, dsgRatio2: 2.050, dsgRatio3: 1.300, dsgRatio4: 0.902, dsgRatio5: 0.914, dsgRatio6: 0.756, dsgFinal14: 4.118, dsgFinal56: 3.043, dsgTireCirc: 1.885 };
-    Object.keys(dsgDefaults).forEach(id => {
-      const el = document.getElementById(id);
-      if (el) el.value = Number(data[id] ?? dsgDefaults[id]).toFixed(3);
+// The page can't reach the unit: say so instead of showing frozen values.
+function showOffline() {
+  const badge = byId('modeBadge');
+  badge.textContent = 'Offline';
+  badge.className = 'status-badge bad';
+  document.body.classList.remove('test-mode');
+  byId('testBanner').hidden = true;
+}
+
+
+function renderStatus(data) {
+  lastStatus = data;
+  const modeName = data.calibrationModeOn ? 'Calibration Mode' : data.speedTestOn ? 'Speed Test' : data.rpmTestOn ? 'RPM Test' : '';
+  const modeBadge = byId('modeBadge');
+  modeBadge.textContent = modeName || 'Running';
+  modeBadge.className = 'status-badge ' + (modeName ? 'test' : 'ok');
+  document.body.classList.toggle('test-mode', !!modeName);
+  byId('testBanner').hidden = !modeName;
+  if (modeName) {
+    setText('testBannerText', modeName + (data.speedTestOn ? ': ' + (data.needleTargetSpeed ?? '--') + ' ' + dialUnit
+                                         : data.rpmTestOn ? ': ' + (data.rpmTestRpm ?? '--') + ' rpm' : ''));
+  }
+  const alert = byId('alertBanner');
+  const alertText = data.railTrippedV !== undefined
+    ? 'Motor supply switched off: the rail read ' + fixed(data.railTrippedV, 1) + ' V, well above its setting. ' +
+      'Restart the unit; if it happens again the board needs checking.'
+    : data.feedbackMissing && data.feedbackAvailable ? 'Motor feedback lost: running on the calibration alone.'
+    : data.trimAtLimit && !data.calibrationModeOn
+      ? 'Feedback is at its ' + Math.round(Number(settings.trimLimit) * 100) + '% limit: the calibration doesn’t match ' +
+        'the motor at this speed. Run Auto Fill again.'
+      : '';
+  alert.hidden = !alertText;
+  alert.textContent = alertText;
+  const canBadge = byId('canBadge');
+  if (canBadge) {
+    canBadge.textContent = 'CAN: ' + (data.hasCAN ? 'OK' : 'none');
+    canBadge.className = 'status-badge' + (data.hasCAN ? ' ok' : '');
+  }
+  setText('calibrationBadge', 'Cal: ' + (data.calibrationText || '--'));
+
+  const motorPct = Number(data.motorDutyApplied) / PWM_DUTY_MAX * 100;
+  setText('liveInputSpeed', fixed(data.inputSpeedKph, 0));
+  setText('liveNeedleTarget', data.needleTargetSpeed ?? '--');
+  setText('liveRpm', data.vehicleRPM ?? '--');
+  setText('liveMotorOutput', isVoltageBoard ? fixed(data.driveV, 2) : motorPct.toFixed(1));
+  setText('liveMeasuredSpeed', data.feedbackAvailable ? data.measuredSpeed : (data.feedbackMissing ? 'N/A' : '--'));
+  setText('liveSourceName', data.activeSpeedSource || '--');
+  setPill(byId('canPill'), data.hasCAN ? 'ok' : '', data.hasCAN ? 'Receiving' : 'No frames');
+  setPill(byId('gpsPill'), data.gpsUnavailable ? '' : data.hasGPS ? 'ok' : 'warn',
+          data.gpsUnavailable ? 'Not fitted' : data.hasGPS ? 'Fix, ' + (data.gpsSatellites ?? 0) + ' sats' : 'No fix');
+
+  renderDiagnostics(data);
+  setText('speedTestHint', 'Needle target: ' + (data.needleTargetSpeed ?? '--') + ' ' + dialUnit);
+  applyCalibrationLocks();
+  setText('customCanSpeedValue', (data.aftermarketSpeed ?? '--') + ' km/h');
+  setText('dsgSpeedValue', data.dsgSpeed ?? '--');
+  setText('broadcastValue', data.broadcastSpeedEnabled ? (data.broadcastSpeedValue ?? '--') : 'off');
+  renderGpsRate(data);
+
+  // Another browser (or the unit itself, e.g. Auto Fill) may change the test modes.
+  ['speedTestOn', 'calibrationModeOn', 'rpmTestOn'].forEach((key) => {
+    if (data[key] !== undefined && data[key] !== settings[key]) { settings[key] = data[key]; showSetting(key, data[key]); }
+  });
+  ['speedTestKph', 'rpmTestRpm'].forEach((key) => {
+    const slider = document.querySelector('[data-key="' + key + '"]');
+    if (slider && document.activeElement !== slider && !(liveSliderState[key] || {}).busy) showSetting(key, data[key]);
+  });
+
+  if (isVoltageBoard) {
+    setText('boardRailValue', fixed(data.motorRailV, 2) + ' V');
+    renderDriveCalibrationLive(data);
+    pushChartSample({
+      target: Number(data.needleTargetSpeed),
+      measured: data.feedbackAvailable ? Number(data.measuredSpeed) : null,
+      drive: Number(data.driveMaxV) > 0 ? Number(data.driveV) / Number(data.driveMaxV) * 100 : null,
+      pwm: Number(data.pwmFrac) * 100,
     });
-
-    // RPM source dropdown
-    document.getElementById('rpmSource').value = (data.rpmType === 'CAN') ? 'CAN' : 'Hall';
-
-    // Board-specific hardware: show only the controls this PCB actually has
-    // (voltage control + calibration, rail sense, VR, speed bias). The legacy
-    // Calibration Builder is only offered when there's no voltage injection.
-    if (data.railFloorV !== undefined) railFloorV = Number(data.railFloorV);
-    if (data.railCeilV !== undefined) railCeilV = Number(data.railCeilV);
-    const railMaxEl = document.getElementById('vcRailMaxV');
-    if (railMaxEl) { railMaxEl.min = railFloorV; railMaxEl.max = railCeilV; }
-    setDriveMax(data.driveMaxV);
-    applyBoardFeatures(data);
-    const biasEl = document.getElementById('speedInputBias');
-    if (biasEl) biasEl.value = String(data.speedInputBias ?? 0);
-
-    // Motor Voltage Control (S3). The card is only shown when the board reports
-    // voltage-control hardware; values are seeded from the firmware defaults.
-    const voltageCard = document.getElementById('voltageControlCard');
-    if (voltageCard) {
-      voltageCard.style.display = data.boardHasVoltageControl ? '' : 'none';
+    if (!!data.boardTestRunning !== boardTestWasRunning) {
+      boardTestWasRunning = !!data.boardTestRunning;
+      if (boardTestWasRunning && !boardTestPollTimer) pollBoardTest();
     }
-    const vcEnableEl = document.getElementById('voltageControlEnable');
-    if (vcEnableEl) vcEnableEl.checked = data.voltageControlEnable !== false;
-    setSlider('vcPwmNominal', data.vcPwmNominal ?? 0.80);
-    setSlider('vcRailMaxV', data.vcRailMaxV ?? 12.0);
-    setSlider('vcTrimGain', data.vcTrimGain ?? 0.50);
-    setSlider('vcTrimLimit', data.vcTrimLimit ?? 0.20);
+  } else {
+    updateCalibrationDutyReadout(data.calibrationProbeDuty);
+    if (data.calibrationModeOn) setChartPoint(data.calibrationProbeDuty, curveSpeedAt(data.calibrationProbeDuty));
+    else setChartPoint(data.motorDutyApplied, data.needleTargetSpeed);
+  }
+  updateGauges();
+}
 
-    if (data.boardHasVoltageControl) {
-      renderBoardTestPills(data.boardTestCode, false);
-      const vcCalEl = document.getElementById('vcTestCal');
-      if (vcCalEl) vcCalEl.checked = data.testCal || false;
-      clusterUnit = data.convertToMPH ? 'mph' : 'km/h';
-      renderDriveCal(data.driveCal, !!data.driveCalHz);
-    }
-
-    settingsLoaded = true;
-  } catch (error) {
-    console.log('Error fetching settings:', error);
+function renderDiagnostics(data) {
+  setText('diagInputHz', fixed(data.inputFrequencyHz, 1)); // SpeedPulser's one sensor
+  setText('diagInputKph', fixed(data.inputSpeedKph, 1));
+  setText('diagHall', (data.hallSpeed ?? '--') + ' (' + fixed(data.hallFrequencyHz, 1) + ' Hz)');
+  setText('diagVR', (data.vrSpeed ?? '--') + ' (' + fixed(data.vrFrequencyHz, 1) + ' Hz)');
+  setText('diagECU', data.ecuSpeed ?? '--');
+  setText('diagABS', data.absSpeed ?? '--');
+  setText('diagDSG', data.dsgSpeed ?? '--');
+  setText('diagTP20', data.tp20Speed ?? '--');
+  setText('diagUDS', data.udsSpeed ?? '--');
+  setText('diagGPS', data.gpsSpeed ?? '--');
+  setText('diagCustomCAN', data.aftermarketSpeed ?? '--');
+  setText('diagRpmHall', data.hallRPM ?? '--');
+  setText('diagRpmCan', data.canRPM ?? '--');
+  setText('diagOffset', signed(data.speedOffsetApplied, 1));
+  setText('diagNeedleTarget', (data.needleTargetSpeed ?? '--') + ' ' + dialUnit);
+  setText('diagMotorDuty', (data.motorDutyApplied ?? '--') + ' (' + (Number(data.motorDutyApplied) / PWM_DUTY_MAX * 100).toFixed(1) + '%)');
+  document.querySelectorAll('[data-speed-source]').forEach((el) =>
+    el.classList.toggle('active', el.dataset.speedSource === data.activeSpeedSource));
+  document.querySelectorAll('[data-rpm-source]').forEach((el) =>
+    el.classList.toggle('active', el.dataset.rpmSource === data.activeRpmSource));
+  if (isVoltageBoard) {
+    setText('diagDrive', fixed(data.driveV, 2));
+    setText('diagRail', fixed(data.railCmdV, 2) + ' / ' + fixed(data.motorRailV, 2) + ' V');
+    setText('diagTachoHz', fixed(data.measuredFreqHz, 1));
+    setText('diagTrim', signed(data.driveTrimPct, 1) + '%');
   }
 }
 
-// Only one /api/status request at a time (mirrors SpeedPulser). The 200 ms timer
-// used to fire regardless, so a slow answer stacked requests up until the async
-// server ran out of sockets and the page stopped responding.
-let fetchStatusInFlight = false;
-
-async function fetchStatus() {
-  if (fetchStatusInFlight) return;
-  fetchStatusInFlight = true;
-  try {
-    const response = await fetch('/api/status');
-    const data = await response.json();
-
-    // Update dashboard live data
-    document.getElementById('speed').textContent = data.vehicleSpeed || '--';
-    document.getElementById('rpm').textContent = data.vehicleRPM || '--';
-    const motorDutyEl = document.getElementById('motorDuty');
-    if (motorDutyEl) motorDutyEl.textContent = data.appliedDutyCycle ?? '--';
-    if (data.convertToMPH !== undefined) {
-      applyMphState(!!data.convertToMPH);
-    }
-    
-    // Add test mode indicators
-    const speedElement = document.getElementById('speed');
-    if (data.testSpeedo) {
-      speedElement.title = 'Test Mode: ' + (data.tempSpeed || '0') + ' km/h';
-      speedElement.style.color = 'orange';
-    } else {
-      speedElement.title = '';
-      speedElement.style.color = '';
-    }
-    
-    const rpmElement = document.getElementById('rpm');
-    if (data.testRPM) {
-      rpmElement.title = 'Test Mode: ' + (data.tempRPM || '0') + ' RPM';
-      rpmElement.style.color = 'orange';
-    } else {
-      rpmElement.title = '';
-      rpmElement.style.color = '';
-    }
-
-    // Update advanced live data - all speed sources
-    if (document.getElementById('liveRPM')) {
-      document.getElementById('liveRPM').textContent = data.vehicleRPM || '--';
-    }
-    if (document.getElementById('liveSpeed')) {
-      document.getElementById('liveSpeed').textContent = data.vehicleSpeed || '--';
-    }
-    if (document.getElementById('liveHallRPM')) {
-      document.getElementById('liveHallRPM').textContent = data.hallRPM || '--';
-    }
-    if (document.getElementById('liveCANRPM')) {
-      document.getElementById('liveCANRPM').textContent = data.canRPM || '--';
-    }
-    if (document.getElementById('liveHallSpeed')) {
-      document.getElementById('liveHallSpeed').textContent = data.hallSpeed || '--';
-    }
-    if (document.getElementById('liveVRSpeed')) {
-      document.getElementById('liveVRSpeed').textContent = data.vrSpeed || '--';
-    }
-    if (document.getElementById('liveECUSpeed')) {
-      document.getElementById('liveECUSpeed').textContent = data.ecuSpeed || '--';
-    }
-    if (document.getElementById('liveABSSpeed')) {
-      document.getElementById('liveABSSpeed').textContent = data.absSpeed || '--';
-    }
-    if (document.getElementById('liveDSGSpeed')) {
-      document.getElementById('liveDSGSpeed').textContent = data.dsgSpeed || '--';
-    }
-    if (document.getElementById('liveDSGSpeedCard')) {
-      document.getElementById('liveDSGSpeedCard').textContent = data.dsgSpeed !== undefined ? data.dsgSpeed : '--';
-    }
-    if (document.getElementById('liveTP20Speed')) {
-      document.getElementById('liveTP20Speed').textContent = data.tp20Speed !== undefined ? data.tp20Speed : '--';
-    }
-    if (document.getElementById('liveUDSSpeed')) {
-      document.getElementById('liveUDSSpeed').textContent = data.udsSpeed !== undefined ? data.udsSpeed : '--';
-    }
-    if (document.getElementById('liveGPSSpeed')) {
-      document.getElementById('liveGPSSpeed').textContent = data.gpsSpeed || '--';
-    }
-    if (document.getElementById('liveAftermarketSpeed')) {
-      document.getElementById('liveAftermarketSpeed').textContent = data.aftermarketSpeed !== undefined ? data.aftermarketSpeed : '--';
-    }
-    if (document.getElementById('liveAftermarketSpeedCard')) {
-      document.getElementById('liveAftermarketSpeedCard').textContent = data.aftermarketSpeed !== undefined ? data.aftermarketSpeed : '--';
-    }
-    if (document.getElementById('tempDutyCycle-display')) {
-      document.getElementById('tempDutyCycle-display').textContent = data.tempDutyCycle || 0;
-    }
-    updateCalDutyReadout(data.tempDutyCycle);
-
-    if (document.getElementById('liveGPSStatus')) {
-      if (data.hasGPS) {
-        document.getElementById('liveGPSStatus').textContent = `Connected (${data.gpsSatellites} sats)`;
-      } else if (data.gpsUnavailable) {
-        document.getElementById('liveGPSStatus').textContent = 'Not Available';
-      } else {
-        document.getElementById('liveGPSStatus').textContent = 'Not Connected';
-      }
-    }
-
-    // GPS Frequency card
-    if (document.getElementById('liveGPSFrequency')) {
-      const rawFreq = data.gpsFrequency;
-      const freq = (typeof rawFreq === 'number') ? rawFreq : Number(rawFreq);
-      document.getElementById('liveGPSFrequency').textContent = Number.isFinite(freq) ? freq.toFixed(2) : '--';
-    }
-
-    // GPS auto rate countdown - show in the same green response area used by
-    // the Set button, but only when the user isn't actively reading their
-    // own click feedback.
-    const gpsRateResponseEl = document.getElementById('gpsRateResponse');
-    if (gpsRateResponseEl && (!window.gpsRateUserMessageUntil || Date.now() > window.gpsRateUserMessageUntil)) {
-      const secs = data.gpsAutoApplySecs;
-      if (typeof secs === 'number' && secs >= 0) {
-        gpsRateResponseEl.style.color = '#007a3d';
-        if (secs === 0) {
-          gpsRateResponseEl.textContent = 'Auto-applying saved rate...';
-        } else {
-          gpsRateResponseEl.textContent = `Auto-apply in ${secs}s (waiting for satellite lock + 20s).`;
-        }
-      } else if (gpsRateResponseEl.textContent.startsWith('Auto-apply') || gpsRateResponseEl.textContent.startsWith('Auto-applying')) {
-        gpsRateResponseEl.textContent = '';
-      }
-    }
-
-    updateSpeedOffsetStatus(data.speedOffsetType, data.currentSpeedOffset);
-
-    // System status (read-only, not settings) — tick/cross text only, neutral
-    // badge (OpenHaldex style: never colour the whole badge red/green).
-    const canEl = document.getElementById('canStatus');
-    canEl.textContent = data.hasCAN ? 'CAN: ✓' : 'CAN: ✗';
-    canEl.classList.remove('connected', 'error');
-    const broadcastEl = document.getElementById('broadcastStatus');
-    broadcastEl.textContent = data.broadcastSpeedEnabled ? 'Broadcast: ✓' : 'Broadcast: ✗';
-    broadcastEl.classList.remove('connected', 'error');
-    document.getElementById('canPresent').textContent = data.hasCAN ? 'Healthy' : 'Not Healthy';
-    document.getElementById('canPresent').className = 'status-value pill ' + (data.hasCAN ? 'ok' : 'bad');
-
-    if (document.getElementById('liveBroadcastSpeedValue')) {
-      const suffix = data.broadcastSpeedEnabled ? '' : ' (disabled)';
-      document.getElementById('liveBroadcastSpeedValue').textContent = `${data.broadcastSpeedValue || 0}${suffix}`;
-    }
-    
-    // GPS status in dashboard
-    if (document.getElementById('gpsPresent')) {
-      const gpsPresentEl = document.getElementById('gpsPresent');
-      if (data.hasGPS) {
-        gpsPresentEl.textContent = `Connected (${data.gpsSatellites} sats)`;
-        gpsPresentEl.className = 'status-value pill ' + (Number(data.gpsSatellites) > 0 ? 'ok' : 'warn');
-      } else if (data.gpsUnavailable) {
-        gpsPresentEl.textContent = 'Not Available';
-        gpsPresentEl.className = 'status-value pill bad';
-      } else {
-        gpsPresentEl.textContent = 'Not Connected';
-        gpsPresentEl.className = 'status-value pill bad';
-      }
-    }
-
-    // Closed-loop feedback (PID) live status
-    updateFeedbackStatus(data);
-
-    // Motor Voltage Control (S3) live status
-    updateVoltageStatus(data);
-    setCalBanner(data);
-
-    // Diagnostics: colour the active outputs and the input driving them.
-    updateDiagHighlights(data);
-
-    // Live calibration-curve marker. In cal mode the achieved speed is on the
-    // needle (unknown here), so ride the curve at the jogged duty; otherwise use
-    // the incoming vehicle speed against the applied duty.
-    if (data.testCal) {
-      setCalCurrentPoint(data.tempDutyCycle, curveSpeedAt(data.tempDutyCycle));
-    } else {
-      setCalCurrentPoint(data.appliedDutyCycle, data.vehicleSpeed);
-    }
-
-    updateTileGauges();
-
-  } catch (error) {
-    console.log('Error fetching status:', error);
-  } finally {
-    fetchStatusInFlight = false;
-  }
-}
-
-function updateVoltageStatus(data) {
-  const setTxt = (id, txt) => {
-    const el = document.getElementById(id);
-    if (el) el.textContent = txt;
-  };
-  const pct = (v) => (typeof v === 'number' && Number.isFinite(v))
-    ? Math.round(v * 100) + '%' : '--';
-
-  const buckEl = document.getElementById('liveBuckEnabled');
-  if (buckEl) {
-    if (!data.boardHasVoltageControl) {
-      buckEl.textContent = 'N/A';
-    } else {
-      buckEl.textContent = data.buckEnabled ? 'On' : 'Off';
-    }
-  }
-  const volts = (v) => (v === undefined || v === null) ? '--' : Number(v).toFixed(2) + ' V';
-  setTxt('liveDriveV', data.boardHasVoltageControl ? volts(data.driveV) : 'N/A');
-  setTxt('liveVoltageCmd', data.boardHasVoltageControl ? volts(data.railCmdV) : 'N/A');
-  setTxt('livePwmFrac', data.boardHasVoltageControl ? pct(data.pwmFrac) : 'N/A');
-  const trim = Number(data.driveTrimPct);
-  setTxt('liveDriveTrim', data.boardHasVoltageControl && Number.isFinite(trim)
-    ? (trim >= 0 ? '+' : '') + trim.toFixed(1) + '%' : 'N/A');
-  if (data.boardHasVoltageControl) {
-    setTxt('liveMotorRailV', volts(data.motorRailV));
-    updateVoltageCalReadouts(data);
-  }
-}
-
-function updateFeedbackStatus(data) {
-  const fbOn = !!data.feedbackEnable;
-
-  // Feedback readouts have three states:
-  //   available -> show the measured value / PID trim
-  //   missing   -> motor running but no feedback signal (legacy PCB): show "N/A"
-  //   unknown   -> not seen yet and motor idle: leave "--"
-  const fbValue = (numeric) => {
-    if (data.feedbackAvailable) return numeric;
-    if (data.feedbackMissing) return 'N/A';
-    return '--';
-  };
-
-  const speedNumeric = data.measuredSpeed !== undefined ? String(data.measuredSpeed) : '--';
-  const trimNumeric = (data.pidCorrection !== undefined && data.pidCorrection !== null)
-    ? ((data.pidCorrection > 0 ? '+' : '') + data.pidCorrection)
-    : '--';
-  const speedTxt = fbValue(speedNumeric);
-  const trimTxt = fbValue(trimNumeric);
-  const freqTxt = (typeof data.measuredFreqHz === 'number')
-    ? data.measuredFreqHz.toFixed(1)
-    : '--';
-
-  const setTxt = (id, txt) => {
-    const el = document.getElementById(id);
-    if (el) el.textContent = txt;
-  };
-
-  // Dashboard gauges (mirror the base: always show the measured values)
-  setTxt('feedbackState', fbOn ? 'Enabled' : 'Off');
-  setTxt('measuredSpeed', speedTxt);
-  setTxt('pidCorrection', trimTxt);
-  setTxt('measuredFreqHz', freqTxt);
-
-  // Advanced feedback card live readout
-  setTxt('liveMeasuredSpeed', fbOn ? speedTxt : '--');
-  setTxt('livePidCorrection', fbOn ? trimTxt : '--');
-  setTxt('liveMeasuredFreqHz', freqTxt);
-
-  // Live Data - All Inputs (motor feedback details)
-  setTxt('liveAllMotorSpeed', speedTxt);
-  setTxt('liveAllPidTrim', fbOn ? trimTxt : '--');
-  setTxt('liveAllMotorFreq', freqTxt);
-}
-
-// Colour the Diagnostics live-data so it's obvious which outputs are active and
-// what is driving them: the Final RPM / Final Speed light up orange when driven,
-// together with the input actually feeding them (or nothing extra in Test Mode).
-function updateDiagHighlights(data) {
-  const speedSourceMap = {
-    'Hall': 'liveHallSpeed', 'VR': 'liveVRSpeed', 'ECU': 'liveECUSpeed', 'ABS': 'liveABSSpeed',
-    'DSG': 'liveDSGSpeed', 'TP2.0': 'liveTP20Speed', 'UDS': 'liveUDSSpeed',
-    'GPS': 'liveGPSSpeed', 'Custom CAN': 'liveAftermarketSpeed'
-  };
-  const rpmSourceMap = { 'CAN': 'liveCANRPM', 'Hall': 'liveHallRPM' };
-
-  const setActive = (id, on) => {
-    const el = document.getElementById(id);
-    if (el) el.classList.toggle('live-active', !!on);
-  };
-
-  // Clear every candidate first so stale highlights don't linger.
-  ['liveSpeed', 'liveRPM', 'liveHallRPM', 'liveCANRPM',
-    'liveHallSpeed', 'liveVRSpeed', 'liveECUSpeed', 'liveABSSpeed', 'liveDSGSpeed',
-    'liveTP20Speed', 'liveUDSSpeed', 'liveGPSSpeed', 'liveAftermarketSpeed']
-    .forEach(id => setActive(id, false));
-
-  // Speed channel
-  const speedDriven = !!data.testSpeedo || Number(data.vehicleSpeed) > 0;
-  if (speedDriven) {
-    setActive('liveSpeed', true);
-    if (!data.testSpeedo) {
-      const src = speedSourceMap[data.activeSpeedSource];
-      if (src) setActive(src, true);
-    }
-  }
-
-  // RPM channel
-  const rpmDriven = !!data.testRPM || Number(data.vehicleRPM) > 0;
-  if (rpmDriven) {
-    setActive('liveRPM', true);
-    if (!data.testRPM) {
-      const src = rpmSourceMap[data.activeRpmSource];
-      if (src) setActive(src, true);
-    }
-  }
-}
-
-function pushControl(key, value) {
-  return fetch('/api/control', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ key, value })
-  }).catch(e => console.log('Control error:', e));
-}
-
-function pushAction(action) {
-  fetch('/api/action', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action })
-  }).catch(e => console.log('Action error:', e));
-}
-
-// Speed / RPM test: one POST in flight per endpoint, always carrying the LATEST
-// state. A slider drag fires dozens of input events; posting each one let them
-// land out of order, so a late "enabled, 120" could arrive after the checkbox's
-// "disabled" and switch the test straight back on (needle stuck high, or the
-// live hall/CAN RPM seeming to override Test RPM).
-const testPushState = {};
-function sendTestLatest(url, enabled, value) {
-  const s = testPushState[url] || (testPushState[url] = { busy: false, next: null });
-  s.next = { enabled, value };
-  if (s.busy) return;
-  const run = () => {
-    const body = s.next;
-    s.next = null;
-    s.busy = true;
-    fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    }).catch(e => console.log('Test push error:', e))
-      .finally(() => { s.busy = false; if (s.next) run(); });
-  };
-  run();
-}
-
-function pushTestRPM(enabled, value) {
-  sendTestLatest('/api/testRPM', enabled, value);
-}
-
-function pushTestSpeed(enabled, value) {
-  sendTestLatest('/api/testSpeed', enabled, value);
-}
-
-function hex2bin(hex) {
-  return ("00000000" + parseInt(hex, 16).toString(2)).substr(-8);
-}
-
-function showNotification(message, type = "success") {
-  const notification = document.createElement("div");
-  notification.textContent = message;
-  notification.style.cssText = `
-        position: fixed;
-        top: 20px;
-        left: 50%;
-        transform: translateX(-50%);
-        padding: 1rem 2rem;
-        background: ${type === "error" ? "var(--danger)" : "var(--success)"};
-        color: white;
-        border-radius: 8px;
-        z-index: 10000;
-        font-weight: 600;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-    `;
-
-  document.body.appendChild(notification);
-
-  setTimeout(() => {
-    notification.style.transition = "opacity 0.3s";
-    notification.style.opacity = "0";
-    setTimeout(() => notification.remove(), 300);
-  }, 3000);
-}
-
-// ===== BOARD FEATURES / VOLTAGE CALIBRATION (S3 board) =====
-// The motor is driven with one number, the DRIVE in volts (rail x PWM). The
-// firmware lowers the rail first and only drops the PWM below the 3 V floor, so
-// the drive runs from 0 (stopped) to Maximum Rail. Calibration captures needle
-// marks against drive; running interpolates between them.
-let boardHasVc = false;
-let railFloorV = 3.0;
-let railCeilV = 12.0;
-let driveMaxV = 12.0;
-let calDriveV = 0;                // calibration drive the UI last asked for (V)
-let calDriveTouchedMs = 0;        // last local change — don't let a status poll fight the user
-let calDriveDragging = false;
-let calDriveInFlight = false;     // a tempDriveV POST is outstanding
-let calDrivePending = false;      // the drive moved again while it was outstanding
-let calSpeedTouched = false;      // user has typed a speed: stop overwriting it
+// ===================================================================
+// Voltage board (SpeedPulser V5 / Pro S3): Test Board
+// ===================================================================
 let boardTestWasRunning = false;
 let boardTestPollTimer = null;
-let clusterUnit = 'km/h';
 
-// Show / hide the controls tied to optional hardware blocks, from the flags the
-// firmware reports. Everything is hidden in the markup by default, so a DevKit
-// build never shows the S3-only cards. The legacy multi-point Calibration
-// Builder is only offered when there is no voltage injection.
-function applyBoardFeatures(data) {
-  const toggle = (cls, on) => {
-    document.querySelectorAll('.' + cls).forEach(el => {
-      if (el.tagName === 'OPTION') { el.hidden = !on; el.disabled = !on; }
-      else el.style.display = on ? '' : 'none';
-    });
-  };
-  boardHasVc = !!data.hasVoltageCtrl;
-  toggle('vc-only', boardHasVc);
-  toggle('vr-only', !!data.hasVR);
-  toggle('bias-only', !!data.hasSpeedBias);
-  toggle('rail-only', !!data.hasRailSense);
-  const builder = document.getElementById('calBuilderCard');
-  if (builder) builder.style.display = boardHasVc ? 'none' : '';
-  const typeEl = document.getElementById('boardTypeVal');
-  if (typeEl) {
-    typeEl.textContent = boardHasVc
-      ? 'ESP32-S3 (voltage injection)' + (data.boardIdStrapOk === false ? ' - BOARD_ID strap not seen!' : '')
-      : 'ESP32 DevKit (PWM only)';
-  }
-}
-
-// Set a slider's value and its live "-display" span in one call.
-function setSlider(id, val) {
-  const el = document.getElementById(id);
-  if (!el || val === undefined || val === null) return;
-  el.value = val;
-  updateVcSliderDisplay(id, val);
-}
-
-function updateVcSliderDisplay(id, val) {
-  const disp = document.getElementById(id + '-display');
-  if (!disp) return;
-  const v = Number(val);
-  if (id === 'vcPwmNominal') disp.textContent = Math.round(v * 100) + '%';
-  else if (id === 'vcTrimLimit') disp.textContent = '±' + Math.round(v * 100) + '%';
-  else if (id === 'vcRailMaxV') disp.textContent = v.toFixed(1) + ' V';
-  else disp.textContent = val;
-}
-
-function setDriveMax(v) {
-  if (!(Number(v) > 0)) return;
-  driveMaxV = Number(v);
-  const el = document.getElementById('vcDriveV');
-  if (el) el.max = driveMaxV;
-}
-
-function setCalDrive(v, push) {
-  v = Math.min(driveMaxV, Math.max(0, Number(v) || 0));
-  calDriveV = Math.round(v * 100) / 100;
-  const el = document.getElementById('vcDriveV');
-  if (el) el.value = calDriveV;
-  const disp = document.getElementById('vcDriveV-display');
-  if (disp) disp.textContent = calDriveV.toFixed(2) + ' V';
-  if (push) {
-    calDriveTouchedMs = Date.now();
-    sendCalDrive();
-  }
-}
-
-// One POST in flight at a time, always carrying the latest value. A slider drag
-// fires dozens of input events; posting each one swamps the device and lets them
-// land out of order.
-function sendCalDrive() {
-  if (calDriveInFlight) { calDrivePending = true; return; }
-  calDriveInFlight = true;
-  calDrivePending = false;
-  Promise.resolve(pushControl('tempDriveV', calDriveV.toFixed(2))).finally(() => {
-    calDriveInFlight = false;
-    calDriveTouchedMs = Date.now();
-    if (calDrivePending) sendCalDrive();
-  });
-}
-
-function boardTestPillState(code, running) {
-  if (running) return { cls: 'warn', text: 'Testing…' };
+function renderBoardTestPill(code, running) {
+  const pill = byId('boardTestPill');
+  if (running) return setPill(pill, 'warn', 'Testing…');
   switch (Number(code)) {
-    case 1: return { cls: 'ok', text: 'Pass' };
-    case 3: case 4: case 5: return { cls: 'bad', text: 'Fail' };
-    default: return { cls: 'warn', text: 'Not run' };
+    case 1: return setPill(pill, 'ok', 'Pass');
+    case 3: case 4: case 5: return setPill(pill, 'bad', 'Fail');
+    default: return setPill(pill, 'warn', 'Not run');
   }
 }
 
-function renderBoardTestPills(code, running) {
-  const st = boardTestPillState(code, running);
-  ['boardTestPill', 'vcCalBoardPill'].forEach((id) => {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.className = 'pill' + (st.cls ? ' ' + st.cls : '');
-    el.textContent = st.text;
-  });
+async function loadBoardTest() {
+  if (!isVoltageBoard) return null;
+  const { ok, data } = await api('/api/boardtest');
+  if (!ok) return null;
+  renderBoardTestPill(data.code, data.running);
+  const text = data.running ? 'Testing: motor stopped, stepping the rail…' : (data.text || '--');
+  setText('boardTestText', text);
+  setText('boardTestDetail', text);
+  const ran = Number(data.code) >= 1 && Number(data.code) !== 2;
+  byId('boardTestRows').innerHTML = (data.points || []).map((p, i) =>
+    '<tr><td>' + (i + 1) + '</td><td>' + fixed(p.target, 1) + ' V</td><td>' +
+    (ran ? fixed(p.measured, 2) + ' V' : '--') + '</td></tr>').join('');
+  byId('boardTestBtn').disabled = !!data.running;
+  return data;
 }
 
-async function fetchBoardTest() {
-  try {
-    const r = await fetch('/api/boardtest');
-    const d = await r.json();
-    renderBoardTestPills(d.code, d.running);
-    const txt = document.getElementById('boardTestText');
-    if (txt) txt.textContent = d.running ? 'Testing: motor stopped, stepping the rail…' : (d.text || '--');
-    const rows = document.getElementById('boardTestRows');
-    if (rows && Array.isArray(d.points)) {
-      const ran = Number(d.code) >= 1;
-      rows.innerHTML = d.points.map((p, i) =>
-        '<tr><td>' + (i + 1) + '</td><td>' + Number(p.target).toFixed(1) + ' V</td><td>' +
-        (ran ? Number(p.measured).toFixed(2) + ' V' : '--') + '</td></tr>').join('');
-    }
-    const btn = document.getElementById('boardTestBtn');
-    if (btn) btn.disabled = !!d.running;
-    return d;
-  } catch (e) {
-    console.log('Error fetching board test:', e);
-    return null;
-  }
-}
-
-// Poll quickly while a test runs, then report the result once.
 function pollBoardTest() {
   if (boardTestPollTimer) clearTimeout(boardTestPollTimer);
+  let misses = 0;
   const tick = async () => {
-    const d = await fetchBoardTest();
-    if (d && d.running) {
-      boardTestPollTimer = setTimeout(tick, 500);
-      return;
-    }
+    const data = await loadBoardTest();
+    if (data && data.running) { misses = 0; boardTestPollTimer = setTimeout(tick, 500); return; }
+    if (!data && ++misses < 6) { boardTestPollTimer = setTimeout(tick, 500); return; } // ~3 s of no answer
     boardTestPollTimer = null;
-    if (d) showNotification(d.text || 'Board test finished', d.pass ? 'success' : 'error');
-    fetchSettings();
+    if (!data) {
+      setPill(byId('boardTestPill'), 'bad', 'No answer');
+      byId('boardTestBtn').disabled = false;
+      return showNotification('The unit stopped answering during Test Board', 'error');
+    }
+    if (data) showNotification(data.text || 'Board test finished', data.pass ? 'success' : 'error');
+    loadSettings();
   };
   boardTestPollTimer = setTimeout(tick, 500);
 }
 
-// The captured marks: speed | tacho Hz | drive (rail x PWM) | delete.
-function renderDriveCal(points, hzOk) {
+// ===================================================================
+// Voltage board: Drive Calibration + Auto Fill
+// ===================================================================
+let driveMaxV = 12.0;
+let calibrationDriveV = 0;          // the drive this page last set (V)
+let calibrationDriveTouchedMs = 0;  // last local change: a status poll mustn't fight the user
+let calibrationDriveBusy = false;   // a drive request is outstanding
+let calibrationDrivePending = false;
+let autoFillWasRunning = false;
+let autoFillRailNote = '';
+
+function setDriveRange(maxV) {
+  if (!(Number(maxV) > 0)) return;
+  driveMaxV = Number(maxV);
+  byId('calibrationDriveBar').max = driveMaxV;
+}
+
+function showCalibrationDrive(volts) {
+  calibrationDriveV = Math.round(Math.min(driveMaxV, Math.max(0, Number(volts) || 0)) * 100) / 100;
+  byId('calibrationDriveBar').value = calibrationDriveV;
+  setText('calibrationDriveValue', calibrationDriveV.toFixed(2) + ' V');
+}
+
+function setCalibrationDrive(volts, send) {
+  showCalibrationDrive(volts);
+  if (!send) return;
+  calibrationDriveTouchedMs = Date.now();
+  sendCalibrationDrive();
+}
+
+// One request in flight, always the latest value; the reply carries the drive the
+// unit actually took (it raises at most 0.5 V per request).
+function sendCalibrationDrive() {
+  if (calibrationDriveBusy) { calibrationDrivePending = true; return; }
+  calibrationDriveBusy = true;
+  calibrationDrivePending = false;
+  setSetting('calibrationDriveV', Math.round(calibrationDriveV * 100) / 100).then((result) => {
+    calibrationDriveBusy = false;
+    calibrationDriveTouchedMs = Date.now();
+    if (calibrationDrivePending) sendCalibrationDrive();
+    else if (result.ok) showCalibrationDrive(result.data.value);
+  });
+}
+
+function renderDriveMarks(points, hzOk) {
   points = Array.isArray(points) ? points : [];
-  const rows = document.getElementById('vcCalRows');
-  if (rows) {
-    rows.innerHTML = points.length ? points.map((p, i) =>
-      '<tr><td>' + p.speed + ' ' + clusterUnit + '</td>' +
-      '<td>' + (Number(p.hz) > 0 ? Number(p.hz).toFixed(1) : '--') + '</td>' +
-      '<td>' + Number(p.drive).toFixed(2) + ' V</td>' +
-      '<td class="muted">' + Number(p.rail).toFixed(1) + ' V × ' + Math.round(Number(p.pwm) * 100) + '%</td>' +
-      '<td><button class="stepper-btn" data-del="' + i + '" title="Delete this mark">✕</button></td></tr>'
-    ).join('') : '<tr><td colspan="5" class="muted">No marks captured yet.</td></tr>';
+  byId('driveMarkRows').innerHTML = points.length ? points.map((p, i) =>
+    '<tr><td>' + p.speed + ' ' + dialUnit + '</td>' +
+    '<td><button class="pill needs-cal-mode' + (p.src === 'auto' ? '' : ' ok') + '" data-src-mark="' + i +
+      '" data-auto="' + (p.src === 'auto' ? 1 : 0) + '" title="Tap to switch eye / auto">' +
+      (p.src === 'auto' ? 'auto' : 'eye') + '</button></td>' +
+    '<td>' + (Number(p.hz) > 0 ? fixed(p.hz, 1) : '--') + '</td>' +
+    '<td>' + fixed(p.drive, 2) + ' V</td>' +
+    '<td class="muted">' + fixed(p.rail, 1) + ' V × ' + Math.round(Number(p.pwm) * 100) + '%</td>' +
+    '<td><button class="stepper-btn needs-cal-mode" data-delete-mark="' + i + '" title="Delete this mark">✕</button></td></tr>'
+  ).join('') : '<tr><td colspan="6" class="muted">No marks yet.</td></tr>';
+  applyCalibrationLocks();
+
+  let summary = 'Not calibrated: the motor stays still until the top mark is captured.';
+  if (points.length) {
+    const eye = points.filter((p) => p.src !== 'auto').length;
+    summary = points.length + (points.length === 1 ? ' mark, ' : ' marks, ') + points[0].speed + '–' +
+      points[points.length - 1].speed + ' ' + dialUnit +
+      (eye < points.length ? ' (' + eye + ' by eye, ' + (points.length - eye) + ' by Auto Fill).' : '.');
+    if (points.length === 1) summary += ' Press Auto Fill to fill in the rest.';
+    else if (eye === 1) summary += ' One mark by eye: a low one too makes the low end closer.';
+    if (!hzOk) summary += ' No motor feedback readings, so the feedback trim and Motor speed are off.';
   }
-  const res = document.getElementById('vcCalResult');
-  if (res) {
-    if (!points.length) {
-      res.textContent = 'Not calibrated. Capture a low mark and the top mark at least.';
-    } else {
-      let t = points.length + (points.length === 1 ? ' mark' : ' marks') + ', ' +
-        points[0].speed + '–' + points[points.length - 1].speed + ' ' + clusterUnit + '.';
-      if (points.length === 1) t += ' Add a low mark too: one mark assumes the dial is linear to zero.';
-      if (!hzOk) t += ' No tacho readings, so Measured Speed and the feedback trim are off.';
-      res.textContent = t;
-    }
+  setText('driveCalSummary', summary);
+}
+
+function applyDriveTable(data) {
+  settings.driveCal = data.driveCal;
+  settings.driveCalHz = data.driveCalHz;
+  renderDriveMarks(data.driveCal, data.driveCalHz);
+  setRestoreAvailable(data.calBackup);
+}
+
+function setRestoreAvailable(available) {
+  if (available !== undefined) {
+    byId('restoreCalBtn').disabled = !available || autoFillWasRunning || !lastStatus.calibrationModeOn;
   }
 }
 
-// POST /api/action with optional extra fields; resolves to the parsed error (or null).
-async function postAction(action, extra) {
-  const r = await fetch('/api/action', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(Object.assign({ action }, extra || {}))
-  });
-  if (r.ok) return null;
-  const e = await r.json().catch(() => ({}));
-  return e.error || ('HTTP ' + r.status);
-}
-
-// POST /api/action and keep the JSON body (the mark actions answer with the table).
-async function vcAction(body) {
-  try {
-    const r = await fetch('/api/action', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    });
-    const d = await r.json().catch(() => ({}));
-    return { ok: r.ok, data: d };
-  } catch (e) {
-    return { ok: false, data: { error: 'Device not reachable' } };
+function renderAutoFill(autoFill) {
+  if (!autoFill) return;
+  const state = Number(autoFill.state); // 0 idle, 1 running, 2 done, 3 failed
+  const running = state === 1;
+  let message = autoFill.msg || '';
+  if (running && autoFill.total) {
+    message = 'Auto Fill: mark ' + (Number(autoFill.index) + 1) + ' of ' + autoFill.total + ', ' +
+      autoFill.speed + ' ' + dialUnit + ' (' + fixed(autoFill.hz, 1) + ' Hz). Hands off the drive.';
+  }
+  if (!running && autoFillRailNote && state !== 3) message = (message ? message + ' ' : '') + autoFillRailNote;
+  const messageEl = byId('autoFillMessage');
+  messageEl.textContent = message; // empty = the line takes no room
+  messageEl.classList.toggle('warn', state === 3);
+  byId('autoFillBtn').hidden = running;
+  byId('autoFillStopBtn').hidden = !running;
+  if (running) byId('restoreCalBtn').disabled = true;
+  if (autoFillWasRunning && !running) {
+    autoFillWasRunning = false;
+    if (state === 2) showNotification(autoFill.msg || 'Auto Fill done');
+    else if (state === 3) showNotification(autoFill.msg || 'Auto Fill stopped', 'error');
+    loadSettings(); // the new table
+  } else if (running) {
+    autoFillWasRunning = true;
   }
 }
 
-function initVoltageCal() {
-  // Board test (Diagnostics page)
-  const btBtn = document.getElementById('boardTestBtn');
-  if (btBtn) {
-    btBtn.addEventListener('click', async () => {
-      try {
-        const err = await postAction('boardTest');
-        if (err) { showNotification(err, 'error'); return; }
-        renderBoardTestPills(0, true);
-        btBtn.disabled = true;
-        pollBoardTest();
-      } catch (e) {
-        showNotification('Board test could not start', 'error');
-      }
-    });
-  }
-
-  // Calibration-mode toggle mirrors the legacy testCal flag.
-  const vcCal = document.getElementById('vcTestCal');
-  if (vcCal) {
-    vcCal.addEventListener('change', () => {
-      pushControl('testCal', vcCal.checked);
-      const legacy = document.getElementById('testCal');
-      if (legacy) legacy.checked = vcCal.checked;
-      if (vcCal.checked) setCalDrive(0, false); // firmware restarts with the motor stopped
-    });
-  }
-
-  // Drive: -/+ jog buttons and a slider, both in volts.
-  document.querySelectorAll('[data-djog]').forEach((btn) => {
-    btn.addEventListener('click', () => setCalDrive(calDriveV + Number(btn.dataset.djog), true));
-  });
-  const driveEl = document.getElementById('vcDriveV');
-  if (driveEl) {
-    driveEl.addEventListener('pointerdown', () => { calDriveDragging = true; });
-    window.addEventListener('pointerup', () => { calDriveDragging = false; });
-    window.addEventListener('pointercancel', () => { calDriveDragging = false; });
-    driveEl.addEventListener('input', () => setCalDrive(driveEl.value, true));
-  }
-
-  const speedEl = document.getElementById('vcCalSpeed');
-  if (speedEl) speedEl.addEventListener('input', () => { calSpeedTouched = true; });
-
-  const captureBtn = document.getElementById('captureMarkBtn');
-  if (captureBtn) {
-    captureBtn.addEventListener('click', async () => {
-      const speed = Number(speedEl ? speedEl.value : 0);
-      if (!(speed >= 1 && speed <= 400)) {
-        showNotification('Enter the speed the needle is showing (1-400)', 'error');
-        return;
-      }
-      const r = await vcAction({ action: 'calAddPoint', speed });
-      if (r.ok) {
-        renderDriveCal(r.data.driveCal, r.data.driveCalHz);
-        showNotification('Captured ' + speed + ' ' + clusterUnit + ' at ' + calDriveV.toFixed(2) + ' V drive');
-      } else {
-        showNotification(r.data.error || 'Capture failed', 'error');
-      }
-    });
-  }
-
-  const rows = document.getElementById('vcCalRows');
-  if (rows) {
-    rows.addEventListener('click', async (e) => {
-      const btn = e.target.closest('[data-del]');
-      if (!btn) return;
-      const r = await vcAction({ action: 'calDeletePoint', index: Number(btn.dataset.del) });
-      if (r.ok) renderDriveCal(r.data.driveCal, r.data.driveCalHz);
-      else showNotification(r.data.error || 'Delete failed', 'error');
-    });
-  }
-
-  const clearBtn = document.getElementById('clearMarksBtn');
-  if (clearBtn) {
-    clearBtn.addEventListener('click', async () => {
-      if (!confirm('Delete every captured mark?')) return;
-      const r = await vcAction({ action: 'calClearPoints' });
-      if (r.ok) { renderDriveCal(r.data.driveCal, r.data.driveCalHz); showNotification('Marks cleared'); }
-      else showNotification(r.data.error || 'Clear failed', 'error');
-    });
-  }
-}
-
-// Live voltage-board read-outs from /api/status (S3 board only).
-function updateVoltageCalReadouts(data) {
-  const setTxt = (id, v, cls) => {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.textContent = v;
-    if (cls !== undefined) {
-      el.classList.remove('on', 'warn');
-      if (cls) el.classList.add(cls);
-    }
-  };
-  const fmtV = (v) => (v === undefined || v === null) ? '--' : Number(v).toFixed(2) + ' V';
-  const spread = Number(data.fbHzSpread);
-  const turning = spread >= 0;
-
-  // Measured rail is only trusted once Test Board has passed.
-  const measCls = data.railSenseOk ? '' : 'warn';
-  setTxt('boardRailVal', fmtV(data.motorRailV), measCls);
-  setTxt('vcCalDrive', fmtV(data.driveV));
-  setTxt('vcCalSetV', fmtV(data.railCmdV));
-  setTxt('vcCalMeasV', fmtV(data.motorRailV), measCls);
-  setTxt('vcCalPwm', data.pwmFrac !== undefined ? Math.round(Number(data.pwmFrac) * 100) + '%' : '--');
-  setTxt('vcCalHz', data.measuredFreqHz !== undefined ? Number(data.measuredFreqHz).toFixed(1) : '--');
-  // Not steady = the average is still moving: show by how much (Hz across ~1 s).
+function renderDriveCalibrationLive(data) {
+  const turning = Number(data.fbHzSpread) >= 0;
+  setText('driveReadout', fixed(data.driveV, 2) + ' V');
+  setText('railSetReadout', fixed(data.railCmdV, 2) + ' V');
+  const measured = byId('railMeasuredReadout');
+  measured.textContent = fixed(data.motorRailV, 2) + ' V';
+  measured.className = 'status-value ' + (data.railSenseOk ? '' : 'warn');
+  setText('pwmReadout', Math.round(Number(data.pwmFrac) * 100) + '%');
+  setText('motorHzReadout', fixed(data.measuredFreqHz, 1));
   const drift = Number(data.fbHzDrift) || 0;
-  setTxt('vcCalSteady', turning ? (data.fbStable ? 'Steady' : 'Settling ' + (drift >= 0 ? '+' : '') + drift.toFixed(1) + ' Hz') : 'Stopped',
-         turning ? (data.fbStable ? 'on' : 'warn') : '');
-  if (data.driveMaxV !== undefined) setDriveMax(data.driveMaxV);
+  const steady = byId('steadyReadout');
+  steady.textContent = turning ? (data.fbStable ? 'Steady' : 'Settling ' + (drift >= 0 ? '+' : '') + drift.toFixed(1) + ' Hz') : 'Stopped';
+  steady.className = 'status-value ' + (turning ? (data.fbStable ? 'ok' : 'warn') : '');
+  if (data.driveMaxV !== undefined) setDriveRange(data.driveMaxV);
 
-  // Calibration hint: one line, fixed height, so nothing below it moves.
-  const warn = document.getElementById('vcCalWarn');
-  if (warn) {
-    let msg = '';
-    if (data.testCal) {
-      if (data.railLimited) msg = 'The rail can’t reach the set voltage: supply too low, or the motor is overloaded.';
-      else if (!turning) msg = 'Motor stopped. Raise the drive until the needle moves.';
-      else if (!data.fbStable) msg = 'Motor speed still settling. Wait for “Steady” before capturing.';
-      else msg = 'Steady. Enter the speed the needle shows and capture it.';
-    }
-    warn.textContent = msg || ' ';
+  let hint = '';
+  if (data.calibrationModeOn) {
+    if (data.railLimited) hint = 'The rail can’t reach the set voltage: supply too low, or the motor is overloaded.';
+    else if (data.autoFill && Number(data.autoFill.state) === 1) hint = '';
+    else if (!turning) hint = 'Raise the drive until the needle moves.';
+    else if (!data.fbStable) hint = 'Settling: wait for Steady.';
   }
+  setText('calibrationHint', hint); // empty = the line takes no room
+  if (!data.calibrationModeOn && calibrationDriveV !== 0) showCalibrationDrive(0); // nothing uses it outside the mode
 
-  // Keep the drive control in step with the firmware (e.g. after Calibration
-  // Mode restarts it at 0) unless the user is adjusting it.
-  if (data.tempDriveV !== undefined && !calDriveDragging && !calDriveInFlight && !calDrivePending &&
-      Date.now() - calDriveTouchedMs > 1000) {
-    if (Math.abs(Number(data.tempDriveV) - calDriveV) > 0.005) setCalDrive(data.tempDriveV, false);
+  // Follow the unit's drive (Calibration Mode just started, Auto Fill) unless the user is adjusting it.
+  if (!calibrationDriveBusy && !calibrationDrivePending && Date.now() - calibrationDriveTouchedMs > 1000 &&
+      Math.abs(Number(data.calibrationDriveV) - calibrationDriveV) > 0.005) {
+    showCalibrationDrive(data.calibrationDriveV);
   }
-  const vcCalEl = document.getElementById('vcTestCal');
-  if (vcCalEl && data.testCal !== undefined) vcCalEl.checked = !!data.testCal;
-
-  // Board test started or finished elsewhere (another browser): refresh it.
-  if (data.boardTestRunning !== undefined && !!data.boardTestRunning !== boardTestWasRunning) {
-    boardTestWasRunning = !!data.boardTestRunning;
-    if (boardTestWasRunning && !boardTestPollTimer) pollBoardTest();
-  }
+  renderAutoFill(data.autoFill);
+  setRestoreAvailable(data.calBackup);
 }
 
-// "Cal:" banner from what the device says is driving the motor: the selected PWM
-// preset, or (S3 board with Voltage Control on) the voltage calibration marks.
-let calModeVoltage = false;
-function setCalBanner(data) {
-  if (data.calMode === undefined) return;
-  calModeVoltage = data.calMode === 'voltage';
-  const el = document.getElementById('calibrationStatus');
-  if (el) {
-    if (calModeVoltage) {
-      el.textContent = 'Cal: ' + (data.calibrationText || '--');
-    } else {
-      const sel = document.getElementById('motorCalibration');
-      const opt = sel ? sel.options[sel.selectedIndex] : null;
-      el.textContent = opt ? `Cal: ${opt.textContent}` : 'Cal: --';
-    }
-  }
-  const note = document.getElementById('calPresetNote');
-  if (note) note.style.display = calModeVoltage ? '' : 'none';
-}
+function initDriveCalibration() {
+  document.querySelectorAll('[data-drive-step]').forEach((button) => button.addEventListener('click', () =>
+    setCalibrationDrive(calibrationDriveV + Number(button.dataset.driveStep), true)));
 
-// ===== CALIBRATION BUILDER =====
-const CAL_PWM_MAX = 4095;
-const CAL_CHIP_MAX = 300;   // capture targets available up to 300 km/h
-let calSelectedSpeed = 0;
-let calChipsMaxSpeed = -1;
-let lastCalPointCount = 0;  // points in the current builder state (save guard)
-
-function initCalBuilder() {
-  // Jog steppers with press-and-hold repeat + acceleration
-  document.querySelectorAll('.stepper-btn[data-jog]').forEach((btn) => {
-    const delta = parseInt(btn.dataset.jog, 10);
-    attachHold(btn, () => calJog(delta));
+  byId('captureMarkBtn').addEventListener('click', async () => {
+    const speed = Number(byId('markSpeedInput').value);
+    if (!(speed >= 1 && speed <= 400)) return showNotification('Enter the speed the needle is showing (1-400)', 'error');
+    const result = await runAction('calAddPoint', { speed });
+    if (!result.ok) return;
+    applyDriveTable(result.data);
+    showNotification('Captured ' + speed + ' ' + dialUnit + ' at ' + fixed(lastStatus.driveV, 2) + ' V drive');
   });
 
-  const targetInput = document.getElementById('calTargetSpeed');
-  if (targetInput) {
-    targetInput.addEventListener('input', () => setCalTarget(parseInt(targetInput.value, 10) || 0, false));
-  }
-
-  const captureBtn = document.getElementById('calCaptureBtn');
-  if (captureBtn) captureBtn.addEventListener('click', calCapture);
-
-  const nameEl = document.getElementById('calName');
-  if (nameEl) {
-    nameEl.addEventListener('change', () => calPost({ op: 'setName', name: nameEl.value }).catch(() => {}));
-  }
-
-  // Cal-page "Cluster in MPH" toggle — mirrors and drives the Configuration one.
-  const calMphEl = document.getElementById('calConvertToMPH');
-  if (calMphEl) {
-    calMphEl.addEventListener('change', () => {
-      applyMphState(calMphEl.checked);
-      pushControl('convertToMPH', calMphEl.checked);
-    });
-  }
-
-  bindCal('calApplyBtn', () => calPost({ op: 'apply' }).then((s) => {
-    applyCalState(s);
-    refreshCalibrationsSelect();
-    fetchCalCurve();
-    showNotification('Calibration generated and applied');
-  }));
-
-  bindCal('calSaveBtn', () => {
-    if (lastCalPointCount < 2) {
-      showNotification('Capture at least 2 points before saving', 'error');
+  byId('driveMarkRows').addEventListener('click', async (event) => {
+    const source = event.target.closest('[data-src-mark]');
+    if (source) {
+      const result = await runAction('calSetSource', { index: Number(source.dataset.srcMark), auto: source.dataset.auto !== '1' });
+      if (result.ok) applyDriveTable(result.data);
       return;
     }
-    // A saved custom cal shows up as the value=200 option; warn before clobbering it.
-    const sel = document.getElementById('motorCalibration');
-    const exists = sel && [...sel.options].some((o) => o.value === '200');
-    if (exists && !confirm('A custom calibration is already saved on the device. Overwrite it?')) {
-      return;
-    }
-    calPost({ op: 'save' }).then((s) => {
-      applyCalState(s);
-      refreshCalibrationsSelect();
-      fetchCalCurve();
-      showNotification('Calibration saved to device');
-    });
+    const button = event.target.closest('[data-delete-mark]');
+    if (!button) return;
+    const result = await runAction('calDeletePoint', { index: Number(button.dataset.deleteMark) });
+    if (result.ok) applyDriveTable(result.data);
   });
 
-  bindCal('calClearBtn', () => {
-    if (!confirm('Clear all captured calibration points?')) return;
-    calPost({ op: 'clearPoints' }).then(applyCalState).then(() => showNotification('Points cleared'));
+  byId('clearMarksBtn').addEventListener('click', async () => {
+    if (!confirm('Delete every mark?')) return;
+    const result = await runAction('calClearPoints');
+    if (result.ok) { applyDriveTable(result.data); showNotification('Marks cleared'); }
   });
 
-  bindCal('calExportTextBtn', () => calPost({ op: 'export' }).then((r) => {
-    const text = r.json || '';
-    document.getElementById('calText').value = text;
-    const nm = document.getElementById('calName');
-    const base = (nm && nm.value.trim()) || 'calibration';
-    const fname = base.replace(/[^a-z0-9._-]+/gi, '_') + '_pwm-cal.txt';
-    downloadTextFile(fname, text);
-    showNotification('Exported PWM calibration');
-  }));
-
-  bindCal('calExportCArrayBtn', () => calPost({ op: 'export' }).then((r) => {
-    const text = r.carray || '';
-    document.getElementById('calText').value = text;
-    const nm = document.getElementById('calName');
-    const base = (nm && nm.value.trim()) || 'calibration';
-    const fname = base.replace(/[^a-z0-9._-]+/gi, '_') + '_pwm-carray.h';
-    downloadTextFile(fname, text);
-    showNotification('Exported PWM C-Array preset');
-  }));
-
-  bindCal('calExportVoltageBtn', () => calPost({ op: 'export' }).then((r) => {
-    if (!r.voltage) {
-      showNotification('No voltage calibration on this board', 'error');
-      return;
-    }
-    if (!r.voltageMarks) {
-      showNotification('No marks captured yet: nothing to export', 'error');
-      return;
-    }
-    document.getElementById('calText').value = r.voltage;
-    const day = new Date().toISOString().slice(0, 10);
-    downloadTextFile('speedpulserpro_voltage-cal_' + day + '.txt', r.voltage);
-    showNotification('Exported voltage calibration (' + r.voltageMarks + ' marks)');
-  }));
-
-  bindCal('calImportBtn', () => {
-    const fileEl = document.getElementById('calImportFile');
-    if (fileEl) fileEl.click();
+  byId('autoFillBtn').addEventListener('click', async () => {
+    // Say which marks it keeps: a table from before V5.05 loads with every mark "eye".
+    const eye = (settings.driveCal || []).filter((p) => p.src !== 'auto').map((p) => p.speed);
+    if (!confirm('Auto Fill keeps your eye marks (' + (eye.join(', ') || 'none') + ' ' + dialUnit + ') and measures ' +
+                 'new auto marks around them, up to the top mark (1-2 minutes).\n\nNot all of those set by eye? ' +
+                 'Cancel, and tap their eye pills to make them auto first.\n\nStopping it puts the current table back. Start?')) return;
+    if ((await runAction('calAutoFill')).ok) { autoFillWasRunning = true; renderAutoFill({ state: 1, msg: 'Starting…' }); }
   });
+  byId('autoFillStopBtn').addEventListener('click', () => runAction('calAutoFillStop'));
+  byId('restoreCalBtn').addEventListener('click', async () => {
+    if (!confirm('Put back the calibration from before the last Auto Fill? (The current one is kept, so you can swap back.)')) return;
+    const result = await runAction('calRestore');
+    if (result.ok) { applyDriveTable(result.data); showNotification('Previous calibration restored'); loadSettings(); }
+  });
+}
 
-  const importFileEl = document.getElementById('calImportFile');
-  if (importFileEl) {
-    importFileEl.addEventListener('change', () => {
-      const file = importFileEl.files[0];
-      if (!file) return;
-      const reader = new FileReader();
-      reader.onload = () => {
-        const text = String(reader.result || '').trim();
-        document.getElementById('calText').value = text;
-        if (text) calImportText(text);
-      };
-      reader.readAsText(file);
-      importFileEl.value = '';   // allow re-picking the same file
-    });
+// ===================================================================
+// Legacy board (SpeedPulser legacy / Pro DevKit): presets + Calibration Builder
+// ===================================================================
+const CAL_CHIP_MAX = 300;
+let calibrationTargetSpeed = 10;
+let calibrationChipsBuilt = false;
+let calibrationPointCount = 0;
+let jogBusy = false;
+
+async function loadPresets() {
+  const { ok, data } = await api('/api/calibrations');
+  if (!ok || !Array.isArray(data.calibrations)) return false;
+  const select = byId('presetSelect');
+  // As text: the custom name comes from a typed name or an imported file.
+  select.replaceChildren(...data.calibrations.map((c) => new Option(c.name, c.id)));
+  if (data.selected !== undefined) select.value = data.selected;
+  return true;
+}
+
+async function refreshCalibrationBuilder() {
+  if (isVoltageBoard) return;
+  const { ok, data } = await api('/api/cal');
+  if (ok) applyCalibrationBuilderState(data);
+}
+
+function updateCalibrationDutyReadout(duty) {
+  duty = Number(duty) || 0;
+  setText('calDutyNow', duty);
+  setText('calDutyPct', (duty / PWM_DUTY_MAX * 100).toFixed(1));
+  setText('calCaptureDuty', duty);
+}
+
+function applyCalibrationBuilderState(state) {
+  if (!state) return;
+  updateCalibrationDutyReadout(state.duty);
+  if (typeof state.clusterInMph === 'boolean' && state.clusterInMph !== !!settings.clusterInMph) {
+    settings.clusterInMph = state.clusterInMph; // a custom cal captured in mph switches the dial to mph
+    showSetting('clusterInMph', state.clusterInMph);
+    applyDialUnit(state.clusterInMph);
+  }
+  const nameInput = byId('calName');
+  if (document.activeElement !== nameInput) nameInput.value = state.name || '';
+  buildCalibrationChips();
+  const points = Array.isArray(state.points) ? state.points : [];
+  calibrationPointCount = state.count ?? points.length;
+  renderCalibrationPoints(points);
+  scheduleChartDraw();
+}
+
+function buildCalibrationChips() {
+  if (calibrationChipsBuilt) return;
+  calibrationChipsBuilt = true;
+  const grid = byId('calTargetChips');
+  for (let speed = 10; speed <= CAL_CHIP_MAX; speed += 10) {
+    const chip = document.createElement('button');
+    chip.className = 'chip';
+    chip.textContent = speed;
+    chip.dataset.speed = speed;
+    chip.addEventListener('click', () => setCalibrationTarget(speed, true));
+    grid.appendChild(chip);
   }
 }
 
-// One importer for both kinds; the device reads the file's "type" and answers
-// with kind:'voltage' for a voltage cal (otherwise the PWM builder state).
-function calImportText(text) {
-  calPost({ op: 'import', json: text }).then((s) => {
-    if (s && s.kind === 'voltage') {
-      renderDriveCal(s.driveCal, s.driveCalHz);
-      fetchSettings();   // Nominal PWM / Maximum Rail / MPH came with the file
-      const n = Array.isArray(s.driveCal) ? s.driveCal.length : 0;
-      showNotification('Voltage calibration imported (' + n + ' marks)');
-      return;
-    }
-    applyCalState(s);
-    refreshCalibrationsSelect();
-    fetchCalCurve();
-    showNotification('PWM calibration imported');
-  }).catch(() => {});   // calPost already showed the device's reason
+function setCalibrationTarget(speed, fromChip) {
+  calibrationTargetSpeed = speed;
+  setText('calCaptureSpeed', speed);
+  if (fromChip) byId('calTargetSpeed').value = speed;
+  document.querySelectorAll('#calTargetChips .chip').forEach((c) =>
+    c.classList.toggle('active', Number(c.dataset.speed) === speed));
 }
 
-// Trigger a browser download of the given text as a file.
-function downloadTextFile(filename, text) {
-  const blob = new Blob([text], { type: 'text/plain' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+function renderCalibrationPoints(points) {
+  const list = byId('calPointsList');
+  if (!points.length) { list.innerHTML = '<p class="hint">No points captured yet.</p>'; return; }
+  list.innerHTML = '<div class="cal-point-head"><span>Speed</span><span>Duty</span><span></span></div>' +
+    points.map((p, i) => '<div class="cal-point-row"><span>' + p.speed + '</span><span>' + p.duty +
+      '</span><button class="cal-del needs-cal-mode" data-index="' + i + '">✕</button></div>').join('');
+  applyCalibrationLocks();
 }
 
-function bindCal(id, fn) {
-  const el = document.getElementById(id);
-  if (el) el.addEventListener('click', () => { try { fn(); } catch (e) { console.log(e); } });
-}
-
-// Press-and-hold helper: fires immediately, then repeats faster while held.
-function attachHold(el, fn) {
+// Press-and-hold: fires at once, then repeats faster while held.
+function attachHold(element, action) {
   let timer = null;
   let delay = 320;
   const stop = () => { if (timer) { clearTimeout(timer); timer = null; } };
-  const start = (e) => {
-    e.preventDefault();
-    fn();
+  element.addEventListener('pointerdown', (event) => {
+    event.preventDefault();
+    action();
     delay = 320;
-    const tick = () => { fn(); delay = Math.max(60, delay * 0.8); timer = setTimeout(tick, delay); };
-    timer = setTimeout(tick, delay);
+    const repeat = () => { action(); delay = Math.max(60, delay * 0.8); timer = setTimeout(repeat, delay); };
+    timer = setTimeout(repeat, delay);
+  });
+  ['pointerup', 'pointerleave', 'pointercancel'].forEach((name) => element.addEventListener(name, stop));
+}
+
+async function jogDuty(delta) {
+  if (jogBusy) return; // one jog at a time: held buttons can't stack requests
+  jogBusy = true;
+  const result = await calibrationOp('jog', { delta });
+  jogBusy = false;
+  if (result.ok) updateCalibrationDutyReadout(result.data.duty);
+}
+
+function afterCustomCalibrationChange(result, message) {
+  if (!result.ok) return;
+  applyCalibrationBuilderState(result.data);
+  loadPresets().then(() => {
+    if (result.data.selected) { settings.presetId = CUSTOM_CAL_ID; byId('presetSelect').value = CUSTOM_CAL_ID; }
+  });
+  loadCalCurve();
+  showNotification(message);
+}
+
+function initCalibrationBuilder() {
+  document.querySelectorAll('.stepper-btn[data-jog]').forEach((button) =>
+    attachHold(button, () => jogDuty(parseInt(button.dataset.jog, 10))));
+  byId('calTargetSpeed').addEventListener('input', (event) =>
+    setCalibrationTarget(parseInt(event.target.value, 10) || 0, false));
+  byId('calCaptureBtn').addEventListener('click', async () => {
+    const result = await calibrationOp('addPoint', { speed: calibrationTargetSpeed });
+    if (!result.ok) return;
+    applyCalibrationBuilderState(result.data);
+    showNotification('Captured ' + calibrationTargetSpeed + ' @ duty ' + result.data.duty);
+  });
+  byId('calPointsList').addEventListener('click', async (event) => {
+    const button = event.target.closest('.cal-del');
+    if (!button) return;
+    const result = await calibrationOp('deletePoint', { index: Number(button.dataset.index) });
+    if (result.ok) applyCalibrationBuilderState(result.data);
+  });
+  byId('calName').addEventListener('change', (event) => calibrationOp('setName', { name: event.target.value }));
+  byId('calSaveBtn').addEventListener('click', async () => {
+    if (calibrationPointCount < 2) return showNotification('Capture at least 2 points first', 'error');
+    const exists = [...byId('presetSelect').options].some((o) => Number(o.value) === CUSTOM_CAL_ID);
+    if (exists && !confirm('A custom calibration is already saved on the unit. Overwrite it?')) return;
+    // The name first (it is also sent on blur, which may still be in flight).
+    await calibrationOp('setName', { name: byId('calName').value });
+    afterCustomCalibrationChange(await calibrationOp('save'), 'Custom calibration saved and in use');
+  });
+  byId('calClearBtn').addEventListener('click', async () => {
+    if (!confirm('Clear all captured calibration points?')) return;
+    const result = await calibrationOp('clearPoints');
+    if (result.ok) { applyCalibrationBuilderState(result.data); showNotification('Points cleared'); }
+  });
+}
+
+// ===================================================================
+// Export / import
+// ===================================================================
+function downloadTextFile(filename, text) {
+  const url = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function calibrationFileName(suffix) {
+  const name = (byId('calName').value.trim() || 'calibration').replace(/[^a-z0-9._-]+/gi, '_');
+  return name + suffix;
+}
+
+function initExportImport() {
+  const exportAs = (pick, fileName, message) => async () => {
+    const result = await calibrationOp('export');
+    if (!result.ok) return;
+    const text = pick(result.data);
+    if (!text) return;
+    byId('calibrationText').value = text;
+    downloadTextFile(fileName(), text);
+    showNotification(message);
   };
-  el.addEventListener('pointerdown', start);
-  el.addEventListener('pointerup', stop);
-  el.addEventListener('pointerleave', stop);
-  el.addEventListener('pointercancel', stop);
-}
+  byId('exportVoltageBtn').addEventListener('click', exportAs((d) => {
+    if (!d.voltageMarks) { showNotification('No marks yet: nothing to export', 'error'); return ''; }
+    return d.voltage;
+  }, () => (IS_PRO ? 'speedpulserpro' : 'speedpulser') + '_voltage-cal_' + new Date().toISOString().slice(0, 10) + '.txt', 'Calibration exported'));
+  byId('exportPwmBtn').addEventListener('click', exportAs((d) => d.json,
+    () => calibrationFileName('_pwm-cal.txt'), 'Calibration exported'));
+  byId('exportCArrayBtn').addEventListener('click', exportAs((d) => d.carray,
+    () => calibrationFileName('_pwm-carray.txt'), 'Exported as a firmware preset'));
 
-async function calPost(body) {
-  const r = await fetch('/api/cal', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  });
-  if (!r.ok) {
-    const err = await r.json().catch(() => ({}));
-    showNotification('Cal error: ' + (err.error || ('HTTP ' + r.status)), 'error');
-    throw new Error(err.error || r.status);
-  }
-  return r.json();
-}
-
-async function refreshCalState() {
-  try {
-    const r = await fetch('/api/cal');
-    applyCalState(await r.json());
-  } catch (e) {
-    console.log('Error fetching cal state:', e);
-  }
-}
-
-async function calJog(delta) {
-  try {
-    const s = await calPost({ op: 'jog', delta });
-    updateCalDutyReadout(s.duty);
-  } catch (e) { /* already notified */ }
-}
-
-async function calCapture() {
-  try {
-    const s = await calPost({ op: 'addPoint', speed: calSelectedSpeed });
-    applyCalState(s);
-    showNotification('Captured ' + calSelectedSpeed + ' @ duty ' + s.duty);
-  } catch (e) { /* already notified */ }
-}
-
-function updateCalDutyReadout(duty) {
-  duty = duty || 0;
-  const nowEl = document.getElementById('calDutyNow');
-  if (!nowEl) return;
-  nowEl.textContent = duty;
-  const pctEl = document.getElementById('calDutyPct');
-  const capDutyEl = document.getElementById('calCaptureDuty');
-  if (pctEl) pctEl.textContent = (duty / CAL_PWM_MAX * 100).toFixed(1);
-  if (capDutyEl) capDutyEl.textContent = duty;
-}
-
-function applyCalState(state) {
-  if (!state) return;
-  updateCalDutyReadout(state.duty);
-
-  const unit = state.unit === 'mph' ? 'mph' : 'km/h';
-  const unitEl = document.getElementById('calUnitLabel');
-  if (unitEl) unitEl.textContent = unit;
-
-  // Mirror the firmware's runtime cluster unit onto both MPH toggles.
-  if (typeof state.convertToMPH === 'boolean') applyMphState(state.convertToMPH);
-
-  // Name (don't clobber while the user is editing it)
-  const nameEl = document.getElementById('calName');
-  if (nameEl && document.activeElement !== nameEl) nameEl.value = state.name || '';
-
-  buildCalChips(state.maxSpeed || 200);
-  renderCalPoints(state.points || []);
-  lastCalPointCount = state.count ?? (state.points || []).length;
-  scheduleCalDraw();
-}
-
-function buildCalChips(maxSpeed) {
-  const chipMax = Math.max(maxSpeed || 0, CAL_CHIP_MAX);
-  if (chipMax === calChipsMaxSpeed) return;
-  calChipsMaxSpeed = chipMax;
-  const grid = document.getElementById('calTargetChips');
-  if (!grid) return;
-  grid.innerHTML = '';
-  for (let s = 0; s <= chipMax; s += 10) {
-    const chip = document.createElement('button');
-    chip.className = 'chip';
-    chip.textContent = s;
-    chip.dataset.speed = s;
-    chip.addEventListener('click', () => setCalTarget(s, true));
-    grid.appendChild(chip);
-  }
-  highlightCalChip();
-}
-
-function setCalTarget(speed, fromChip) {
-  calSelectedSpeed = speed;
-  const capEl = document.getElementById('calCaptureSpeed');
-  if (capEl) capEl.textContent = speed;
-  const input = document.getElementById('calTargetSpeed');
-  if (input && fromChip) input.value = speed;
-  highlightCalChip();
-}
-
-function highlightCalChip() {
-  document.querySelectorAll('#calTargetChips .chip').forEach((c) => {
-    c.classList.toggle('active', parseInt(c.dataset.speed, 10) === calSelectedSpeed);
+  const fileInput = byId('importFile');
+  byId('importBtn').addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', () => {
+    const file = fileInput.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const text = String(reader.result || '').trim();
+      byId('calibrationText').value = text;
+      if (!text) return;
+      // One importer for both kinds: the unit reads the file's "type".
+      const result = await calibrationOp('import', { json: text });
+      if (!result.ok) return;
+      if (result.data.kind === 'voltage') {
+        applyDriveTable(result.data);
+        loadSettings(); // Nominal PWM / rails / units came with the file
+        showNotification('Calibration imported (' + (result.data.driveCal || []).length + ' marks)');
+      } else {
+        afterCustomCalibrationChange(result, 'PWM calibration imported');
+      }
+    };
+    reader.readAsText(file);
+    fileInput.value = ''; // the same file can be picked again
   });
 }
 
-function renderCalPoints(points) {
-  const list = document.getElementById('calPointsList');
-  if (!list) return;
-  if (!points.length) {
-    list.innerHTML = '<p class="hint">No points captured yet.</p>';
-    return;
+// ===================================================================
+// Diagnostics: start-up log
+// ===================================================================
+function startupKindClass(kind) {
+  switch (kind) {
+    case 'powerOn': return 'ok';
+    case 'software': return '';
+    case 'brownout': case 'crash': case 'watchdog': return 'bad';
+    default: return 'warn';
   }
-  let html = '<div class="cal-point-head"><span>Speed</span><span>Duty</span><span></span></div>';
-  points.forEach((p, i) => {
-    html += '<div class="cal-point-row">' +
-              '<span>' + p.speed + '</span>' +
-              '<span>' + p.duty + '</span>' +
-              '<button class="cal-del" data-index="' + i + '">✕</button>' +
-            '</div>';
+}
+
+async function loadStartupLog() {
+  if (!byId('startupLogCard')) return;
+  const { ok, data } = await api('/api/resetlog');
+  if (!ok) return;
+  setPill(byId('startupReasonPill'), startupKindClass(data.reasonKind), data.reason || '--');
+  const counts = data.counts || {};
+  setText('startupBoots', data.boots ?? '--');
+  setText('startupShortRuns', data.shortRuns ?? '--');
+  setText('startupBrownouts', counts.brownout ?? '--');
+  setText('startupCrashes', (counts.crash ?? 0) + (counts.watchdog ?? 0));
+  setText('startupDetail', (data.reasonDetail || '') + ' Running ' + (data.uptime ?? 0) + ' s.');
+  const stableSecs = data.stableSecs ?? 10;
+  const history = Array.isArray(data.history) ? data.history : [];
+  byId('startupRows').innerHTML = history.length ? history.map((h) => {
+    const cls = startupKindClass(h.kind);
+    const ran = h.ranOk ? 'Yes' : (h.current ? 'Running…' : '<span class="pill bad">No (&lt;' + stableSecs + ' s)</span>');
+    return '<tr><td>#' + h.boot + (h.current ? ' (now)' : '') + '</td><td><span class="pill' +
+      (cls ? ' ' + cls : '') + '">' + h.reason + '</span></td><td>' + ran + '</td></tr>';
+  }).join('') : '<tr><td colspan="3" class="muted">Nothing logged yet.</td></tr>';
+}
+
+function initStartupLog() {
+  if (!byId('startupLogCard')) return;
+  byId('startupRefreshBtn').addEventListener('click', loadStartupLog);
+  byId('startupClearBtn').addEventListener('click', async () => {
+    if (!confirm('Clear the start-up log? It restarts from this start.')) return;
+    if ((await runAction('clearResetLog')).ok) showNotification('Start-up log cleared');
+    loadStartupLog();
   });
-  list.innerHTML = html;
-  list.querySelectorAll('.cal-del').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const index = parseInt(btn.dataset.index, 10);
-      calPost({ op: 'deletePoint', index }).then(applyCalState).catch(() => {});
-    });
-  });
 }
 
-// Refresh the Configuration dropdown so the custom slot appears/updates,
-// then select it so the user can see it is active.
-function refreshCalibrationsSelect() {
-  fetchCalibrations().then(() => {
-    const sel = document.getElementById('motorCalibration');
-    if (sel && [...sel.options].some((o) => o.value === '200')) {
-      sel.value = '200';
-    }
-  });
+// ===================================================================
+// Dashboard chart: legacy calibration curve, or the voltage board's live strip chart
+// ===================================================================
+let calibrationCurve = null;   // /api/calcurve: { speed:[], duty:[], anchorSpeed:[], anchorDuty:[] }
+let chartPoint = null;         // DevKit: { duty, speed } now
+let chartDrawPending = false;
+const CHART_HISTORY = 120;     // S3 board: 30 s at 250 ms
+let chartHistory = [];         // [{ target, measured, drive, pwm }]
+const CHART_COLOURS = { target: '#00D9FF', measured: '#2EA043', drive: '#FF6B35', pwm: '#A371F7' };
+
+function legendItem(colour, label, kind, axis) {
+  return '<span class="legend-item"><span class="legend-swatch ' + kind + '" style="--sw:' + colour + '"></span>' +
+    label + (axis ? ' <small>(' + axis + ')</small>' : '') + '</span>';
 }
 
-// ===== CALIBRATION CURVE GRAPH =====
-let calCurveData = null;          // { speed:[], duty:[], pwmMax, maxSpeed } from /api/calcurve
-let calCurrentPoint = null;       // { duty, speed } live operating point
-let calDrawPending = false;
-
-async function fetchCalCurve() {
-  try {
-    const r = await fetch('/api/calcurve');
-    calCurveData = await r.json();
-  } catch (e) {
-    console.log('Error fetching cal curve:', e);
-  }
-  scheduleCalDraw();
+function updateChartChrome() {
+  setText('chartTitle', isVoltageBoard ? 'Live Control' : 'Calibration Curve');
+  byId('chartLegend').innerHTML = isVoltageBoard
+    ? legendItem(CHART_COLOURS.target, 'Needle target', 'dash', 'left') +
+      legendItem(CHART_COLOURS.measured, 'Motor speed', 'line', 'left') +
+      legendItem(CHART_COLOURS.drive, 'Drive', 'line', 'right %') +
+      legendItem(CHART_COLOURS.pwm, 'PWM', 'line', 'right %')
+    : legendItem(themeColour('--accent', '#24d1c4'), 'Calibration curve', 'line') +
+      legendItem(themeColour('--ok', '#3fd07f'), 'Calibration points', 'dot') +
+      legendItem(themeColour('--accent-2', '#ffb02e'), 'Now', 'dot');
+  scheduleChartDraw();
 }
 
-function setCalCurrentPoint(duty, speed) {
-  calCurrentPoint = { duty: Number(duty) || 0, speed: Number(speed) || 0 };
-  scheduleCalDraw();
+function themeColour(name, fallback) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
 }
 
-// Interpolate the curve's speed at a given hardware duty (used in cal mode,
-// where the true achieved speed isn't reported by the firmware).
+async function loadCalCurve() {
+  if (isVoltageBoard) return;
+  const { ok, data } = await api('/api/calcurve');
+  if (ok) calibrationCurve = data;
+  scheduleChartDraw();
+}
+
+function setChartPoint(duty, speed) {
+  chartPoint = { duty: Number(duty) || 0, speed: Number(speed) || 0 };
+  scheduleChartDraw();
+}
+
+function pushChartSample(sample) {
+  chartHistory.push(sample);
+  if (chartHistory.length > CHART_HISTORY) chartHistory.shift();
+  scheduleChartDraw();
+}
+
+// The curve's speed at a duty (DevKit Calibration Mode: the needle's speed isn't known).
 function curveSpeedAt(duty) {
-  if (!calCurveData || !Array.isArray(calCurveData.duty) || calCurveData.duty.length < 2) return 0;
-  const d = calCurveData.duty, s = calCurveData.speed;
+  if (!calibrationCurve || !Array.isArray(calibrationCurve.duty) || calibrationCurve.duty.length < 2) return 0;
+  const d = calibrationCurve.duty, s = calibrationCurve.speed;
   if (duty <= d[0]) return s[0];
   for (let i = 1; i < d.length; i++) {
     if (duty <= d[i]) {
       const span = d[i] - d[i - 1];
-      const frac = span > 0 ? (duty - d[i - 1]) / span : 0;
-      return Math.round(s[i - 1] + frac * (s[i] - s[i - 1]));
+      return Math.round(s[i - 1] + (span > 0 ? (duty - d[i - 1]) / span : 0) * (s[i] - s[i - 1]));
     }
   }
   return s[s.length - 1];
 }
 
-// Coalesce redraws to one per animation frame (the status poll fires often).
-function scheduleCalDraw() {
-  if (calDrawPending) return;
-  calDrawPending = true;
-  requestAnimationFrame(() => { calDrawPending = false; drawCalCurve(); });
+function scheduleChartDraw() {
+  if (chartDrawPending) return;
+  chartDrawPending = true;
+  requestAnimationFrame(() => {
+    chartDrawPending = false;
+    if (isVoltageBoard) drawLiveChart(); else drawCalibrationCurve();
+  });
 }
 
-function drawCalCurve() {
-  const canvas = document.getElementById('calCurveCanvas');
-  if (!canvas || !canvas.clientWidth) return;   // not laid out yet (hidden tab)
-
+// Size the canvas for the screen; null while its tab is hidden.
+function prepareCanvas() {
+  const canvas = byId('chartCanvas');
+  if (!canvas || !canvas.clientWidth) return null;
   const dpr = window.devicePixelRatio || 1;
-  const cssW = canvas.clientWidth;
-  const cssH = Math.round(cssW * 0.6);
-  canvas.style.height = cssH + 'px';
-  if (canvas.width !== Math.round(cssW * dpr) || canvas.height !== Math.round(cssH * dpr)) {
-    canvas.width = Math.round(cssW * dpr);
-    canvas.height = Math.round(cssH * dpr);
+  const width = canvas.clientWidth;
+  const height = Math.round(width * 0.6);
+  canvas.style.height = height + 'px';
+  if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
   }
-
   const ctx = canvas.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, cssW, cssH);
+  ctx.clearRect(0, 0, width, height);
+  ctx.font = '10px -apple-system, "Segoe UI", Arial, sans-serif';
+  return { ctx, width, height, line: themeColour('--line', '#24303b'), muted: themeColour('--muted', '#7d8ea0') };
+}
 
-  const style = getComputedStyle(document.documentElement);
-  const col = (name, fallback) => (style.getPropertyValue(name).trim() || fallback);
-  const primary = col('--primary', '#00D9FF');
-  const secondary = col('--secondary', '#FF6B35');
-  const border = col('--border', '#30363D');
-  const textDim = col('--text-dim', '#8B949E');
-
+function drawCalibrationCurve() {
+  const c = prepareCanvas();
+  if (!c) return;
+  const { ctx, width, height } = c;
   const padL = 44, padR = 12, padT = 12, padB = 30;
-  const plotW = cssW - padL - padR;
-  const plotH = cssH - padT - padB;
-
-  const pwmMax = (calCurveData && calCurveData.pwmMax) || 384;
-  // Stretch the x-axis across only the duty range the calibration actually uses
-  // (the curve tops out well below full-scale), so the trace fills the width.
-  let dutyMax = 1;
-  if (calCurveData && Array.isArray(calCurveData.duty) && calCurveData.duty.length) {
-    dutyMax = calCurveData.duty[calCurveData.duty.length - 1] || 1;
-  }
-  if (calCurrentPoint && calCurrentPoint.duty > dutyMax) dutyMax = calCurrentPoint.duty;
+  const plotW = width - padL - padR, plotH = height - padT - padB;
+  const curve = calibrationCurve;
+  let dutyMax = curve && curve.duty && curve.duty.length ? (curve.duty[curve.duty.length - 1] || 1) : 1;
+  if (chartPoint && chartPoint.duty > dutyMax) dutyMax = chartPoint.duty;
   dutyMax = Math.max(1, Math.ceil(dutyMax / 100) * 100);
-
-  let speedMax = (calCurveData && calCurveData.maxSpeed) || 200;
-  if (calCurrentPoint && calCurrentPoint.speed > speedMax) {
-    speedMax = Math.ceil(calCurrentPoint.speed / 20) * 20;   // grow if the live point overshoots
-  }
-  if (speedMax < 1) speedMax = 1;
-
+  let speedMax = dialMaxSpeed();
+  if (chartPoint && chartPoint.speed > speedMax) speedMax = Math.ceil(chartPoint.speed / 20) * 20;
   const xOf = (duty) => padL + (Math.max(0, Math.min(duty, dutyMax)) / dutyMax) * plotW;
   const yOf = (speed) => padT + plotH - (Math.max(0, Math.min(speed, speedMax)) / speedMax) * plotH;
 
-  ctx.font = '10px -apple-system, "Segoe UI", Arial, sans-serif';
-  ctx.strokeStyle = border;
-  ctx.lineWidth = 1;
-
-  // Horizontal grid (speed) + Y labels
-  ctx.fillStyle = textDim;
+  ctx.strokeStyle = c.line;
+  ctx.fillStyle = c.muted;
   ctx.textAlign = 'right';
   ctx.textBaseline = 'middle';
-  const ySteps = 4;
-  for (let i = 0; i <= ySteps; i++) {
-    const sp = (speedMax / ySteps) * i;
-    const y = yOf(sp);
-    ctx.globalAlpha = 0.35;
-    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(cssW - padR, y); ctx.stroke();
-    ctx.globalAlpha = 1;
-    ctx.fillText(String(Math.round(sp)), padL - 6, y);
+  for (let i = 0; i <= 4; i++) {
+    const speed = speedMax / 4 * i, y = yOf(speed);
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(width - padR, y); ctx.stroke();
+    ctx.fillText(String(Math.round(speed)), padL - 6, y);
   }
-
-  // Vertical grid (duty %) + X labels
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
-  const xSteps = 5;
-  for (let i = 0; i <= xSteps; i++) {
-    const x = padL + (plotW / xSteps) * i;
-    ctx.globalAlpha = 0.35;
+  for (let i = 0; i <= 5; i++) {
+    const x = padL + plotW / 5 * i;
     ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, padT + plotH); ctx.stroke();
-    ctx.globalAlpha = 1;
-    ctx.fillText(String(Math.round((i / xSteps) * dutyMax)), x, padT + plotH + 6);
+    ctx.fillText(String(Math.round(i / 5 * dutyMax)), x, padT + plotH + 6);
   }
-
-  // Axis title
-  ctx.fillStyle = textDim;
-  ctx.textAlign = 'center';
   ctx.textBaseline = 'bottom';
-  ctx.fillText('Motor duty', padL + plotW / 2, cssH);
+  ctx.fillText('Motor duty', padL + plotW / 2, height);
 
-  // Faint calibration curve
-  if (calCurveData && Array.isArray(calCurveData.duty) && calCurveData.duty.length > 1) {
-    ctx.strokeStyle = primary;
-    ctx.globalAlpha = 0.5;
+  if (curve && curve.duty && curve.duty.length > 1) {
+    ctx.strokeStyle = themeColour('--accent', '#24d1c4');
+    ctx.globalAlpha = 0.6;
     ctx.lineWidth = 2;
     ctx.beginPath();
-    for (let i = 0; i < calCurveData.duty.length; i++) {
-      const x = xOf(calCurveData.duty[i]);
-      const y = yOf(calCurveData.speed[i]);
-      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-    }
+    curve.duty.forEach((duty, i) => { const x = xOf(duty), y = yOf(curve.speed[i]); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); });
     ctx.stroke();
     ctx.globalAlpha = 1;
+    ctx.fillStyle = themeColour('--ok', '#3fd07f');
+    (curve.anchorDuty || []).forEach((duty, i) => {
+      ctx.beginPath(); ctx.arc(xOf(duty), yOf(curve.anchorSpeed[i]), 3.5, 0, Math.PI * 2); ctx.fill();
+    });
   }
-
-  // Anchor marks of the ACTIVE calibration — always sit on the blue curve.
-  if (calCurveData && Array.isArray(calCurveData.anchorDuty) && calCurveData.anchorDuty.length) {
-    ctx.fillStyle = col('--success', '#2EA043');
-    for (let i = 0; i < calCurveData.anchorDuty.length; i++) {
-      ctx.beginPath();
-      ctx.arc(xOf(calCurveData.anchorDuty[i]), yOf(calCurveData.anchorSpeed[i]), 3.5, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }
-
-  // Current operating point + crosshair
-  if (calCurrentPoint) {
-    const x = xOf(calCurrentPoint.duty);
-    const y = yOf(calCurrentPoint.speed);
-
-    ctx.strokeStyle = secondary;
+  if (chartPoint) {
+    const x = xOf(chartPoint.duty), y = yOf(chartPoint.speed), colour = themeColour('--accent-2', '#ffb02e');
+    ctx.strokeStyle = colour;
     ctx.globalAlpha = 0.5;
     ctx.setLineDash([4, 4]);
     ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(x, y); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(x, padT + plotH); ctx.lineTo(x, y); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(x, y); ctx.lineTo(x, padT + plotH); ctx.stroke();
     ctx.setLineDash([]);
     ctx.globalAlpha = 1;
-
-    ctx.fillStyle = secondary;
-    ctx.beginPath();
-    ctx.arc(x, y, 5, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-
-    const label = calCurrentPoint.speed + ' @ ' + Math.round(calCurrentPoint.duty) + ' duty';
+    ctx.fillStyle = colour;
+    ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fill();
     ctx.font = '11px -apple-system, "Segoe UI", Arial, sans-serif';
-    ctx.fillStyle = secondary;
-    ctx.textBaseline = 'bottom';
-    const rightSide = x > padL + plotW * 0.7;
-    ctx.textAlign = rightSide ? 'right' : 'left';
-    ctx.fillText(label, rightSide ? x - 8 : x + 8, y - 6);
+    const right = x > padL + plotW * 0.7;
+    ctx.textAlign = right ? 'right' : 'left';
+    ctx.fillText(chartPoint.speed + ' ' + dialUnit + ' @ ' + Math.round(chartPoint.duty), right ? x - 8 : x + 8, y - 6);
   }
+}
+
+function drawLiveChart() {
+  const c = prepareCanvas();
+  if (!c) return;
+  const { ctx, width, height } = c;
+  const padL = 40, padR = 40, padT = 12, padB = 22;
+  const plotW = width - padL - padR, plotH = height - padT - padB;
+  let speedMax = 20;
+  chartHistory.forEach((s) => { speedMax = Math.max(speedMax, s.target || 0, s.measured || 0); });
+  speedMax = Math.ceil(speedMax / 20) * 20;
+  const xOf = (i) => padL + (i / (CHART_HISTORY - 1)) * plotW;
+  const ySpeed = (v) => padT + plotH - (Math.max(0, Math.min(v, speedMax)) / speedMax) * plotH;
+  const yPercent = (v) => padT + plotH - (Math.max(0, Math.min(v, 100)) / 100) * plotH;
+
+  ctx.strokeStyle = c.line;
+  ctx.fillStyle = c.muted;
+  ctx.textBaseline = 'middle';
+  for (let i = 0; i <= 4; i++) {
+    const y = padT + plotH / 4 * i;
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(width - padR, y); ctx.stroke();
+    ctx.textAlign = 'right';
+    ctx.fillText(String(Math.round(speedMax * (1 - i / 4))), padL - 6, y);
+    ctx.textAlign = 'left';
+    ctx.fillText(Math.round(100 * (1 - i / 4)) + '%', width - padR + 6, y);
+  }
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  ctx.fillText('time →  (' + dialUnit + ' left)', padL + plotW / 2, height);
+  if (!chartHistory.length) return;
+
+  const base = CHART_HISTORY - chartHistory.length; // newest sample at the right edge
+  const plot = (key, colour, yMap, dashed) => {
+    ctx.strokeStyle = colour;
+    ctx.lineWidth = 2;
+    ctx.setLineDash(dashed ? [4, 3] : []);
+    ctx.beginPath();
+    let drawing = false;
+    chartHistory.forEach((sample, j) => {
+      const v = sample[key];
+      if (v === null || v === undefined || Number.isNaN(v)) { drawing = false; return; }
+      if (drawing) ctx.lineTo(xOf(base + j), yMap(v)); else { ctx.moveTo(xOf(base + j), yMap(v)); drawing = true; }
+    });
+    ctx.stroke();
+    ctx.setLineDash([]);
+  };
+  plot('drive', CHART_COLOURS.drive, yPercent, false);
+  plot('pwm', CHART_COLOURS.pwm, yPercent, false);
+  plot('target', CHART_COLOURS.target, ySpeed, true);
+  plot('measured', CHART_COLOURS.measured, ySpeed, false);
+}
+
+// ===================================================================
+// Dashboard dial gauges (Display Options)
+// ===================================================================
+const GAUGE_TILES = [
+  { id: 'liveInputSpeed', label: 'Speed', unit: () => 'km/h', max: () => Number(settings.maxSpeed) || 200 },
+  { id: 'liveNeedleTarget', label: 'Needle target', unit: () => dialUnit, max: dialMaxSpeed },
+  { id: 'liveRpm', label: 'RPM', unit: () => 'rpm', max: () => Number(settings.clusterRPMLimit) || 7000 },
+  { id: 'liveMeasuredSpeed', label: 'Motor speed', unit: () => dialUnit, max: dialMaxSpeed, voltageOnly: true },
+];
+// The tiles this page has (SpeedPulser has no RPM tile), and Motor speed only on a
+// board with motor feedback (it was offered, and ticked by default, on legacy boards).
+const gaugeTiles = () => GAUGE_TILES.filter((tile) => byId(tile.id) && (!tile.voltageOnly || isVoltageBoard));
+const GAUGE_RADIUS = 40;
+const GAUGE_CIRCUMFERENCE = 2 * Math.PI * GAUGE_RADIUS;
+const GAUGE_ARC = GAUGE_CIRCUMFERENCE * 0.75;
+
+function dialMaxSpeed() {
+  const kph = Number(settings.maxSpeed) || 200;
+  return settings.clusterInMph ? Math.round(kph * 0.621371) : kph;
+}
+
+function initGaugeOptions() {
+  const prefs = loadPrefs();
+  const chosen = new Set(prefs.gauges || ['liveInputSpeed', byId('liveRpm') ? 'liveRpm' : 'liveMeasuredSpeed']);
+  const host = byId('gaugeOptions');
+  gaugeTiles().forEach((tile) => {
+    const label = document.createElement('label');
+    label.className = 'tile-opt';
+    label.innerHTML = '<input type="checkbox"' + (chosen.has(tile.id) ? ' checked' : '') + '><span>' + tile.label + '</span>';
+    label.querySelector('input').addEventListener('change', (event) => {
+      if (event.target.checked) chosen.add(tile.id); else chosen.delete(tile.id);
+      const p = loadPrefs();
+      p.gauges = [...chosen];
+      savePrefs(p);
+      applyGaugeChoice(chosen);
+    });
+    host.appendChild(label);
+  });
+  applyGaugeChoice(chosen);
+}
+
+function applyGaugeChoice(chosen) {
+  gaugeTiles().forEach((tile) => {
+    const box = byId(tile.id).closest('.gauge');
+    if (!box.querySelector('.tile-gauge')) {
+      const wrap = document.createElement('div');
+      wrap.className = 'tile-gauge';
+      wrap.innerHTML = '<svg viewBox="0 0 100 100" aria-hidden="true">' +
+        '<circle class="tg-track" cx="50" cy="50" r="' + GAUGE_RADIUS + '" transform="rotate(135 50 50)" stroke-dasharray="' +
+        GAUGE_ARC.toFixed(2) + ' ' + (GAUGE_CIRCUMFERENCE - GAUGE_ARC).toFixed(2) + '"/>' +
+        '<circle class="tg-fill" cx="50" cy="50" r="' + GAUGE_RADIUS + '" transform="rotate(135 50 50)" stroke-dasharray="0 ' +
+        GAUGE_CIRCUMFERENCE.toFixed(2) + '"/>' +
+        '<text class="tg-val" x="50" y="52" text-anchor="middle">--</text>' +
+        '<text class="tg-unit" x="50" y="66" text-anchor="middle"></text>' +
+        '<text class="tg-min" x="24" y="92" text-anchor="middle">0</text>' +
+        '<text class="tg-max" x="76" y="92" text-anchor="middle">0</text></svg>';
+      box.appendChild(wrap);
+    }
+    box.classList.toggle('as-gauge', chosen.has(tile.id));
+  });
+  applyGaugeRanges();
+}
+
+function applyGaugeRanges() {
+  gaugeTiles().forEach((tile) => {
+    const box = byId(tile.id).closest('.gauge');
+    const unit = box.querySelector('.tg-unit'), max = box.querySelector('.tg-max');
+    if (unit) unit.textContent = tile.unit();
+    if (max) max.textContent = tile.max();
+  });
+  updateGauges();
+}
+
+function updateGauges() {
+  gaugeTiles().forEach((tile) => {
+    const value = byId(tile.id);
+    const box = value.closest('.gauge');
+    if (!box.classList.contains('as-gauge')) return;
+    const number = parseFloat(value.textContent);
+    const valueText = box.querySelector('.tg-val'), fill = box.querySelector('.tg-fill');
+    if (!valueText || !fill) return;
+    valueText.textContent = Number.isNaN(number) ? '--' : value.textContent;
+    const fraction = Number.isNaN(number) ? 0 : Math.max(0, Math.min(1, number / (tile.max() || 1)));
+    fill.style.strokeDasharray = (GAUGE_ARC * fraction).toFixed(2) + ' ' + GAUGE_CIRCUMFERENCE.toFixed(2);
+  });
 }
