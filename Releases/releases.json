@@ -1,11 +1,54 @@
 {
   "product": "SpeedPulserPro",
-  "latest": "5.04",
+  "latest": "5.09",
   "latestByBoard": {
-    "esp32": "5.04",
-    "esp32s3": "5.04"
+    "esp32": "5.09",
+    "esp32s3": "5.09"
   },
   "releases": [
+    {
+      "version": "5.09",
+      "channel": "stable",
+      "date": "2026-11-17",
+      "ota": true,
+      "notes": "Motor side matched to SpeedPulser V5: steadier motor-feedback reading, Minimum Rail setting, Auto Fill drive calibration (capture the top mark by eye, the rest is measured, up to 20 marks, Restore Previous), even needle sweep through the calibration. Safety audit: refused out-of-range settings, OTA only when stopped, tests end when WiFi sleeps, rail over-voltage trip. Speed inputs set as pulses per km. GPS/CAN/UDS fixes. Web UI rebuilt in Setup steps and shared with SpeedPulser; start-up log on Advanced. Saved settings are kept.",
+      "boards": {
+        "esp32": {
+          "firmware": {
+            "path": "V5.09/firmware.bin",
+            "size": 1222688,
+            "sha256": "804cd0c0e58209f87f86c7fb173a60d23cea903d7cb8adeeca9e98fbf882522c"
+          },
+          "filesystem": {
+            "path": "V5.09/littlefs.bin",
+            "size": 655360,
+            "sha256": "ea54d0c73296af596803997e73ed7be01f4658ceb117ab7be3796b19602f6bcf"
+          }
+        },
+        "esp32s3": {
+          "firmware": {
+            "path": "V5.09-S3/firmware.bin",
+            "size": 1234000,
+            "sha256": "a1fc85100a4d92f2bb96e5c1fa9a223c6e7c8d3fbf3e652826c07447b07ca8d6"
+          },
+          "filesystem": {
+            "path": "V5.09-S3/littlefs.bin",
+            "size": 1048576,
+            "sha256": "86ef464d3abcf3f1d8cf3c91d4a2bb2567c2b77b6aa14c5c3166842a58e4e32e"
+          }
+        }
+      },
+      "firmware": {
+        "path": "V5.09/firmware.bin",
+        "size": 1222688,
+        "sha256": "804cd0c0e58209f87f86c7fb173a60d23cea903d7cb8adeeca9e98fbf882522c"
+      },
+      "filesystem": {
+        "path": "V5.09/littlefs.bin",
+        "size": 655360,
+        "sha256": "ea54d0c73296af596803997e73ed7be01f4658ceb117ab7be3796b19602f6bcf"
+      }
+    },
     {
       "version": "5.04",
       "channel": "stable",
