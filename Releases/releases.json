@@ -1,11 +1,54 @@
 {
   "product": "SpeedPulserPro",
-  "latest": "5.09",
+  "latest": "5.10",
   "latestByBoard": {
-    "esp32": "5.09",
-    "esp32s3": "5.09"
+    "esp32": "5.10",
+    "esp32s3": "5.10"
   },
   "releases": [
+    {
+      "version": "5.10",
+      "channel": "stable",
+      "date": "2026-11-22",
+      "ota": true,
+      "notes": "Phone touch UI: no long-press copy menu, scrolling never moves a slider, and a swipe over the chart scrolls the page. Calibration Curve: a full-screen button (sideways on an upright phone, pinch zoom); DevKit board with a custom calibration in Calibration Mode: hold a point and slide it up or down to change its speed (saved when you let go).",
+      "boards": {
+        "esp32": {
+          "firmware": {
+            "path": "V5.10/firmware.bin",
+            "size": 1223392,
+            "sha256": "d9c661a4312b32cfe08d754fe53cb8e0b23f4ebf8f7f716ad68fdb98c93823d0"
+          },
+          "filesystem": {
+            "path": "V5.10/littlefs.bin",
+            "size": 655360,
+            "sha256": "edaf801069d573fb49d001a03a503d5ccf96c93404670875b0c27b287252f861"
+          }
+        },
+        "esp32s3": {
+          "firmware": {
+            "path": "V5.10-S3/firmware.bin",
+            "size": 1234032,
+            "sha256": "6f8c5c742764822a4dab92d975ed3ea4e6be5fbfb4e0778989b2d51320c88e4f"
+          },
+          "filesystem": {
+            "path": "V5.10-S3/littlefs.bin",
+            "size": 1048576,
+            "sha256": "75505f72cdf28cbafa626c58b2a595de6f9678b0d9eaf59f679cb39ff65300d8"
+          }
+        }
+      },
+      "firmware": {
+        "path": "V5.10/firmware.bin",
+        "size": 1223392,
+        "sha256": "d9c661a4312b32cfe08d754fe53cb8e0b23f4ebf8f7f716ad68fdb98c93823d0"
+      },
+      "filesystem": {
+        "path": "V5.10/littlefs.bin",
+        "size": 655360,
+        "sha256": "edaf801069d573fb49d001a03a503d5ccf96c93404670875b0c27b287252f861"
+      }
+    },
     {
       "version": "5.09",
       "channel": "stable",
